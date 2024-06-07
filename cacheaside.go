@@ -3,8 +3,8 @@ package redcache
 import (
 	"context"
 	"errors"
-	"redcache/util/mapsx"
-	"redcache/util/syncx"
+	"redcache/internal/mapsx"
+	syncx2 "redcache/internal/syncx"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +15,7 @@ import (
 
 type CacheAside struct {
 	client    rueidis.Client
-	locks     syncx.Map[string, chan struct{}]
+	locks     syncx2.Map[string, chan struct{}]
 	serverTTL time.Duration
 }
 
@@ -96,6 +96,10 @@ retry:
 
 func (rca *CacheAside) Del(ctx context.Context, key string) error {
 	return rca.client.Do(ctx, rca.client.B().Del().Key(key).Build()).Error()
+}
+
+func (rca *CacheAside) DelMulti(ctx context.Context, keys... string) error {
+	return rca.client.Do(ctx, rca.client.B().Del().Key(keys...).Build()).Error()
 }
 
 var errNotFound = errors.New("not found")
@@ -208,7 +212,7 @@ retry:
 	}
 
 	if len(waitLock) > 0 {
-		err = syncx.WaitForAll(ctx, mapsx.Values(waitLock))
+		err = syncx2.WaitForAll(ctx, mapsx.Values(waitLock))
 		if err != nil {
 			return nil, err
 		}
@@ -237,17 +241,15 @@ func (rca *CacheAside) tryGetMulti(ctx context.Context, keys []string) (map[stri
 		return nil, err
 	} else if err == nil && len(resps) != 0 {
 		for i, resp := range resps {
-			if err == nil {
-				val, err2 := resp.ToString()
-				if err2 != nil && rueidis.IsRedisNil(err2) {
-					continue
-				} else if err2 != nil {
-					return nil, err2
-				}
-				if !strings.HasPrefix(val, prefix) {
-					res[keys[i]] = val
-					continue
-				}
+			val, err2 := resp.ToString()
+			if err2 != nil && rueidis.IsRedisNil(err2) {
+				continue
+			} else if err2 != nil {
+				return nil, err2
+			}
+			if !strings.HasPrefix(val, prefix) {
+				res[keys[i]] = val
+				continue
 			}
 		}
 	}
