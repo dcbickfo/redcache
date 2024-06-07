@@ -3,10 +3,10 @@ package redcache
 import (
 	"context"
 	"fmt"
-	"redcache/internal/mapsx"
 	"testing"
 	"time"
 
+	"github.com/dcbickfo/redcache/internal/mapsx"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
@@ -182,7 +182,7 @@ func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 
 	innerClient := client.client
 	lockVal := prefix + uuid.New().String()
-	err := innerClient.Do(ctx, innerClient.B().Set().Key(keys[0]).Value(lockVal).Nx().Get().Px(time.Millisecond * 100).Build()).Error()
+	err := innerClient.Do(ctx, innerClient.B().Set().Key(keys[0]).Value(lockVal).Nx().Get().Px(time.Millisecond*100).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
 	res, err := client.GetMulti(ctx, keys, cb)
@@ -201,7 +201,6 @@ func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 	require.False(t, called)
 }
 
-
 func TestCacheAside_Del(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.client.Close()
@@ -211,7 +210,7 @@ func TestCacheAside_Del(t *testing.T) {
 	val := "val:" + uuid.New().String()
 
 	innerClient := client.client
-	err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(val).Nx().Get().Px(time.Millisecond * 100).Build()).Error()
+	err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(val).Nx().Get().Px(time.Millisecond*100).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
 	err = innerClient.Do(ctx, innerClient.B().Get().Key(key).Build()).Error()
@@ -236,7 +235,7 @@ func TestCacheAside_DelMulti(t *testing.T) {
 
 	innerClient := client.client
 	for key, val := range keyAndVals {
-		err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(val).Nx().Get().Px(time.Millisecond * 100).Build()).Error()
+		err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(val).Nx().Get().Px(time.Millisecond*100).Build()).Error()
 		require.True(t, rueidis.IsRedisNil(err))
 	}
 
