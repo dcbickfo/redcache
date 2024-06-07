@@ -3,19 +3,19 @@ package redcache
 import (
 	"context"
 	"errors"
-	"redcache/internal/mapsx"
-	syncx2 "redcache/internal/syncx"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dcbickfo/redcache/internal/mapsx"
+	"github.com/dcbickfo/redcache/internal/syncx"
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 )
 
 type CacheAside struct {
 	client    rueidis.Client
-	locks     syncx2.Map[string, chan struct{}]
+	locks     syncx.Map[string, chan struct{}]
 	serverTTL time.Duration
 }
 
@@ -98,7 +98,7 @@ func (rca *CacheAside) Del(ctx context.Context, key string) error {
 	return rca.client.Do(ctx, rca.client.B().Del().Key(key).Build()).Error()
 }
 
-func (rca *CacheAside) DelMulti(ctx context.Context, keys... string) error {
+func (rca *CacheAside) DelMulti(ctx context.Context, keys ...string) error {
 	return rca.client.Do(ctx, rca.client.B().Del().Key(keys...).Build()).Error()
 }
 
@@ -212,7 +212,7 @@ retry:
 	}
 
 	if len(waitLock) > 0 {
-		err = syncx2.WaitForAll(ctx, mapsx.Values(waitLock))
+		err = syncx.WaitForAll(ctx, mapsx.Values(waitLock))
 		if err != nil {
 			return nil, err
 		}

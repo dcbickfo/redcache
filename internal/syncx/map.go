@@ -36,7 +36,7 @@ func (sm *Map[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 	return val.(V), loaded
 }
 
-func (sm *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool){
+func (sm *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	val, loaded := sm.m.LoadOrStore(key, value)
 	if val == nil {
 		var zero V
@@ -45,7 +45,7 @@ func (sm *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool){
 	return val.(V), loaded
 }
 
-func (sm *Map[K, V]) Range(f func(key K, value V) bool){
+func (sm *Map[K, V]) Range(f func(key K, value V) bool) {
 	sm.m.Range(func(key, value any) bool {
 		return f(key.(K), value.(V))
 	})

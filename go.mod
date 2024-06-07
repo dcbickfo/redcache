@@ -1,4 +1,4 @@
-module redcache
+module github.com/dcbickfo/redcache
 
 go 1.22.0
 

@@ -1,13 +1,14 @@
-package syncx
+package syncx_test
 
 import (
 	"testing"
 
+	"github.com/dcbickfo/redcache/internal/syncx"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestMap_CompareAndDelete(t *testing.T) {
-	var sm Map[string, int]
+	var sm syncx.Map[string, int]
 	key := "key"
 	value := 1
 	sm.Store(key, value)
@@ -20,7 +21,7 @@ func TestMap_CompareAndDelete(t *testing.T) {
 }
 
 func TestMap_CompareAndSwap(t *testing.T) {
-	var sm Map[string, int]
+	var sm syncx.Map[string, int]
 	key := "key"
 	oldValue := 1
 	newValue := 2
@@ -34,7 +35,7 @@ func TestMap_CompareAndSwap(t *testing.T) {
 }
 
 func TestMap_Delete(t *testing.T) {
-	var sm Map[string, int]
+	var sm syncx.Map[string, int]
 	key := "key"
 	value := 1
 	sm.Store(key, value)
@@ -46,7 +47,7 @@ func TestMap_Delete(t *testing.T) {
 }
 
 func TestMap_Load(t *testing.T) {
-	var sm Map[string, int]
+	var sm syncx.Map[string, int]
 	key := "key"
 	value := 1
 	sm.Store(key, value)
@@ -57,7 +58,7 @@ func TestMap_Load(t *testing.T) {
 }
 
 func TestMap_LoadAndDelete(t *testing.T) {
-	var sm Map[string, int]
+	var sm syncx.Map[string, int]
 	key := "key"
 	value := 1
 	sm.Store(key, value)
@@ -71,7 +72,7 @@ func TestMap_LoadAndDelete(t *testing.T) {
 }
 
 func TestMap_LoadOrStore(t *testing.T) {
-	var sm Map[string, int]
+	var sm syncx.Map[string, int]
 	key := "key"
 	initialValue := 1
 	newValue := 2
@@ -86,7 +87,7 @@ func TestMap_LoadOrStore(t *testing.T) {
 }
 
 func TestMap_Range(t *testing.T) {
-	var sm Map[string, int]
+	var sm syncx.Map[string, int]
 	key1 := "key1"
 	value1 := 1
 	key2 := "key2"
@@ -107,7 +108,7 @@ func TestMap_Range(t *testing.T) {
 }
 
 func TestMap_Store(t *testing.T) {
-	var sm Map[string, int]
+	var sm syncx.Map[string, int]
 	key := "key"
 	value := 1
 	sm.Store(key, value)
@@ -118,7 +119,7 @@ func TestMap_Store(t *testing.T) {
 }
 
 func TestMap_Swap(t *testing.T) {
-	var sm Map[string, int]
+	var sm syncx.Map[string, int]
 	key := "key"
 	initialValue := 1
 	newValue := 2
