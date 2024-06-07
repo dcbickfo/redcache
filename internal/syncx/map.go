@@ -6,7 +6,7 @@ type Map[K comparable, V any] struct {
 	m sync.Map
 }
 
-func (sm *Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
+func (sm *Map[K, V]) CompareAndDelete(key K, old V) bool {
 	return sm.m.CompareAndDelete(key, old)
 }
 
@@ -18,18 +18,30 @@ func (sm *Map[K, V]) Delete(key K) {
 	sm.m.Delete(key)
 }
 
-func (sm *Map[K, V]) Load(key K) (value V, ok bool) {
+func (sm *Map[K, V]) Load(key K) (V, bool) {
 	val, ok := sm.m.Load(key)
+	if val == nil {
+		var zero V
+		return zero, ok
+	}
 	return val.(V), ok
 }
 
 func (sm *Map[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 	val, loaded := sm.m.LoadAndDelete(key)
+	if val == nil {
+		var zero V
+		return zero, loaded
+	}
 	return val.(V), loaded
 }
 
 func (sm *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool){
 	val, loaded := sm.m.LoadOrStore(key, value)
+	if val == nil {
+		var zero V
+		return zero, loaded
+	}
 	return val.(V), loaded
 }
 
@@ -45,5 +57,9 @@ func (sm *Map[K, V]) Store(key K, value V) {
 
 func (sm *Map[K, V]) Swap(key K, value V) (previous V, loaded bool) {
 	prev, loaded := sm.m.Swap(key, value)
+	if prev == nil {
+		var zero V
+		return zero, loaded
+	}
 	return prev.(V), loaded
 }

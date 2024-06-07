@@ -3,6 +3,7 @@ package redcache
 import (
 	"context"
 	"fmt"
+	"redcache/internal/mapsx"
 	"testing"
 	"time"
 
@@ -181,7 +182,7 @@ func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 
 	innerClient := client.client
 	lockVal := prefix + uuid.New().String()
-	err := innerClient.Do(ctx, innerClient.B().Set().Key(keys[0]).Value(lockVal).Nx().Get().Px(time.Millisecond + 100).Build()).Error()
+	err := innerClient.Do(ctx, innerClient.B().Set().Key(keys[0]).Value(lockVal).Nx().Get().Px(time.Millisecond * 100).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
 	res, err := client.GetMulti(ctx, keys, cb)
@@ -198,4 +199,57 @@ func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
 	}
 	require.False(t, called)
+}
+
+
+func TestCacheAside_Del(t *testing.T) {
+	client := makeClient(t, addr)
+	defer client.client.Close()
+	ctx := context.Background()
+
+	key := "key:" + uuid.New().String()
+	val := "val:" + uuid.New().String()
+
+	innerClient := client.client
+	err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(val).Nx().Get().Px(time.Millisecond * 100).Build()).Error()
+	require.True(t, rueidis.IsRedisNil(err))
+
+	err = innerClient.Do(ctx, innerClient.B().Get().Key(key).Build()).Error()
+	require.NoErrorf(t, err, "expected no error, got %v", err)
+
+	err = client.Del(ctx, key)
+	require.NoError(t, err)
+
+	err = innerClient.Do(ctx, innerClient.B().Get().Key(key).Build()).Error()
+	require.True(t, rueidis.IsRedisNil(err))
+}
+
+func TestCacheAside_DelMulti(t *testing.T) {
+	client := makeClient(t, addr)
+	defer client.client.Close()
+	ctx := context.Background()
+
+	keyAndVals := make(map[string]string)
+	for i := range 3 {
+		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
+	}
+
+	innerClient := client.client
+	for key, val := range keyAndVals {
+		err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(val).Nx().Get().Px(time.Millisecond * 100).Build()).Error()
+		require.True(t, rueidis.IsRedisNil(err))
+	}
+
+	for key := range keyAndVals {
+		err := innerClient.Do(ctx, innerClient.B().Get().Key(key).Build()).Error()
+		require.NoErrorf(t, err, "expected no error, got %v", err)
+	}
+
+	err := client.DelMulti(ctx, mapsx.Keys(keyAndVals)...)
+	require.NoError(t, err)
+
+	for key := range keyAndVals {
+		err = innerClient.Do(ctx, innerClient.B().Get().Key(key).Build()).Error()
+		require.True(t, rueidis.IsRedisNil(err))
+	}
 }
