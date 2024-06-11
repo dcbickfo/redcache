@@ -17,19 +17,37 @@ type CacheAside struct {
 	client    rueidis.Client
 	locks     syncx.Map[string, chan struct{}]
 	serverTTL time.Duration
+	lockTTL   time.Duration
 }
 
-func NewRedCacheAside(option rueidis.ClientOption, serverTTl time.Duration) (*CacheAside, error) {
-	rca := &CacheAside{
-		serverTTL: serverTTl,
+type CacheAsideOption struct {
+	ServerTTL time.Duration
+	LockTTL   time.Duration
+}
+
+func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOption) (*CacheAside, error) {
+	if caOption.ServerTTL == 0 {
+		caOption.ServerTTL = 1 * time.Minute
 	}
-	option.OnInvalidations = rca.onInvalidate
-	client, err := rueidis.NewClient(option)
+	if caOption.LockTTL == 0 {
+		caOption.ServerTTL = 10 * time.Second
+	}
+
+	rca := &CacheAside{
+		serverTTL: caOption.ServerTTL,
+		lockTTL:   caOption.LockTTL,
+	}
+	clientOption.OnInvalidations = rca.onInvalidate
+	client, err := rueidis.NewClient(clientOption)
 	if err != nil {
 		return nil, err
 	}
 	rca.client = client
 	return rca, nil
+}
+
+func (rca *CacheAside) Client() rueidis.Client {
+	return rca.client
 }
 
 func (rca *CacheAside) onInvalidate(messages []rueidis.RedisMessage) {
@@ -42,7 +60,6 @@ func (rca *CacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 	}
 }
 
-const lockTTL = 5 * time.Second
 const prefix = "redcache:"
 
 var (
@@ -125,7 +142,7 @@ func (rca *CacheAside) trySetKeyFunc(ctx context.Context, key string, fn func(ct
 	}
 	defer func() {
 		if !setVal {
-			toCtx, cancel := context.WithTimeout(context.Background(), lockTTL)
+			toCtx, cancel := context.WithTimeout(context.Background(), rca.lockTTL)
 			defer cancel()
 			rca.unlock(toCtx, key, lockVal)
 		}
@@ -146,7 +163,7 @@ func (rca *CacheAside) tryLock(ctx context.Context, key string) (string, error) 
 		return "", err
 	}
 	lockVal := prefix + uuidv7.String()
-	err = rca.client.Do(ctx, rca.client.B().Set().Key(key).Value(lockVal).Nx().Get().Px(lockTTL).Build()).Error()
+	err = rca.client.Do(ctx, rca.client.B().Set().Key(key).Value(lockVal).Nx().Get().Px(rca.lockTTL).Build()).Error()
 	if !rueidis.IsRedisNil(err) {
 		return "", errLockFailed
 	}
@@ -277,7 +294,7 @@ func (rca *CacheAside) trySetMultiKeyFn(
 			}
 		}
 		if len(toUnlock) > 0 {
-			toCtx, cancel := context.WithTimeout(context.Background(), lockTTL)
+			toCtx, cancel := context.WithTimeout(context.Background(), rca.lockTTL)
 			defer cancel()
 			rca.unlockMulti(toCtx, toUnlock)
 		}
@@ -316,7 +333,7 @@ func (rca *CacheAside) tryLockMulti(ctx context.Context, keys []string) (map[str
 			return nil, err
 		}
 		lockVals[k] = prefix + uuidv7.String()
-		cmds = append(cmds, rca.client.B().Set().Key(k).Value(lockVals[k]).Nx().Get().Px(lockTTL).Build())
+		cmds = append(cmds, rca.client.B().Set().Key(k).Value(lockVals[k]).Nx().Get().Px(rca.lockTTL).Build())
 	}
 	resps := rca.client.DoMulti(ctx, cmds...)
 	for i, r := range resps {
