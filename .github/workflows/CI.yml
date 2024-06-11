@@ -3,6 +3,12 @@ on: [push]
 
 jobs:
   build:
+    services:
+      redis:
+        # Docker Hub image
+        image: redis
+        ports:
+          - 6379:6379
     runs-on: ubuntu-latest
 
     steps:
