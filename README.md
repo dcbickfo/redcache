@@ -77,7 +77,7 @@ func (r Repository) GetByID(ctx context.Context, key string) (string, error) {
     // ...
 }
 
-func (r Repository) GetByIDs(ctx context.Context, key map[string]string) (map[string]string, error) {
+func (r Repository) GetByIDs(ctx context.Context, key []string) (map[string]string, error) {
     val, err := r.client.GetMulti(ctx, time.Minute, key, func(ctx context.Context, key []string) (val map[string]string, err error) {
         rows := db.QueryContext(ctx, "SELECT id, val FROM mytab WHERE id = ?", key)
         defer rows.Close()
