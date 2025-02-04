@@ -31,7 +31,6 @@ func run() error {
             InitAddress: addr,
         },
         redcache.CacheAsideOption{
-            ServerTTL: time.Second * 10,
             LockTTL:   time.Second * 1,
         },
     )

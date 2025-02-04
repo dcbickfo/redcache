@@ -14,28 +14,22 @@ import (
 )
 
 type CacheAside struct {
-	client    rueidis.Client
-	locks     syncx.Map[string, chan struct{}]
-	serverTTL time.Duration
-	lockTTL   time.Duration
+	client  rueidis.Client
+	locks   syncx.Map[string, chan struct{}]
+	lockTTL time.Duration
 }
 
 type CacheAsideOption struct {
-	ServerTTL time.Duration
-	LockTTL   time.Duration
+	LockTTL time.Duration
 }
 
 func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOption) (*CacheAside, error) {
-	if caOption.ServerTTL == 0 {
-		caOption.ServerTTL = 1 * time.Minute
-	}
 	if caOption.LockTTL == 0 {
-		caOption.ServerTTL = 10 * time.Second
+		caOption.LockTTL = 10 * time.Second
 	}
 
 	rca := &CacheAside{
-		serverTTL: caOption.ServerTTL,
-		lockTTL:   caOption.LockTTL,
+		lockTTL: caOption.LockTTL,
 	}
 	clientOption.OnInvalidations = rca.onInvalidate
 	client, err := rueidis.NewClient(clientOption)
@@ -74,14 +68,15 @@ func (rca *CacheAside) register(key string) <-chan struct{} {
 
 func (rca *CacheAside) Get(
 	ctx context.Context,
+	ttl time.Duration,
 	key string,
 	fn func(ctx context.Context, key string) (val string, err error),
 ) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, rca.serverTTL)
+	ctx, cancel := context.WithTimeout(ctx, ttl)
 	defer cancel()
 retry:
 	wait := rca.register(key)
-	val, err := rca.tryGet(ctx, key)
+	val, err := rca.tryGet(ctx, ttl, key)
 
 	if err != nil && !errors.Is(err, errNotFound) {
 		return "", err
@@ -92,7 +87,7 @@ retry:
 	}
 
 	if val == "" {
-		val, err = rca.trySetKeyFunc(ctx, key, fn)
+		val, err = rca.trySetKeyFunc(ctx, ttl, key, fn)
 	}
 
 	if err != nil && !errors.Is(err, errLockFailed) {
@@ -122,8 +117,8 @@ func (rca *CacheAside) DelMulti(ctx context.Context, keys ...string) error {
 var errNotFound = errors.New("not found")
 var errLockFailed = errors.New("lock failed")
 
-func (rca *CacheAside) tryGet(ctx context.Context, key string) (string, error) {
-	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), rca.serverTTL)
+func (rca *CacheAside) tryGet(ctx context.Context, ttl time.Duration, key string) (string, error) {
+	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), ttl)
 	val, err := resp.ToString()
 	if rueidis.IsRedisNil(err) || strings.HasPrefix(val, prefix) { // no response or is a lock value
 		return "", errNotFound
@@ -134,7 +129,7 @@ func (rca *CacheAside) tryGet(ctx context.Context, key string) (string, error) {
 	return val, nil
 }
 
-func (rca *CacheAside) trySetKeyFunc(ctx context.Context, key string, fn func(ctx context.Context, key string) (string, error)) (val string, err error) {
+func (rca *CacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key string, fn func(ctx context.Context, key string) (string, error)) (val string, err error) {
 	setVal := false
 	lockVal, err := rca.tryLock(ctx, key)
 	if err != nil {
@@ -148,7 +143,7 @@ func (rca *CacheAside) trySetKeyFunc(ctx context.Context, key string, fn func(ct
 		}
 	}()
 	if val, err = fn(ctx, key); err == nil {
-		val, err = rca.setWithLock(ctx, key, valAndLock{val, lockVal})
+		val, err = rca.setWithLock(ctx, ttl, key, valAndLock{val, lockVal})
 		if err == nil {
 			setVal = true
 		}
@@ -170,9 +165,9 @@ func (rca *CacheAside) tryLock(ctx context.Context, key string) (string, error) 
 	return lockVal, nil
 }
 
-func (rca *CacheAside) setWithLock(ctx context.Context, key string, valLock valAndLock) (string, error) {
+func (rca *CacheAside) setWithLock(ctx context.Context, ttl time.Duration, key string, valLock valAndLock) (string, error) {
 
-	err := setKeyLua.Exec(ctx, rca.client, []string{key}, []string{valLock.lockVal, valLock.val, strconv.FormatInt(rca.serverTTL.Milliseconds(), 10)}).Error()
+	err := setKeyLua.Exec(ctx, rca.client, []string{key}, []string{valLock.lockVal, valLock.val, strconv.FormatInt(ttl.Milliseconds(), 10)}).Error()
 
 	if err != nil {
 		if !rueidis.IsRedisNil(err) {
@@ -190,11 +185,12 @@ func (rca *CacheAside) unlock(ctx context.Context, key string, lock string) {
 
 func (rca *CacheAside) GetMulti(
 	ctx context.Context,
+	ttl time.Duration,
 	keys []string,
 	fn func(ctx context.Context, key []string) (val map[string]string, err error),
 ) (map[string]string, error) {
 
-	ctx, cancel := context.WithTimeout(ctx, rca.serverTTL)
+	ctx, cancel := context.WithTimeout(ctx, ttl)
 	defer cancel()
 
 	res := make(map[string]string, len(keys))
@@ -207,7 +203,7 @@ func (rca *CacheAside) GetMulti(
 retry:
 	waitLock = rca.registerAll(mapsx.Keys(waitLock))
 
-	vals, err := rca.tryGetMulti(ctx, mapsx.Keys(waitLock))
+	vals, err := rca.tryGetMulti(ctx, ttl, mapsx.Keys(waitLock))
 	if err != nil && !rueidis.IsRedisNil(err) {
 		return nil, err
 	}
@@ -218,7 +214,7 @@ retry:
 	}
 
 	if len(waitLock) > 0 {
-		vals, err := rca.trySetMultiKeyFn(ctx, mapsx.Keys(waitLock), fn)
+		vals, err := rca.trySetMultiKeyFn(ctx, ttl, mapsx.Keys(waitLock), fn)
 		if err != nil {
 			return nil, err
 		}
@@ -246,11 +242,11 @@ func (rca *CacheAside) registerAll(keys []string) map[string]<-chan struct{} {
 	return res
 }
 
-func (rca *CacheAside) tryGetMulti(ctx context.Context, keys []string) (map[string]string, error) {
+func (rca *CacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string) (map[string]string, error) {
 	resps, err := rca.client.DoCache(
 		ctx,
 		rca.client.B().Mget().Key(keys...).Cache(),
-		rca.serverTTL,
+		ttl,
 	).ToArray()
 
 	res := make(map[string]string)
@@ -275,6 +271,7 @@ func (rca *CacheAside) tryGetMulti(ctx context.Context, keys []string) (map[stri
 
 func (rca *CacheAside) trySetMultiKeyFn(
 	ctx context.Context,
+	ttl time.Duration,
 	keys []string,
 	fn func(ctx context.Context, key []string) (val map[string]string, err error),
 ) (map[string]string, error) {
@@ -311,7 +308,7 @@ func (rca *CacheAside) trySetMultiKeyFn(
 		vL[k] = valAndLock{v, lockVals[k]}
 	}
 
-	keysSet, err := rca.setMultiWithLock(ctx, vL)
+	keysSet, err := rca.setMultiWithLock(ctx, ttl, vL)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +347,7 @@ type valAndLock struct {
 	lockVal string
 }
 
-func (rca *CacheAside) setMultiWithLock(ctx context.Context, keyValLock map[string]valAndLock) ([]string, error) {
+func (rca *CacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, keyValLock map[string]valAndLock) ([]string, error) {
 
 	setStmts := make([]rueidis.LuaExec, 0, len(keyValLock))
 	keyOrd := make([]string, 0, len(keyValLock))
@@ -358,7 +355,7 @@ func (rca *CacheAside) setMultiWithLock(ctx context.Context, keyValLock map[stri
 		keyOrd = append(keyOrd, k)
 		setStmts = append(setStmts, rueidis.LuaExec{
 			Keys: []string{k},
-			Args: []string{vl.lockVal, vl.val, strconv.FormatInt(rca.serverTTL.Milliseconds(), 10)},
+			Args: []string{vl.lockVal, vl.val, strconv.FormatInt(ttl.Milliseconds(), 10)},
 		})
 	}
 

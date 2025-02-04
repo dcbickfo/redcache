@@ -3,12 +3,13 @@ package redcache_test
 import (
 	"context"
 	"fmt"
-	"github.com/dcbickfo/redcache"
 	"math/rand/v2"
 	"slices"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/dcbickfo/redcache"
 
 	"github.com/dcbickfo/redcache/internal/mapsx"
 	"github.com/google/go-cmp/cmp"
@@ -26,8 +27,7 @@ func makeClient(t *testing.T, addr []string) *redcache.CacheAside {
 			InitAddress: addr,
 		},
 		redcache.CacheAsideOption{
-			ServerTTL: time.Second * 10,
-			LockTTL:   time.Second * 1,
+			LockTTL: time.Second * 1,
 		},
 	)
 	if err != nil {
@@ -49,7 +49,7 @@ func TestCacheAside_Get(t *testing.T) {
 		return val, nil
 	}
 
-	res, err := client.Get(ctx, key, cb)
+	res, err := client.Get(ctx, time.Second*10, key, cb)
 	require.NoError(t, err)
 	if diff := cmp.Diff(val, res); diff != "" {
 		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
@@ -57,7 +57,7 @@ func TestCacheAside_Get(t *testing.T) {
 	require.True(t, called)
 
 	called = false
-	res, err = client.Get(ctx, key, cb)
+	res, err = client.Get(ctx, time.Second*10, key, cb)
 	require.NoError(t, err)
 	if diff := cmp.Diff(val, res); diff != "" {
 		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
@@ -89,7 +89,7 @@ func TestCacheAside_GetMulti(t *testing.T) {
 		return res, nil
 	}
 
-	res, err := client.GetMulti(ctx, keys, cb)
+	res, err := client.GetMulti(ctx, time.Second*10, keys, cb)
 	require.NoError(t, err)
 	if diff := cmp.Diff(keyAndVals, res); diff != "" {
 		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
@@ -97,7 +97,7 @@ func TestCacheAside_GetMulti(t *testing.T) {
 	require.True(t, called)
 
 	called = false
-	res, err = client.GetMulti(ctx, keys, cb)
+	res, err = client.GetMulti(ctx, time.Second*10, keys, cb)
 	require.NoError(t, err)
 	if diff := cmp.Diff(keyAndVals, res); diff != "" {
 		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
@@ -133,7 +133,7 @@ func TestCacheAside_GetMulti_Partial(t *testing.T) {
 		return cbRes, nil
 	}
 
-	res, err := client.Get(ctx, keys[0], cbSingle)
+	res, err := client.Get(ctx, time.Second*10, keys[0], cbSingle)
 	require.NoError(t, err)
 	if diff := cmp.Diff(keyAndVals[keys[0]], res); diff != "" {
 		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
@@ -141,7 +141,7 @@ func TestCacheAside_GetMulti_Partial(t *testing.T) {
 	require.True(t, called)
 
 	called = false
-	resMulti, err := client.GetMulti(ctx, keys, cb)
+	resMulti, err := client.GetMulti(ctx, time.Second*10, keys, cb)
 	require.NoError(t, err)
 	if diff := cmp.Diff(keyAndVals, resMulti); diff != "" {
 		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
@@ -159,7 +159,7 @@ func TestCacheAside_GetMulti_Partial(t *testing.T) {
 	require.True(t, called)
 
 	called = false
-	resMulti, err = client.GetMulti(ctx, keys, cb)
+	resMulti, err = client.GetMulti(ctx, time.Second*10, keys, cb)
 	require.NoError(t, err)
 	if diff := cmp.Diff(keyAndVals, resMulti); diff != "" {
 		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
@@ -195,7 +195,7 @@ func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 	err := innerClient.Do(ctx, innerClient.B().Set().Key(keys[0]).Value(lockVal).Nx().Get().Px(time.Millisecond*100).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
-	res, err := client.GetMulti(ctx, keys, cb)
+	res, err := client.GetMulti(ctx, time.Second*10, keys, cb)
 	require.NoError(t, err)
 	if diff := cmp.Diff(keyAndVals, res); diff != "" {
 		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
@@ -203,7 +203,7 @@ func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 	require.True(t, called)
 
 	called = false
-	res, err = client.GetMulti(ctx, keys, cb)
+	res, err = client.GetMulti(ctx, time.Second*10, keys, cb)
 	require.NoError(t, err)
 	if diff := cmp.Diff(keyAndVals, res); diff != "" {
 		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
@@ -278,6 +278,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 			defer wg.Done()
 			out, err := client.GetMulti(
 				ctx,
+				time.Second*10,
 				keys[:3],
 				cb,
 			)
@@ -290,6 +291,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 			defer wg.Done()
 			out, err := client2.GetMulti(
 				ctx,
+				time.Second*10,
 				keys[:3],
 				cb,
 			)
@@ -302,6 +304,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 			defer wg.Done()
 			out, err := client.GetMulti(
 				context.Background(),
+				time.Second*10,
 				keys[3:],
 				cb)
 			assert.NoError(t, err)
@@ -313,6 +316,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 			defer wg.Done()
 			out, err := client2.GetMulti(
 				context.Background(),
+				time.Second*10,
 				keys[3:],
 				cb)
 			assert.NoError(t, err)
@@ -393,6 +397,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 			})
 			out, err := client1.GetMulti(
 				ctx,
+				time.Second*10,
 				localKeys,
 				cb,
 			)
@@ -410,6 +415,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 			})
 			out, err := client2.GetMulti(
 				ctx,
+				time.Second*10,
 				localKeys,
 				cb,
 			)
@@ -427,6 +433,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 			})
 			out, err := client3.GetMulti(
 				context.Background(),
+				time.Second*10,
 				localKeys,
 				cb)
 			assert.NoError(t, err)
@@ -443,6 +450,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 			})
 			out, err := client4.GetMulti(
 				context.Background(),
+				time.Second*10,
 				localKeys,
 				cb)
 			assert.NoError(t, err)
@@ -518,6 +526,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 			})
 			out, err := client.GetMulti(
 				ctx,
+				time.Second*10,
 				localKeys,
 				cb,
 			)
@@ -535,6 +544,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 			})
 			out, err := client.GetMulti(
 				ctx,
+				time.Second*10,
 				localKeys,
 				cb,
 			)
@@ -552,6 +562,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 			})
 			out, err := client.GetMulti(
 				context.Background(),
+				time.Second*10,
 				localKeys,
 				cb)
 			assert.NoError(t, err)
@@ -568,6 +579,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 			})
 			out, err := client.GetMulti(
 				context.Background(),
+				time.Second*10,
 				localKeys,
 				cb)
 			assert.NoError(t, err)
