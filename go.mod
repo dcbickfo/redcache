@@ -1,6 +1,6 @@
 module github.com/dcbickfo/redcache
 
-go 1.24.1
+go 1.22.4
 
 require (
 	github.com/google/go-cmp v0.7.0
