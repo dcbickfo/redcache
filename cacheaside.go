@@ -11,6 +11,7 @@ import (
 	"github.com/dcbickfo/redcache/internal/syncx"
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
+	"golang.org/x/sync/errgroup"
 )
 
 type CacheAside struct {
@@ -348,18 +349,43 @@ type valAndLock struct {
 }
 
 func (rca *CacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, keyValLock map[string]valAndLock) ([]string, error) {
-	out := make([]string, 0)
+	eg, ctx := errgroup.WithContext(ctx)
+	resps := make([]struct {
+		val string
+		err error
+	}, len(keyValLock))
+	keyOrd := make([]string, 0, len(keyValLock))
+	i := 0
 	for k, vl := range keyValLock {
-		_, err := rca.setWithLock(ctx, ttl, k, vl)
-		if err != nil {
-			if !rueidis.IsRedisNil(err) {
-				return nil, err
+		keyOrd = append(keyOrd, k)
+		eg.Go(func() error {
+			_, err := rca.setWithLock(ctx, ttl, k, vl)
+			if err != nil {
+				if !rueidis.IsRedisNil(err) {
+					return err
+				}
 			}
-			continue
+			resps[i] = struct {
+				val string
+				err error
+			}{
+				val: k,
+				err: err,
+			}
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(resps))
+	for j, r := range resps {
+		if r.err == nil {
+			out = append(out, keyOrd[j])
 		}
-		out = append(out, k)
 	}
 	return out, nil
+
 }
 
 func (rca *CacheAside) unlockMulti(ctx context.Context, lockVals map[string]string) {
