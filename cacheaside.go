@@ -243,27 +243,27 @@ func (rca *CacheAside) registerAll(keys []string) map[string]<-chan struct{} {
 }
 
 func (rca *CacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string) (map[string]string, error) {
-	resps, err := rca.client.DoCache(
-		ctx,
-		rca.client.B().Mget().Key(keys...).Cache(),
-		ttl,
-	).ToArray()
+	multi := make([]rueidis.CacheableTTL, 0, len(keys))
+	for _, key := range keys {
+		cmd := rca.client.B().Get().Key(key).Cache()
+		multi = append(multi, rueidis.CacheableTTL{
+			Cmd: cmd,
+			TTL: ttl,
+		})
+	}
+	resps := rca.client.DoMultiCache(ctx, multi...)
 
 	res := make(map[string]string)
-	if err != nil && rueidis.IsRedisNil(err) {
-		return nil, err
-	} else if err == nil && len(resps) != 0 {
-		for i, resp := range resps {
-			val, err2 := resp.ToString()
-			if err2 != nil && rueidis.IsRedisNil(err2) {
-				continue
-			} else if err2 != nil {
-				return nil, err2
-			}
-			if !strings.HasPrefix(val, prefix) {
-				res[keys[i]] = val
-				continue
-			}
+	for i, resp := range resps {
+		val, err := resp.ToString()
+		if err != nil && rueidis.IsRedisNil(err) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		if !strings.HasPrefix(val, prefix) {
+			res[keys[i]] = val
+			continue
 		}
 	}
 	return res, nil
@@ -348,28 +348,16 @@ type valAndLock struct {
 }
 
 func (rca *CacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, keyValLock map[string]valAndLock) ([]string, error) {
-
-	setStmts := make([]rueidis.LuaExec, 0, len(keyValLock))
-	keyOrd := make([]string, 0, len(keyValLock))
-	for k, vl := range keyValLock {
-		keyOrd = append(keyOrd, k)
-		setStmts = append(setStmts, rueidis.LuaExec{
-			Keys: []string{k},
-			Args: []string{vl.lockVal, vl.val, strconv.FormatInt(ttl.Milliseconds(), 10)},
-		})
-	}
-
-	setResps := setKeyLua.ExecMulti(ctx, rca.client, setStmts...)
 	out := make([]string, 0)
-	for i, resp := range setResps {
-		err := resp.Error()
+	for k, vl := range keyValLock {
+		_, err := rca.setWithLock(ctx, ttl, k, vl)
 		if err != nil {
 			if !rueidis.IsRedisNil(err) {
 				return nil, err
 			}
 			continue
 		}
-		out = append(out, keyOrd[i])
+		out = append(out, k)
 	}
 	return out, nil
 }
