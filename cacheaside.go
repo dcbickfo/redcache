@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dcbickfo/redcache/internal/cmdx"
@@ -113,7 +114,13 @@ func (rca *CacheAside) Del(ctx context.Context, key string) error {
 }
 
 func (rca *CacheAside) DelMulti(ctx context.Context, keys ...string) error {
-	return rca.client.Do(ctx, rca.client.B().Del().Key(keys...).Build()).Error()
+	resps := rca.client.DoMulti(ctx, rca.client.B().Del().Key(keys...).Build())
+	for _, resp := range resps {
+		if err := resp.Error(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 var errNotFound = errors.New("not found")
@@ -409,12 +416,21 @@ func (rca *CacheAside) unlockMulti(ctx context.Context, lockVals map[string]stri
 	if len(lockVals) == 0 {
 		return
 	}
-	delStmts := make([]rueidis.LuaExec, 0, len(lockVals))
+	delStmts := make(map[uint16][]rueidis.LuaExec)
 	for key, lockVal := range lockVals {
-		delStmts = append(delStmts, rueidis.LuaExec{
+		slot := cmdx.Slot(key)
+		delStmts[slot] = append(delStmts[slot], rueidis.LuaExec{
 			Keys: []string{key},
 			Args: []string{lockVal},
 		})
 	}
-	delKeyLua.ExecMulti(ctx, rca.client, delStmts...)
+	wg := sync.WaitGroup{}
+	for _, stmts := range delStmts {
+		wg.Add(1)
+		go func() {
+			delKeyLua.ExecMulti(ctx, rca.client, stmts...)
+			wg.Done()
+		}()
+	}
+	wg.Wait()
 }
