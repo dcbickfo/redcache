@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dcbickfo/redcache/internal/cmdx"
 	"github.com/dcbickfo/redcache/internal/mapsx"
 	"github.com/dcbickfo/redcache/internal/syncx"
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
-	"golang.org/x/sync/errgroup"
 )
 
 type CacheAside struct {
@@ -349,43 +349,45 @@ type valAndLock struct {
 }
 
 func (rca *CacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, keyValLock map[string]valAndLock) ([]string, error) {
-	eg, ctx := errgroup.WithContext(ctx)
-	resps := make([]struct {
-		val string
-		err error
-	}, len(keyValLock))
-	keyOrd := make([]string, 0, len(keyValLock))
-	i := 0
+	type keyOrderAndSet struct {
+		keyOrder []string
+		setStmts []rueidis.LuaExec
+	}
+
+	stmts := make(map[uint16]keyOrderAndSet)
+
 	for k, vl := range keyValLock {
-		keyOrd = append(keyOrd, k)
-		eg.Go(func() error {
-			_, err := rca.setWithLock(ctx, ttl, k, vl)
+		slot := cmdx.Slot(k)
+		kos, ok := stmts[slot]
+		if !ok {
+			kos = keyOrderAndSet{
+				keyOrder: make([]string, 0),
+				setStmts: make([]rueidis.LuaExec, 0),
+			}
+		}
+		kos.keyOrder = append(kos.keyOrder, k)
+		kos.setStmts = append(kos.setStmts, rueidis.LuaExec{
+			Keys: []string{k},
+			Args: []string{vl.lockVal, vl.val, strconv.FormatInt(ttl.Milliseconds(), 10)},
+		})
+		stmts[slot] = kos
+	}
+
+	out := make([]string, 0)
+	for _, kos := range stmts {
+		setResps := setKeyLua.ExecMulti(ctx, rca.client, kos.setStmts...)
+		for i, resp := range setResps {
+			err := resp.Error()
 			if err != nil {
 				if !rueidis.IsRedisNil(err) {
-					return err
+					return nil, err
 				}
+				continue
 			}
-			resps[i] = struct {
-				val string
-				err error
-			}{
-				val: k,
-				err: err,
-			}
-			return nil
-		})
-	}
-	if err := eg.Wait(); err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(resps))
-	for j, r := range resps {
-		if r.err == nil {
-			out = append(out, keyOrd[j])
+			out = append(out, kos.keyOrder[i])
 		}
 	}
 	return out, nil
-
 }
 
 func (rca *CacheAside) unlockMulti(ctx context.Context, lockVals map[string]string) {
