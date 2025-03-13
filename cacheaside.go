@@ -428,8 +428,8 @@ func (rca *CacheAside) unlockMulti(ctx context.Context, lockVals map[string]stri
 	for _, stmts := range delStmts {
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			delKeyLua.ExecMulti(ctx, rca.client, stmts...)
-			wg.Done()
 		}()
 	}
 	wg.Wait()
