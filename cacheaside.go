@@ -5,12 +5,15 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/dcbickfo/redcache/internal/cmdx"
 	"github.com/dcbickfo/redcache/internal/mapsx"
 	"github.com/dcbickfo/redcache/internal/syncx"
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
+	"golang.org/x/sync/errgroup"
 )
 
 type CacheAside struct {
@@ -111,7 +114,17 @@ func (rca *CacheAside) Del(ctx context.Context, key string) error {
 }
 
 func (rca *CacheAside) DelMulti(ctx context.Context, keys ...string) error {
-	return rca.client.Do(ctx, rca.client.B().Del().Key(keys...).Build()).Error()
+	cmds := make(rueidis.Commands, 0, len(keys))
+	for _, key := range keys {
+		cmds = append(cmds, rca.client.B().Del().Key(key).Build())
+	}
+	resps := rca.client.DoMulti(ctx, cmds...)
+	for _, resp := range resps {
+		if err := resp.Error(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 var errNotFound = errors.New("not found")
@@ -243,27 +256,27 @@ func (rca *CacheAside) registerAll(keys []string) map[string]<-chan struct{} {
 }
 
 func (rca *CacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string) (map[string]string, error) {
-	resps, err := rca.client.DoCache(
-		ctx,
-		rca.client.B().Mget().Key(keys...).Cache(),
-		ttl,
-	).ToArray()
+	multi := make([]rueidis.CacheableTTL, 0, len(keys))
+	for _, key := range keys {
+		cmd := rca.client.B().Get().Key(key).Cache()
+		multi = append(multi, rueidis.CacheableTTL{
+			Cmd: cmd,
+			TTL: ttl,
+		})
+	}
+	resps := rca.client.DoMultiCache(ctx, multi...)
 
 	res := make(map[string]string)
-	if err != nil && rueidis.IsRedisNil(err) {
-		return nil, err
-	} else if err == nil && len(resps) != 0 {
-		for i, resp := range resps {
-			val, err2 := resp.ToString()
-			if err2 != nil && rueidis.IsRedisNil(err2) {
-				continue
-			} else if err2 != nil {
-				return nil, err2
-			}
-			if !strings.HasPrefix(val, prefix) {
-				res[keys[i]] = val
-				continue
-			}
+	for i, resp := range resps {
+		val, err := resp.ToString()
+		if err != nil && rueidis.IsRedisNil(err) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		if !strings.HasPrefix(val, prefix) {
+			res[keys[i]] = val
+			continue
 		}
 	}
 	return res, nil
@@ -348,28 +361,57 @@ type valAndLock struct {
 }
 
 func (rca *CacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, keyValLock map[string]valAndLock) ([]string, error) {
+	type keyOrderAndSet struct {
+		keyOrder []string
+		setStmts []rueidis.LuaExec
+	}
 
-	setStmts := make([]rueidis.LuaExec, 0, len(keyValLock))
-	keyOrd := make([]string, 0, len(keyValLock))
+	stmts := make(map[uint16]keyOrderAndSet)
+
 	for k, vl := range keyValLock {
-		keyOrd = append(keyOrd, k)
-		setStmts = append(setStmts, rueidis.LuaExec{
+		slot := cmdx.Slot(k)
+		kos, ok := stmts[slot]
+		if !ok {
+			kos = keyOrderAndSet{
+				keyOrder: make([]string, 0),
+				setStmts: make([]rueidis.LuaExec, 0),
+			}
+		}
+		kos.keyOrder = append(kos.keyOrder, k)
+		kos.setStmts = append(kos.setStmts, rueidis.LuaExec{
 			Keys: []string{k},
 			Args: []string{vl.lockVal, vl.val, strconv.FormatInt(ttl.Milliseconds(), 10)},
 		})
+		stmts[slot] = kos
 	}
 
-	setResps := setKeyLua.ExecMulti(ctx, rca.client, setStmts...)
 	out := make([]string, 0)
-	for i, resp := range setResps {
-		err := resp.Error()
-		if err != nil {
-			if !rueidis.IsRedisNil(err) {
-				return nil, err
+	keyByStmt := make([][]string, len(stmts))
+	i := 0
+	eg, ctx := errgroup.WithContext(ctx)
+	for _, kos := range stmts {
+		ii := i
+		eg.Go(func() error {
+			setResps := setKeyLua.ExecMulti(ctx, rca.client, kos.setStmts...)
+			for j, resp := range setResps {
+				err := resp.Error()
+				if err != nil {
+					if !rueidis.IsRedisNil(err) {
+						return err
+					}
+					continue
+				}
+				keyByStmt[ii] = append(out, kos.keyOrder[j])
 			}
-			continue
-		}
-		out = append(out, keyOrd[i])
+			return nil
+		})
+		i += 1
+	}
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+	for _, keys := range keyByStmt {
+		out = append(out, keys...)
 	}
 	return out, nil
 }
@@ -378,12 +420,21 @@ func (rca *CacheAside) unlockMulti(ctx context.Context, lockVals map[string]stri
 	if len(lockVals) == 0 {
 		return
 	}
-	delStmts := make([]rueidis.LuaExec, 0, len(lockVals))
+	delStmts := make(map[uint16][]rueidis.LuaExec)
 	for key, lockVal := range lockVals {
-		delStmts = append(delStmts, rueidis.LuaExec{
+		slot := cmdx.Slot(key)
+		delStmts[slot] = append(delStmts[slot], rueidis.LuaExec{
 			Keys: []string{key},
 			Args: []string{lockVal},
 		})
 	}
-	delKeyLua.ExecMulti(ctx, rca.client, delStmts...)
+	wg := sync.WaitGroup{}
+	for _, stmts := range delStmts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			delKeyLua.ExecMulti(ctx, rca.client, stmts...)
+		}()
+	}
+	wg.Wait()
 }
