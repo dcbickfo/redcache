@@ -114,7 +114,11 @@ func (rca *CacheAside) Del(ctx context.Context, key string) error {
 }
 
 func (rca *CacheAside) DelMulti(ctx context.Context, keys ...string) error {
-	resps := rca.client.DoMulti(ctx, rca.client.B().Del().Key(keys...).Build())
+	cmds := make(rueidis.Commands, 0, len(keys))
+	for i, key := range keys {
+		cmds[i] = rca.client.B().Del().Key(key).Build()
+	}
+	resps := rca.client.DoMulti(ctx, cmds...)
 	for _, resp := range resps {
 		if err := resp.Error(); err != nil {
 			return err
