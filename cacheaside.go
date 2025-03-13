@@ -12,6 +12,7 @@ import (
 	"github.com/dcbickfo/redcache/internal/syncx"
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
+	"golang.org/x/sync/errgroup"
 )
 
 type CacheAside struct {
@@ -374,18 +375,32 @@ func (rca *CacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, 
 	}
 
 	out := make([]string, 0)
+	keyByStmt := make([][]string, len(stmts))
+	i := 0
+	eg, ctx := errgroup.WithContext(ctx)
 	for _, kos := range stmts {
-		setResps := setKeyLua.ExecMulti(ctx, rca.client, kos.setStmts...)
-		for i, resp := range setResps {
-			err := resp.Error()
-			if err != nil {
-				if !rueidis.IsRedisNil(err) {
-					return nil, err
+		ii := i
+		eg.Go(func() error {
+			setResps := setKeyLua.ExecMulti(ctx, rca.client, kos.setStmts...)
+			for j, resp := range setResps {
+				err := resp.Error()
+				if err != nil {
+					if !rueidis.IsRedisNil(err) {
+						return err
+					}
+					continue
 				}
-				continue
+				keyByStmt[ii] = append(out, kos.keyOrder[j])
 			}
-			out = append(out, kos.keyOrder[i])
-		}
+			return nil
+		})
+		i += 1
+	}
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+	for _, keys := range keyByStmt {
+		out = append(out, keys...)
 	}
 	return out, nil
 }
