@@ -310,6 +310,11 @@ func (rca *CacheAside) trySetMultiKeyFn(
 		}
 	}()
 
+	// Case where we were unable to get any locks
+	if len(lockVals) == 0 {
+		return res, nil
+	}
+
 	vals, err := fn(ctx, mapsx.Keys(lockVals))
 	if err != nil {
 		return nil, err
