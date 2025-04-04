@@ -3,6 +3,8 @@ package redcache
 import (
 	"context"
 	"errors"
+	"iter"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,10 +25,12 @@ type CacheAside struct {
 }
 
 type CacheAsideOption struct {
-	LockTTL time.Duration
+	LockTTL       time.Duration
+	ClientBuilder func(option rueidis.ClientOption) (rueidis.Client, error)
 }
 
 func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOption) (*CacheAside, error) {
+	var err error
 	if caOption.LockTTL == 0 {
 		caOption.LockTTL = 10 * time.Second
 	}
@@ -35,11 +39,14 @@ func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOpti
 		lockTTL: caOption.LockTTL,
 	}
 	clientOption.OnInvalidations = rca.onInvalidate
-	client, err := rueidis.NewClient(clientOption)
+	if caOption.ClientBuilder != nil {
+		rca.client, err = caOption.ClientBuilder(clientOption)
+	} else {
+		rca.client, err = rueidis.NewClient(clientOption)
+	}
 	if err != nil {
 		return nil, err
 	}
-	rca.client = client
 	return rca, nil
 }
 
@@ -214,7 +221,7 @@ func (rca *CacheAside) GetMulti(
 	}
 
 retry:
-	waitLock = rca.registerAll(mapsx.Keys(waitLock))
+	waitLock = rca.registerAll(maps.Keys(waitLock), len(waitLock))
 
 	vals, err := rca.tryGetMulti(ctx, ttl, mapsx.Keys(waitLock))
 	if err != nil && !rueidis.IsRedisNil(err) {
@@ -238,7 +245,7 @@ retry:
 	}
 
 	if len(waitLock) > 0 {
-		err = syncx.WaitForAll(ctx, mapsx.Values(waitLock))
+		err = syncx.WaitForAll(ctx, maps.Values(waitLock), len(waitLock))
 		if err != nil {
 			return nil, err
 		}
@@ -247,22 +254,22 @@ retry:
 	return res, err
 }
 
-func (rca *CacheAside) registerAll(keys []string) map[string]<-chan struct{} {
-	res := make(map[string]<-chan struct{}, len(keys))
-	for _, key := range keys {
+func (rca *CacheAside) registerAll(keys iter.Seq[string], length int) map[string]<-chan struct{} {
+	res := make(map[string]<-chan struct{}, length)
+	for key := range keys {
 		res[key] = rca.register(key)
 	}
 	return res
 }
 
 func (rca *CacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string) (map[string]string, error) {
-	multi := make([]rueidis.CacheableTTL, 0, len(keys))
-	for _, key := range keys {
+	multi := make([]rueidis.CacheableTTL, len(keys))
+	for i, key := range keys {
 		cmd := rca.client.B().Get().Key(key).Cache()
-		multi = append(multi, rueidis.CacheableTTL{
+		multi[i] = rueidis.CacheableTTL{
 			Cmd: cmd,
 			TTL: ttl,
-		})
+		}
 	}
 	resps := rca.client.DoMultiCache(ctx, multi...)
 

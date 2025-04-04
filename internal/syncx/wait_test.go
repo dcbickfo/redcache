@@ -2,6 +2,7 @@ package syncx_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ func TestWaitForAll_Success(t *testing.T) {
 
 	waitLock := []<-chan struct{}{ch1, ch2}
 
-	err := syncx.WaitForAll(ctx, waitLock)
+	err := syncx.WaitForAll(ctx, slices.Values(waitLock), len(waitLock))
 	assert.NoErrorf(t, err, "expected no error, got %v", err)
 }
 
@@ -48,7 +49,7 @@ func TestWaitForAll_SuccessClosed(t *testing.T) {
 
 	waitLock := []<-chan struct{}{ch1, ch2}
 
-	err := syncx.WaitForAll(ctx, waitLock)
+	err := syncx.WaitForAll(ctx, slices.Values(waitLock), len(waitLock))
 	assert.NoErrorf(t, err, "expected no error, got %v", err)
 }
 
@@ -64,7 +65,7 @@ func TestWaitForAll_ContextCancelled(t *testing.T) {
 
 	waitLock := []<-chan int{ch1, ch2}
 
-	err := syncx.WaitForAll(ctx, waitLock)
+	err := syncx.WaitForAll(ctx, slices.Values(waitLock), len(waitLock))
 	assert.ErrorIsf(t, err, context.DeadlineExceeded, "expected context.DeadlineExceeded, got %v", err)
 }
 
@@ -80,7 +81,7 @@ func TestWaitForAll_PartialCompleteContextCancelled(t *testing.T) {
 
 	waitLock := []<-chan int{ch1, ch2}
 
-	err := syncx.WaitForAll(ctx, waitLock)
+	err := syncx.WaitForAll(ctx, slices.Values(waitLock), len(waitLock))
 	assert.ErrorIsf(t, err, context.DeadlineExceeded, "expected context.DeadlineExceeded, got %v", err)
 }
 
@@ -88,7 +89,7 @@ func TestWaitForAll_NoChannels(t *testing.T) {
 	ctx := context.Background()
 	var waitLock []<-chan int
 
-	err := syncx.WaitForAll(ctx, waitLock)
+	err := syncx.WaitForAll(ctx, slices.Values(waitLock), len(waitLock))
 	assert.NoErrorf(t, err, "expected no error, got %v", err)
 }
 
@@ -101,7 +102,7 @@ func TestWaitForAll_ImmediateContextCancel(t *testing.T) {
 
 	waitLock := []<-chan int{ch1, ch2}
 
-	err := syncx.WaitForAll(ctx, waitLock)
+	err := syncx.WaitForAll(ctx, slices.Values(waitLock), len(waitLock))
 	assert.ErrorIsf(t, err, context.Canceled, "expected context.Canceled, got %v", err)
 }
 
@@ -115,6 +116,6 @@ func TestWaitForAll_ChannelAlreadyClosed(t *testing.T) {
 
 	waitLock := []<-chan int{ch1, ch2}
 
-	err := syncx.WaitForAll(ctx, waitLock)
+	err := syncx.WaitForAll(ctx, slices.Values(waitLock), len(waitLock))
 	assert.NoErrorf(t, err, "expected no error, got %v", err)
 }
