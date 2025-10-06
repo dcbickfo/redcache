@@ -2,12 +2,13 @@ package syncx
 
 import (
 	"context"
+	"iter"
 	"reflect"
 )
 
-func WaitForAll[S ~[]C, C ~<-chan V, V any](ctx context.Context, waitLock S) error {
-	cases := setupCases(ctx, waitLock)
-	for range waitLock {
+func WaitForAll[C ~<-chan V, V any](ctx context.Context, waitLock iter.Seq[C], length int) error {
+	cases := setupCases(ctx, waitLock, length)
+	for range length {
 		chosen, _, _ := reflect.Select(cases)
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -17,10 +18,10 @@ func WaitForAll[S ~[]C, C ~<-chan V, V any](ctx context.Context, waitLock S) err
 	return nil
 }
 
-func setupCases[S ~[]C, C ~<-chan V, V any](ctx context.Context, waitLock S) []reflect.SelectCase {
-	cases := make([]reflect.SelectCase, len(waitLock)+1)
+func setupCases[C ~<-chan V, V any](ctx context.Context, waitLock iter.Seq[C], length int) []reflect.SelectCase {
+	cases := make([]reflect.SelectCase, length+1)
 	i := 0
-	for _, ch := range waitLock {
+	for ch := range waitLock {
 		cases[i] = reflect.SelectCase{
 			Dir:  reflect.SelectRecv,
 			Chan: reflect.ValueOf(ch),
