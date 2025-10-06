@@ -621,3 +621,33 @@ func TestCacheAside_DelMulti(t *testing.T) {
 		require.True(t, rueidis.IsRedisNil(err))
 	}
 }
+
+func TestCacheAside_GetParentContextCancellation(t *testing.T) {
+	client := makeClient(t, addr)
+	defer client.Client().Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	key := "key:" + uuid.New().String()
+	val := "val:" + uuid.New().String()
+
+	// Set a lock on the key so Get will wait
+	innerClient := client.Client()
+	lockVal := "redcache:" + uuid.New().String()
+	err := innerClient.Do(context.Background(), innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
+	require.True(t, rueidis.IsRedisNil(err))
+
+	// Cancel the parent context after a short delay
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	cb := func(ctx context.Context, key string) (string, error) {
+		return val, nil
+	}
+
+	// Should get parent context cancelled error, not a timeout
+	_, err = client.Get(ctx, time.Second*10, key, cb)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}
