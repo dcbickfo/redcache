@@ -282,7 +282,7 @@ retry:
 		// Wait for lock releases (channels auto-close after lockTTL or on invalidation)
 		err = syncx.WaitForAll(ctx, maps.Values(waitLock), len(waitLock))
 		if err != nil {
-			// Parent context cancelled
+			// Parent context cancelled or deadline exceeded
 			return nil, ctx.Err()
 		}
 		goto retry
