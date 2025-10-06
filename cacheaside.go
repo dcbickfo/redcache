@@ -17,30 +17,24 @@ import (
 )
 
 type CacheAside struct {
-	client       rueidis.Client
-	locks        syncx.Map[string, chan struct{}]
-	lockTTL      time.Duration
-	operationTTL time.Duration
+	client  rueidis.Client
+	locks   syncx.Map[string, chan struct{}]
+	lockTTL time.Duration
 }
 
 type CacheAsideOption struct {
+	// LockTTL is the maximum time a lock can be held, and also the timeout for waiting
+	// on locks when handling lost Redis invalidation messages. Defaults to 10 seconds.
 	LockTTL time.Duration
-	// OperationTTL is the maximum time to wait for cache operations to complete.
-	// If zero, defaults to 10 seconds. This is separate from cache entry TTL.
-	OperationTTL time.Duration
 }
 
 func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOption) (*CacheAside, error) {
 	if caOption.LockTTL == 0 {
 		caOption.LockTTL = 10 * time.Second
 	}
-	if caOption.OperationTTL == 0 {
-		caOption.OperationTTL = 10 * time.Second
-	}
 
 	rca := &CacheAside{
-		lockTTL:      caOption.LockTTL,
-		operationTTL: caOption.OperationTTL,
+		lockTTL: caOption.LockTTL,
 	}
 	clientOption.OnInvalidations = rca.onInvalidate
 	client, err := rueidis.NewClient(clientOption)
@@ -84,8 +78,6 @@ func (rca *CacheAside) Get(
 	key string,
 	fn func(ctx context.Context, key string) (val string, err error),
 ) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, rca.operationTTL)
-	defer cancel()
 retry:
 	wait := rca.register(key)
 	val, err := rca.tryGet(ctx, ttl, key)
@@ -223,9 +215,6 @@ func (rca *CacheAside) GetMulti(
 	keys []string,
 	fn func(ctx context.Context, key []string) (val map[string]string, err error),
 ) (map[string]string, error) {
-
-	ctx, cancel := context.WithTimeout(ctx, rca.operationTTL)
-	defer cancel()
 
 	res := make(map[string]string, len(keys))
 
