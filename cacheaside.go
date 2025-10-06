@@ -17,22 +17,30 @@ import (
 )
 
 type CacheAside struct {
-	client  rueidis.Client
-	locks   syncx.Map[string, chan struct{}]
-	lockTTL time.Duration
+	client       rueidis.Client
+	locks        syncx.Map[string, chan struct{}]
+	lockTTL      time.Duration
+	operationTTL time.Duration
 }
 
 type CacheAsideOption struct {
 	LockTTL time.Duration
+	// OperationTTL is the maximum time to wait for cache operations to complete.
+	// If zero, defaults to 10 seconds. This is separate from cache entry TTL.
+	OperationTTL time.Duration
 }
 
 func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOption) (*CacheAside, error) {
 	if caOption.LockTTL == 0 {
 		caOption.LockTTL = 10 * time.Second
 	}
+	if caOption.OperationTTL == 0 {
+		caOption.OperationTTL = 10 * time.Second
+	}
 
 	rca := &CacheAside{
-		lockTTL: caOption.LockTTL,
+		lockTTL:      caOption.LockTTL,
+		operationTTL: caOption.OperationTTL,
 	}
 	clientOption.OnInvalidations = rca.onInvalidate
 	client, err := rueidis.NewClient(clientOption)
@@ -60,8 +68,9 @@ func (rca *CacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 const prefix = "redcache:"
 
 var (
-	delKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("DEL",KEYS[1]) else return 0 end`)
-	setKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("SET",KEYS[1],ARGV[2],"PX",ARGV[3]) else return 0 end`)
+	delKeyLua          = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("DEL",KEYS[1]) else return 0 end`)
+	setKeyLua          = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("SET",KEYS[1],ARGV[2],"PX",ARGV[3]) else return 0 end`)
+	errLockWaitTimeout = errors.New("lock wait timeout - retrying")
 )
 
 func (rca *CacheAside) register(key string) <-chan struct{} {
@@ -75,7 +84,7 @@ func (rca *CacheAside) Get(
 	key string,
 	fn func(ctx context.Context, key string) (val string, err error),
 ) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, ttl)
+	ctx, cancel := context.WithTimeout(ctx, rca.operationTTL)
 	defer cancel()
 retry:
 	wait := rca.register(key)
@@ -98,11 +107,22 @@ retry:
 	}
 
 	if val == "" {
+		// Wait for lock release with a timeout to handle lost invalidation messages
+		// Use lockTTL as the wait timeout since that's the max time a lock can be held
+		waitCtx, cancel := context.WithTimeoutCause(ctx, rca.lockTTL, errLockWaitTimeout)
+		defer cancel()
+
 		select {
 		case <-wait:
 			goto retry
-		case <-ctx.Done():
-			return "", ctx.Err()
+		case <-waitCtx.Done():
+			// Check if it's our timeout or parent context cancellation
+			if errors.Is(context.Cause(waitCtx), errLockWaitTimeout) {
+				// Our timeout - retry to check Redis again
+				goto retry
+			}
+			// Parent context cancelled - propagate the error
+			return "", context.Cause(waitCtx)
 		}
 	}
 
@@ -152,7 +172,8 @@ func (rca *CacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key
 		if !setVal {
 			toCtx, cancel := context.WithTimeout(context.Background(), rca.lockTTL)
 			defer cancel()
-			rca.unlock(toCtx, key, lockVal)
+			// Best effort unlock - errors are non-fatal as lock will expire
+			_ = rca.unlock(toCtx, key, lockVal)
 		}
 	}()
 	if val, err = fn(ctx, key); err == nil {
@@ -192,8 +213,8 @@ func (rca *CacheAside) setWithLock(ctx context.Context, ttl time.Duration, key s
 	return valLock.val, nil
 }
 
-func (rca *CacheAside) unlock(ctx context.Context, key string, lock string) {
-	delKeyLua.Exec(ctx, rca.client, []string{key}, []string{lock})
+func (rca *CacheAside) unlock(ctx context.Context, key string, lock string) error {
+	return delKeyLua.Exec(ctx, rca.client, []string{key}, []string{lock}).Error()
 }
 
 func (rca *CacheAside) GetMulti(
@@ -203,7 +224,7 @@ func (rca *CacheAside) GetMulti(
 	fn func(ctx context.Context, key []string) (val map[string]string, err error),
 ) (map[string]string, error) {
 
-	ctx, cancel := context.WithTimeout(ctx, ttl)
+	ctx, cancel := context.WithTimeout(ctx, rca.operationTTL)
 	defer cancel()
 
 	res := make(map[string]string, len(keys))
@@ -238,9 +259,19 @@ retry:
 	}
 
 	if len(waitLock) > 0 {
-		err = syncx.WaitForAll(ctx, mapsx.Values(waitLock))
+		// Wait for lock releases with a timeout to handle lost invalidation messages
+		waitCtx, cancel := context.WithTimeoutCause(ctx, rca.lockTTL, errLockWaitTimeout)
+		err = syncx.WaitForAll(waitCtx, mapsx.Values(waitLock))
+		cancel()
+
+		// Check what kind of error occurred
 		if err != nil {
-			return nil, err
+			// If it's our timeout, retry to check Redis again
+			if errors.Is(context.Cause(waitCtx), errLockWaitTimeout) {
+				goto retry
+			}
+			// Parent context cancelled - propagate the error
+			return nil, context.Cause(waitCtx)
 		}
 		goto retry
 	}
@@ -406,7 +437,7 @@ func (rca *CacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, 
 					}
 					continue
 				}
-				keyByStmt[ii] = append(out, kos.keyOrder[j])
+				keyByStmt[ii] = append(keyByStmt[ii], kos.keyOrder[j])
 			}
 			return nil
 		})
@@ -438,7 +469,8 @@ func (rca *CacheAside) unlockMulti(ctx context.Context, lockVals map[string]stri
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			delKeyLua.ExecMulti(ctx, rca.client, stmts...)
+			// Best effort unlock - errors are non-fatal as locks will expire
+			_ = delKeyLua.ExecMulti(ctx, rca.client, stmts...)
 		}()
 	}
 	wg.Wait()
