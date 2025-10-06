@@ -16,9 +16,14 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type lockEntry struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
 type CacheAside struct {
 	client  rueidis.Client
-	locks   syncx.Map[string, chan struct{}]
+	locks   syncx.Map[string, *lockEntry]
 	lockTTL time.Duration
 }
 
@@ -52,9 +57,9 @@ func (rca *CacheAside) Client() rueidis.Client {
 func (rca *CacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 	for _, m := range messages {
 		key, _ := m.ToString()
-		ch, loaded := rca.locks.LoadAndDelete(key)
+		entry, loaded := rca.locks.LoadAndDelete(key)
 		if loaded {
-			close(ch)
+			entry.cancel() // Cancel context, which closes the channel
 		}
 	}
 }
@@ -62,14 +67,42 @@ func (rca *CacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 const prefix = "redcache:"
 
 var (
-	delKeyLua          = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("DEL",KEYS[1]) else return 0 end`)
-	setKeyLua          = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("SET",KEYS[1],ARGV[2],"PX",ARGV[3]) else return 0 end`)
-	errLockWaitTimeout = errors.New("lock wait timeout - retrying")
+	delKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("DEL",KEYS[1]) else return 0 end`)
+	setKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("SET",KEYS[1],ARGV[2],"PX",ARGV[3]) else return 0 end`)
 )
 
 func (rca *CacheAside) register(key string) <-chan struct{} {
-	ch, _ := rca.locks.LoadOrStore(key, make(chan struct{}))
-	return ch
+	// Try to load existing entry first
+	if entry, loaded := rca.locks.Load(key); loaded {
+		// Check if the context is still active (not cancelled/timed out)
+		select {
+		case <-entry.ctx.Done():
+			// Context is done - clean it up and create a new one
+			rca.locks.Delete(key)
+		default:
+			// Context is still active - use it
+			return entry.ctx.Done()
+		}
+	}
+	entry.
+	// Create new entry with context that auto-cancels after lockTTL
+	ctx, cancel := context.WithTimeout(context.Background(), rca.lockTTL)
+
+	entry := &lockEntry{
+		ctx:    ctx,
+		cancel: cancel,
+	}
+
+	// Store or get existing entry atomically
+	actual, _ := rca.locks.LoadOrStore(key, entry)
+
+	// If another goroutine stored first, cancel our context and use theirs
+	if actual != entry {
+		cancel()
+		return actual.ctx.Done()
+	}
+
+	return ctx.Done()
 }
 
 func (rca *CacheAside) Get(
@@ -99,22 +132,13 @@ retry:
 	}
 
 	if val == "" {
-		// Wait for lock release with a timeout to handle lost invalidation messages
-		// Use lockTTL as the wait timeout since that's the max time a lock can be held
-		waitCtx, cancel := context.WithTimeoutCause(ctx, rca.lockTTL, errLockWaitTimeout)
-		defer cancel()
-
+		// Wait for lock release (channel auto-closes after lockTTL or on invalidation)
 		select {
 		case <-wait:
 			goto retry
-		case <-waitCtx.Done():
-			// Check if it's our timeout or parent context cancellation
-			if errors.Is(context.Cause(waitCtx), errLockWaitTimeout) {
-				// Our timeout - retry to check Redis again
-				goto retry
-			}
-			// Parent context cancelled - propagate the error
-			return "", context.Cause(waitCtx)
+		case <-ctx.Done():
+			// Parent context cancelled
+			return "", ctx.Err()
 		}
 	}
 
@@ -248,19 +272,11 @@ retry:
 	}
 
 	if len(waitLock) > 0 {
-		// Wait for lock releases with a timeout to handle lost invalidation messages
-		waitCtx, cancel := context.WithTimeoutCause(ctx, rca.lockTTL, errLockWaitTimeout)
-		err = syncx.WaitForAll(waitCtx, mapsx.Values(waitLock))
-		cancel()
-
-		// Check what kind of error occurred
+		// Wait for lock releases (channels auto-close after lockTTL or on invalidation)
+		err = syncx.WaitForAll(ctx, mapsx.Values(waitLock))
 		if err != nil {
-			// If it's our timeout, retry to check Redis again
-			if errors.Is(context.Cause(waitCtx), errLockWaitTimeout) {
-				goto retry
-			}
-			// Parent context cancelled - propagate the error
-			return nil, context.Cause(waitCtx)
+			// Parent context cancelled
+			return nil, ctx.Err()
 		}
 		goto retry
 	}
