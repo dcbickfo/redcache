@@ -3,8 +3,9 @@ package syncx_test
 import (
 	"testing"
 
-	"github.com/dcbickfo/redcache/internal/syncx"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/dcbickfo/redcache/internal/syncx"
 )
 
 func TestMap_CompareAndDelete(t *testing.T) {

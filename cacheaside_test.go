@@ -11,12 +11,13 @@ import (
 
 	"github.com/dcbickfo/redcache"
 
-	"github.com/dcbickfo/redcache/internal/mapsx"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/dcbickfo/redcache/internal/mapsx"
 )
 
 var addr = []string{"127.0.0.1:6379"}
@@ -191,7 +192,7 @@ func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 	}
 
 	innerClient := client.Client()
-	lockVal := "redcache:" + uuid.New().String()
+	lockVal := "__redcache:lock:" + uuid.New().String()
 	err := innerClient.Do(ctx, innerClient.B().Set().Key(keys[0]).Value(lockVal).Nx().Get().Px(time.Millisecond*100).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
@@ -632,7 +633,7 @@ func TestCacheAside_GetParentContextCancellation(t *testing.T) {
 
 	// Set a lock on the key so Get will wait
 	innerClient := client.Client()
-	lockVal := "redcache:" + uuid.New().String()
+	lockVal := "__redcache:lock:" + uuid.New().String()
 	err := innerClient.Do(context.Background(), innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
@@ -650,4 +651,192 @@ func TestCacheAside_GetParentContextCancellation(t *testing.T) {
 	_, err = client.Get(ctx, time.Second*10, key, cb)
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestConcurrentRegisterRace tests the register() method under high contention
+// to ensure the CompareAndDelete race condition fix works correctly
+func TestConcurrentRegisterRace(t *testing.T) {
+	// Use minimum allowed lock TTL to force lock expirations during concurrent access
+	client, err := redcache.NewRedCacheAside(
+		rueidis.ClientOption{
+			InitAddress: addr,
+		},
+		redcache.CacheAsideOption{
+			LockTTL: 100 * time.Millisecond,
+		},
+	)
+	require.NoError(t, err)
+	defer client.Client().Close()
+
+	ctx := context.Background()
+	key := "key:" + uuid.New().String()
+	val := "val:" + uuid.New().String()
+
+	callCount := 0
+	var mu sync.Mutex
+	cb := func(ctx context.Context, key string) (string, error) {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+		// Very short sleep to keep test fast while still triggering some lock expirations
+		time.Sleep(5 * time.Millisecond)
+		return val, nil
+	}
+
+	// Run concurrent goroutines to stress test the register race condition fix
+	wg := sync.WaitGroup{}
+	for i := 0; i < 100; i++ {
+		wg.Add(4)
+		go func() {
+			defer wg.Done()
+			res, err := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, err)
+			assert.Equal(t, val, res)
+		}()
+		go func() {
+			defer wg.Done()
+			res, err := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, err)
+			assert.Equal(t, val, res)
+		}()
+		go func() {
+			defer wg.Done()
+			res, err := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, err)
+			assert.Equal(t, val, res)
+		}()
+		go func() {
+			defer wg.Done()
+			res, err := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, err)
+			assert.Equal(t, val, res)
+		}()
+	}
+	wg.Wait()
+
+	// The callback should be called, but we might get multiple calls due to lock expiration
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Greater(t, callCount, 0, "callback should be called at least once")
+}
+
+// TestConcurrentGetSameKeySingleClient tests that multiple goroutines getting
+// the same key from a single client instance only triggers one callback when locks don't expire
+func TestConcurrentGetSameKeySingleClient(t *testing.T) {
+	client := makeClient(t, addr)
+	defer client.Client().Close()
+
+	ctx := context.Background()
+	key := "key:" + uuid.New().String()
+	val := "val:" + uuid.New().String()
+
+	callCount := 0
+	var mu sync.Mutex
+
+	cb := func(ctx context.Context, key string) (string, error) {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+		return val, nil
+	}
+
+	// Run multiple iterations with concurrent goroutines, matching existing test pattern
+	wg := sync.WaitGroup{}
+	for i := 0; i < 100; i++ {
+		wg.Add(4)
+		go func() {
+			defer wg.Done()
+			res, err := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, err)
+			assert.Equal(t, val, res)
+		}()
+		go func() {
+			defer wg.Done()
+			res, err := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, err)
+			assert.Equal(t, val, res)
+		}()
+		go func() {
+			defer wg.Done()
+			res, err := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, err)
+			assert.Equal(t, val, res)
+		}()
+		go func() {
+			defer wg.Done()
+			res, err := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, err)
+			assert.Equal(t, val, res)
+		}()
+	}
+
+	wg.Wait()
+
+	// Callback should only be called once due to distributed locking
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, callCount, "callback should only be called once")
+}
+
+// TestConcurrentInvalidation tests that cache invalidation works correctly
+// when multiple goroutines are accessing the same keys
+func TestConcurrentInvalidation(t *testing.T) {
+	client := makeClient(t, addr)
+	defer client.Client().Close()
+
+	ctx := context.Background()
+	key := "key:" + uuid.New().String()
+
+	callCount := 0
+	var mu sync.Mutex
+	cb := func(ctx context.Context, key string) (string, error) {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+		return "value", nil
+	}
+
+	// Populate cache
+	_, err := client.Get(ctx, time.Second*10, key, cb)
+	require.NoError(t, err)
+
+	mu.Lock()
+	initialCount := callCount
+	mu.Unlock()
+
+	// Delete the key
+	err = client.Del(ctx, key)
+	require.NoError(t, err)
+
+	// Run multiple iterations with concurrent reads after deletion, matching existing test pattern
+	wg := sync.WaitGroup{}
+	for i := 0; i < 100; i++ {
+		wg.Add(4)
+		go func() {
+			defer wg.Done()
+			_, err := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, err)
+		}()
+		go func() {
+			defer wg.Done()
+			_, err := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, err)
+		}()
+		go func() {
+			defer wg.Done()
+			_, err := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, err)
+		}()
+		go func() {
+			defer wg.Done()
+			_, err := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, err)
+		}()
+	}
+	wg.Wait()
+
+	// Callback should have been invoked at least once more due to invalidation
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Greater(t, callCount, initialCount, "callbacks should be invoked after invalidation")
 }

@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dcbickfo/redcache/internal/syncx"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/dcbickfo/redcache/internal/syncx"
 )
 
 func delayedSend[T any](ch chan T, val T, delay time.Duration) {

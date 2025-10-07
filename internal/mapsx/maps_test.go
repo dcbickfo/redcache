@@ -3,8 +3,9 @@ package mapsx_test
 import (
 	"testing"
 
-	"github.com/dcbickfo/redcache/internal/mapsx"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/dcbickfo/redcache/internal/mapsx"
 )
 
 func TestKeys(t *testing.T) {
