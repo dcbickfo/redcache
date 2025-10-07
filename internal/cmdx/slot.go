@@ -3,7 +3,7 @@ package cmdx
 // https://redis.io/topics/cluster-spec
 
 const (
-	// RedisClusterSlots is the number of hash slots in a Redis cluster (16384 slots, 0-16383).
+	// RedisClusterSlots is the maximum slot number in a Redis cluster (16384 total slots, numbered 0-16383).
 	RedisClusterSlots = 16383
 )
 
