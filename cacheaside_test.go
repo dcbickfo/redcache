@@ -9,14 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dcbickfo/redcache"
-
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dcbickfo/redcache"
 	"github.com/dcbickfo/redcache/internal/mapsx"
 )
 
