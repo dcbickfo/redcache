@@ -2,6 +2,11 @@ package cmdx
 
 // https://redis.io/topics/cluster-spec
 
+const (
+	// RedisClusterSlots is the maximum slot number in a Redis cluster (16384 total slots, numbered 0-16383).
+	RedisClusterSlots = 16383
+)
+
 func Slot(key string) uint16 {
 	var s, e int
 	for ; s < len(key); s++ {
@@ -10,7 +15,7 @@ func Slot(key string) uint16 {
 		}
 	}
 	if s == len(key) {
-		return crc16(key) & 16383
+		return crc16(key) & RedisClusterSlots
 	}
 	for e = s + 1; e < len(key); e++ {
 		if key[e] == '}' {
@@ -18,9 +23,9 @@ func Slot(key string) uint16 {
 		}
 	}
 	if e == len(key) || e == s+1 {
-		return crc16(key) & 16383
+		return crc16(key) & RedisClusterSlots
 	}
-	return crc16(key[s+1:e]) & 16383
+	return crc16(key[s+1:e]) & RedisClusterSlots
 }
 
 /*
