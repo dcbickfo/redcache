@@ -65,6 +65,7 @@ import (
 	"iter"
 	"log/slog"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,7 +76,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/dcbickfo/redcache/internal/cmdx"
-	"github.com/dcbickfo/redcache/internal/mapsx"
 	"github.com/dcbickfo/redcache/internal/syncx"
 )
 
@@ -95,6 +95,16 @@ type Logger interface {
 	Debug(msg string, args ...any)
 }
 
+// CacheAside implements the cache-aside pattern with distributed locking for Redis.
+// It coordinates concurrent access to prevent cache stampedes and ensures only one
+// process populates the cache for a given key at a time across distributed systems.
+//
+// Key features:
+//   - Distributed locking prevents thundering herd on cache misses
+//   - Client-side caching with Redis invalidation for consistency
+//   - Automatic retry on lock contention with configurable timeouts
+//   - Batch operations with slot-aware grouping for Redis clusters
+//   - Context-aware cleanup ensures locks are released even on errors
 type CacheAside struct {
 	client     rueidis.Client
 	locks      syncx.Map[string, *lockEntry]
@@ -103,19 +113,53 @@ type CacheAside struct {
 	lockPrefix string
 }
 
+// CacheAsideOption configures the behavior of the CacheAside instance.
+// All fields are optional with sensible defaults.
 type CacheAsideOption struct {
 	// LockTTL is the maximum time a lock can be held, and also the timeout for waiting
 	// on locks when handling lost Redis invalidation messages. Defaults to 10 seconds.
-	LockTTL       time.Duration
+	// This value should be longer than your typical callback execution time but short
+	// enough to recover quickly from process failures.
+	LockTTL time.Duration
+
+	// ClientBuilder allows customizing the Redis client creation.
+	// If nil, rueidis.NewClient is used with the provided options.
+	// This is useful for injecting mock clients in tests or adding middleware.
 	ClientBuilder func(option rueidis.ClientOption) (rueidis.Client, error)
+
 	// Logger for logging errors and debug information. Defaults to slog.Default().
 	// The logger should handle log levels internally (e.g., only log Debug if level is enabled).
 	Logger Logger
+
 	// LockPrefix for distributed locks. Defaults to "__redcache:lock:".
 	// Choose a prefix unlikely to conflict with your data keys.
+	// The prefix helps identify locks in Redis and prevents accidental data corruption.
 	LockPrefix string
 }
 
+// NewRedCacheAside creates a new CacheAside instance with the specified Redis client options
+// and cache-aside configuration.
+//
+// The function validates all options and sets appropriate defaults:
+//   - LockTTL defaults to 10 seconds if not specified
+//   - Logger defaults to slog.Default() if not provided
+//   - LockPrefix defaults to "__redcache:lock:" if empty
+//
+// Returns an error if:
+//   - No Redis addresses are provided in InitAddress
+//   - LockTTL is negative or less than 100ms
+//   - Redis client creation fails
+//
+// Example:
+//
+//	ca, err := NewRedCacheAside(
+//	    rueidis.ClientOption{InitAddress: []string{"localhost:6379"}},
+//	    CacheAsideOption{LockTTL: 5 * time.Second},
+//	)
+//	if err != nil {
+//	    return err
+//	}
+//	defer ca.Client().Close()
 func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOption) (*CacheAside, error) {
 	// Validate client options
 	if len(clientOption.InitAddress) == 0 {
@@ -219,19 +263,52 @@ retry:
 		}
 		// CompareAndDelete failed - another goroutine modified it
 		// Load the new entry and use it
-		newEntry, loaded := rca.locks.Load(key)
-		if !loaded {
+		waitEntry, ok := rca.locks.Load(key)
+		if !ok {
 			// Entry was deleted by another goroutine, retry registration
 			goto retry
 		}
 		// Use the new entry's context
-		return newEntry.ctx.Done()
+		return waitEntry.ctx.Done()
 	default:
 		// Context is still active - use it
 		return actual.ctx.Done()
 	}
 }
 
+// Get retrieves a value from cache or computes it using the provided callback function.
+// It implements the cache-aside pattern with distributed locking to prevent cache stampedes.
+//
+// The operation flow:
+//  1. Check if the value exists in cache (including client-side cache)
+//  2. If found and not a lock value, return it immediately
+//  3. If not found or is a lock, try to acquire a distributed lock
+//  4. If lock acquired, execute the callback to compute the value
+//  5. Store the computed value in cache with the specified TTL
+//  6. If lock not acquired, wait for the lock to be released and retry
+//
+// The method automatically retries when:
+//   - Another process holds the lock (waits for completion)
+//   - Redis invalidation is received (indicating the key was updated)
+//   - A lock is lost during the set operation (e.g., overridden by ForceSet)
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout control
+//   - ttl: Time-to-live for the cached value
+//   - key: The cache key to get or set
+//   - fn: Callback function to compute the value if not in cache
+//
+// Returns:
+//   - The cached or computed value
+//   - An error if the operation fails or context is cancelled
+//
+// Example:
+//
+//	value, err := ca.Get(ctx, 5*time.Minute, "user:123", func(ctx context.Context, key string) (string, error) {
+//	    // This function is only called if the value is not in cache
+//	    // and this process successfully acquires the lock
+//	    return database.GetUser(ctx, "123")
+//	})
 func (rca *CacheAside) Get(
 	ctx context.Context,
 	ttl time.Duration,
@@ -254,12 +331,13 @@ retry:
 		val, err = rca.trySetKeyFunc(ctx, ttl, key, fn)
 	}
 
-	if err != nil && !errors.Is(err, errLockFailed) {
+	if err != nil && !errors.Is(err, errLockFailed) && !errors.Is(err, ErrLockLost) {
 		return "", err
 	}
 
-	if val == "" {
+	if val == "" || errors.Is(err, ErrLockLost) {
 		// Wait for lock release (channel auto-closes after lockTTL or on invalidation)
+		// Also wait if lock was lost (e.g., overridden by ForceSet)
 		select {
 		case <-wait:
 			goto retry
@@ -272,10 +350,31 @@ retry:
 	return val, err
 }
 
+// Del removes a key from Redis cache.
+// This triggers invalidation messages to clear client-side caches across all connected instances.
+//
+// Parameters:
+//   - ctx: Context for cancellation control
+//   - key: The cache key to delete
+//
+// Returns an error if the deletion fails. Returns nil even if the key doesn't exist.
 func (rca *CacheAside) Del(ctx context.Context, key string) error {
 	return rca.client.Do(ctx, rca.client.B().Del().Key(key).Build()).Error()
 }
 
+// DelMulti removes multiple keys from Redis cache in a single batch operation.
+// This triggers invalidation messages for all deleted keys to maintain cache consistency.
+//
+// The operation is optimized for Redis clusters by grouping keys by slot and
+// executing deletions in parallel for better performance.
+//
+// Parameters:
+//   - ctx: Context for cancellation control
+//   - keys: Variable number of cache keys to delete
+//
+// Returns an error if any deletion fails. The operation is not atomic - some keys
+// may be deleted even if others fail. Returns nil if all deletions succeed or if
+// no keys are provided.
 func (rca *CacheAside) DelMulti(ctx context.Context, keys ...string) error {
 	cmds := make(rueidis.Commands, 0, len(keys))
 	for _, key := range keys {
@@ -330,8 +429,8 @@ func (rca *CacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key
 			toCtx, cancel := context.WithTimeout(cleanupCtx, rca.lockTTL)
 			defer cancel()
 			// Best effort unlock - errors are non-fatal as lock will expire
-			if err := rca.unlock(toCtx, key, lockVal); err != nil {
-				rca.logger.Error("failed to unlock key", "key", key, "error", err)
+			if unlockErr := rca.unlock(toCtx, key, lockVal); unlockErr != nil {
+				rca.logger.Error("failed to unlock key", "key", key, "error", unlockErr)
 			}
 		}
 	}()
@@ -361,14 +460,26 @@ func (rca *CacheAside) tryLock(ctx context.Context, key string) (string, error) 
 }
 
 func (rca *CacheAside) setWithLock(ctx context.Context, ttl time.Duration, key string, valLock valAndLock) (string, error) {
-	err := setKeyLua.Exec(ctx, rca.client, []string{key}, []string{valLock.lockVal, valLock.val, strconv.FormatInt(ttl.Milliseconds(), 10)}).Error()
-	if err != nil {
+	result := setKeyLua.Exec(ctx, rca.client, []string{key}, []string{valLock.lockVal, valLock.val, strconv.FormatInt(ttl.Milliseconds(), 10)})
+
+	// Check for Redis errors first
+	if err := result.Error(); err != nil {
 		if !rueidis.IsRedisNil(err) {
 			return "", fmt.Errorf("failed to set value for key %q: %w", key, err)
 		}
 		rca.logger.Debug("lock lost during set operation", "key", key)
 		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
 	}
+
+	// Check the Lua script return value
+	// The script returns 0 if the lock doesn't match, or the SET result if successful
+	returnValue, err := result.AsInt64()
+	if err == nil && returnValue == 0 {
+		// Lock was lost - the current value doesn't match our lock
+		rca.logger.Debug("lock lost during set operation - lock value mismatch", "key", key)
+		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
+	}
+
 	rca.logger.Debug("value set successfully", "key", key)
 	return valLock.val, nil
 }
@@ -377,6 +488,47 @@ func (rca *CacheAside) unlock(ctx context.Context, key string, lock string) erro
 	return delKeyLua.Exec(ctx, rca.client, []string{key}, []string{lock}).Error()
 }
 
+// GetMulti retrieves multiple values from cache or computes them using the provided callback.
+// It extends the cache-aside pattern to handle batch operations efficiently with distributed locking.
+//
+// The operation flow:
+//  1. Check which values exist in cache (including client-side cache)
+//  2. For cache hits, return them immediately
+//  3. For cache misses, attempt to acquire distributed locks
+//  4. Execute the callback only for keys where locks were acquired
+//  5. Store the computed values in cache with the specified TTL
+//  6. For keys where locks couldn't be acquired, wait and retry
+//
+// The callback may be called multiple times with different subsets of keys as locks
+// become available. This allows for partial progress even when some keys are locked.
+//
+// Performance optimizations:
+//   - Batch Redis operations for efficiency
+//   - Slot-aware grouping for Redis clusters
+//   - Parallel execution where possible
+//   - Client-side caching to minimize round trips
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout control
+//   - ttl: Time-to-live for cached values
+//   - keys: List of cache keys to retrieve
+//   - fn: Callback to compute values for keys not in cache
+//
+// The callback receives only the keys for which locks were successfully acquired.
+// It should return a map containing values for those keys.
+//
+// Returns:
+//   - A map of all requested keys to their values
+//   - An error if the operation fails or context is cancelled
+//
+// Example:
+//
+//	values, err := ca.GetMulti(ctx, 5*time.Minute, []string{"user:1", "user:2", "user:3"},
+//	    func(ctx context.Context, keys []string) (map[string]string, error) {
+//	        // This may be called with a subset like ["user:2"] if only that key
+//	        // needs to be fetched from the database
+//	        return database.GetUsers(ctx, keys)
+//	    })
 func (rca *CacheAside) GetMulti(
 	ctx context.Context,
 	ttl time.Duration,
@@ -393,7 +545,7 @@ func (rca *CacheAside) GetMulti(
 retry:
 	waitLock = rca.registerAll(maps.Keys(waitLock), len(waitLock))
 
-	vals, err := rca.tryGetMulti(ctx, ttl, mapsx.Keys(waitLock))
+	vals, err := rca.tryGetMulti(ctx, ttl, slices.Collect(maps.Keys(waitLock)))
 	if err != nil && !rueidis.IsRedisNil(err) {
 		return nil, err
 	}
@@ -404,7 +556,7 @@ retry:
 	}
 
 	if len(waitLock) > 0 {
-		vals, err := rca.trySetMultiKeyFn(ctx, ttl, mapsx.Keys(waitLock), fn)
+		vals, err = rca.trySetMultiKeyFn(ctx, ttl, slices.Collect(maps.Keys(waitLock)), fn)
 		if err != nil {
 			return nil, err
 		}
@@ -495,7 +647,7 @@ func (rca *CacheAside) trySetMultiKeyFn(
 		return res, nil
 	}
 
-	vals, err := fn(ctx, mapsx.Keys(lockVals))
+	vals, err := fn(ctx, slices.Collect(maps.Keys(lockVals)))
 	if err != nil {
 		return nil, err
 	}
@@ -570,6 +722,27 @@ func groupBySlot(keyValLock map[string]valAndLock, ttl time.Duration) map[uint16
 	return stmts
 }
 
+// processSetResponse checks if a set operation succeeded and returns true if it did.
+func (rca *CacheAside) processSetResponse(resp rueidis.RedisResult) (bool, error) {
+	// Check for Redis errors first
+	if err := resp.Error(); err != nil {
+		if !rueidis.IsRedisNil(err) {
+			return false, err
+		}
+		return false, nil
+	}
+
+	// Check the Lua script return value
+	// The script returns 0 if the lock doesn't match
+	returnValue, err := resp.AsInt64()
+	if err == nil && returnValue == 0 {
+		// Lock was lost for this key
+		return false, nil
+	}
+
+	return true, nil
+}
+
 // executeSetStatements executes Lua set statements in parallel, grouped by slot.
 func (rca *CacheAside) executeSetStatements(ctx context.Context, stmts map[uint16]keyOrderAndSet) ([]string, error) {
 	keyByStmt := make([][]string, len(stmts))
@@ -581,14 +754,13 @@ func (rca *CacheAside) executeSetStatements(ctx context.Context, stmts map[uint1
 		eg.Go(func() error {
 			setResps := setKeyLua.ExecMulti(ctx, rca.client, kos.setStmts...)
 			for j, resp := range setResps {
-				err := resp.Error()
+				success, err := rca.processSetResponse(resp)
 				if err != nil {
-					if !rueidis.IsRedisNil(err) {
-						return err
-					}
-					continue
+					return err
 				}
-				keyByStmt[ii] = append(keyByStmt[ii], kos.keyOrder[j])
+				if success {
+					keyByStmt[ii] = append(keyByStmt[ii], kos.keyOrder[j])
+				}
 			}
 			return nil
 		})

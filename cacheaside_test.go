@@ -3,6 +3,7 @@ package redcache_test
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"sync"
@@ -16,7 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dcbickfo/redcache"
-	"github.com/dcbickfo/redcache/internal/mapsx"
 )
 
 var addr = []string{"127.0.0.1:6379"}
@@ -63,7 +63,6 @@ func TestCacheAside_Get(t *testing.T) {
 		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
 	}
 	require.False(t, called)
-
 }
 
 func TestCacheAside_GetMulti(t *testing.T) {
@@ -234,7 +233,6 @@ func TestCacheAside_Del(t *testing.T) {
 }
 
 func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
-
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 	client2 := makeClient(t, addr)
@@ -329,7 +327,6 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 }
 
 func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) {
-
 	client1 := makeClient(t, addr)
 	defer client1.Client().Close()
 	client2 := makeClient(t, addr)
@@ -464,7 +461,6 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 }
 
 func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
-
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 
@@ -613,7 +609,7 @@ func TestCacheAside_DelMulti(t *testing.T) {
 		require.NoErrorf(t, err, "expected no error, got %v", err)
 	}
 
-	err := client.DelMulti(ctx, mapsx.Keys(keyAndVals)...)
+	err := client.DelMulti(ctx, slices.Collect(maps.Keys(keyAndVals))...)
 	require.NoError(t, err)
 
 	for key := range keyAndVals {
@@ -653,7 +649,7 @@ func TestCacheAside_GetParentContextCancellation(t *testing.T) {
 }
 
 // TestConcurrentRegisterRace tests the register() method under high contention
-// to ensure the CompareAndDelete race condition fix works correctly
+// to ensure the CompareAndDelete race condition fix works correctly.
 func TestConcurrentRegisterRace(t *testing.T) {
 	// Use minimum allowed lock TTL to force lock expirations during concurrent access
 	client, err := redcache.NewRedCacheAside(
@@ -688,26 +684,26 @@ func TestConcurrentRegisterRace(t *testing.T) {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
+			res, getErr := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, getErr)
 			assert.Equal(t, val, res)
 		}()
 		go func() {
 			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
+			res, getErr := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, getErr)
 			assert.Equal(t, val, res)
 		}()
 		go func() {
 			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
+			res, getErr := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, getErr)
 			assert.Equal(t, val, res)
 		}()
 		go func() {
 			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
+			res, getErr := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, getErr)
 			assert.Equal(t, val, res)
 		}()
 	}
@@ -720,7 +716,7 @@ func TestConcurrentRegisterRace(t *testing.T) {
 }
 
 // TestConcurrentGetSameKeySingleClient tests that multiple goroutines getting
-// the same key from a single client instance only triggers one callback when locks don't expire
+// the same key from a single client instance only triggers one callback when locks don't expire.
 func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -778,7 +774,7 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 }
 
 // TestConcurrentInvalidation tests that cache invalidation works correctly
-// when multiple goroutines are accessing the same keys
+// when multiple goroutines are accessing the same keys.
 func TestConcurrentInvalidation(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -813,23 +809,23 @@ func TestConcurrentInvalidation(t *testing.T) {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
-			_, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
+			_, getErr := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, getErr)
 		}()
 		go func() {
 			defer wg.Done()
-			_, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
+			_, getErr := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, getErr)
 		}()
 		go func() {
 			defer wg.Done()
-			_, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
+			_, getErr := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, getErr)
 		}()
 		go func() {
 			defer wg.Done()
-			_, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
+			_, getErr := client.Get(ctx, time.Second*10, key, cb)
+			assert.NoError(t, getErr)
 		}()
 	}
 	wg.Wait()
@@ -838,4 +834,148 @@ func TestConcurrentInvalidation(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Greater(t, callCount, initialCount, "callbacks should be invoked after invalidation")
+}
+
+// TestDeleteDuringGetWithLock tests that Delete called while Get holds a lock
+// triggers graceful retry behavior via Redis invalidation messages.
+func TestDeleteDuringGetWithLock(t *testing.T) {
+	client := makeClient(t, addr)
+	defer client.Client().Close()
+
+	ctx := context.Background()
+	key := "key:" + uuid.New().String()
+	expectedValue := "val:" + uuid.New().String()
+
+	callCount := 0
+	var mu sync.Mutex
+	var lockAcquiredOnce sync.Once
+	getStarted := make(chan struct{})
+	lockAcquired := make(chan struct{})
+
+	cb := func(ctx context.Context, key string) (string, error) {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+
+		// Signal that we've started executing (only once)
+		lockAcquiredOnce.Do(func() {
+			close(lockAcquired)
+		})
+
+		// Simulate some work while holding the lock
+		time.Sleep(50 * time.Millisecond)
+
+		return expectedValue, nil
+	}
+
+	// Start Get operation in background
+	var getResult string
+	var getErr error
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		close(getStarted)
+		getResult, getErr = client.Get(ctx, time.Second*10, key, cb)
+	}()
+
+	// Wait for Get to acquire lock
+	<-getStarted
+	<-lockAcquired
+
+	// Now delete while Get is holding the lock
+	err := client.Del(ctx, key)
+	require.NoError(t, err)
+
+	// Wait for Get to complete
+	wg.Wait()
+
+	// Get should have completed successfully with graceful retry
+	require.NoError(t, getErr)
+	require.Equal(t, expectedValue, getResult)
+
+	// Callback should have been called twice:
+	// 1. First call sets the lock and value
+	// 2. Delete triggers invalidation, causing ErrLockLost
+	// 3. Get retries and calls callback again
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 2, callCount, "callback should be called twice due to Delete invalidation")
+}
+
+// TestDeleteDuringGetMultiWithLocks tests that Delete called while GetMulti
+// holds locks triggers graceful retry behavior via Redis invalidation messages.
+func TestDeleteDuringGetMultiWithLocks(t *testing.T) {
+	client := makeClient(t, addr)
+	defer client.Client().Close()
+
+	ctx := context.Background()
+	keyAndVals := make(map[string]string)
+	for i := range 3 {
+		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
+	}
+	keys := make([]string, 0, len(keyAndVals))
+	for k := range keyAndVals {
+		keys = append(keys, k)
+	}
+
+	callCount := 0
+	var mu sync.Mutex
+	var lockAcquiredOnce sync.Once
+	getStarted := make(chan struct{})
+	lockAcquired := make(chan struct{})
+
+	cb := func(ctx context.Context, keys []string) (map[string]string, error) {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+
+		// Signal that we've started executing (only once)
+		lockAcquiredOnce.Do(func() {
+			close(lockAcquired)
+		})
+
+		// Simulate some work while holding locks
+		time.Sleep(50 * time.Millisecond)
+
+		res := make(map[string]string, len(keys))
+		for _, key := range keys {
+			res[key] = keyAndVals[key]
+		}
+		return res, nil
+	}
+
+	// Start GetMulti operation in background
+	var getResult map[string]string
+	var getErr error
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		close(getStarted)
+		getResult, getErr = client.GetMulti(ctx, time.Second*10, keys, cb)
+	}()
+
+	// Wait for GetMulti to acquire locks
+	<-getStarted
+	<-lockAcquired
+
+	// Now delete one of the keys while GetMulti is holding locks
+	err := client.Del(ctx, keys[0])
+	require.NoError(t, err)
+
+	// Wait for GetMulti to complete
+	wg.Wait()
+
+	// GetMulti should have completed successfully with graceful retry
+	require.NoError(t, getErr)
+	require.Equal(t, keyAndVals, getResult)
+
+	// Callback should have been called twice:
+	// 1. First call sets locks and values
+	// 2. Delete triggers invalidation on one key, causing retry
+	// 3. GetMulti retries and calls callback again
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 2, callCount, "callback should be called twice due to Delete invalidation")
 }

@@ -22,12 +22,7 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v4
         with:
-          version: latest
+          version: v2.6.1
           args: --timeout=5m
       - name: Test with Go
-        run: go test -json > TestResults.json
-      - name: Upload Go test results
-        uses: actions/upload-artifact@v4
-        with:
-          name: Go-results
-          path: TestResults.json
+        run: go test -tags=examples -v ./...
