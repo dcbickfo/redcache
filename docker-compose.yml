@@ -1,7 +1,41 @@
 version: "3.8"
 
 services:
+  # Standalone Redis for basic testing
   redis:
     image: redis:7.2.4-alpine
     ports:
       - "6379:6379"
+    command: redis-server --save "" --appendonly no
+
+  # Redis Cluster for cluster compatibility testing
+  # Note: Uses different ports to avoid conflicts with macOS Control Center on port 7000
+  redis-cluster:
+    image: redis:7.2.4-alpine
+    container_name: redis-cluster
+    ports:
+      - "17000:17000"
+      - "17001:17001"
+      - "17002:17002"
+      - "17003:17003"
+      - "17004:17004"
+      - "17005:17005"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mkdir -p /cluster-data/17000 /cluster-data/17001 /cluster-data/17002 /cluster-data/17003 /cluster-data/17004 /cluster-data/17005
+        redis-server --bind 0.0.0.0 --port 17000 --cluster-enabled yes --cluster-config-file /cluster-data/17000/nodes.conf --cluster-node-timeout 5000 --appendonly no --save "" --dir /cluster-data/17000 &
+        redis-server --bind 0.0.0.0 --port 17001 --cluster-enabled yes --cluster-config-file /cluster-data/17001/nodes.conf --cluster-node-timeout 5000 --appendonly no --save "" --dir /cluster-data/17001 &
+        redis-server --bind 0.0.0.0 --port 17002 --cluster-enabled yes --cluster-config-file /cluster-data/17002/nodes.conf --cluster-node-timeout 5000 --appendonly no --save "" --dir /cluster-data/17002 &
+        redis-server --bind 0.0.0.0 --port 17003 --cluster-enabled yes --cluster-config-file /cluster-data/17003/nodes.conf --cluster-node-timeout 5000 --appendonly no --save "" --dir /cluster-data/17003 &
+        redis-server --bind 0.0.0.0 --port 17004 --cluster-enabled yes --cluster-config-file /cluster-data/17004/nodes.conf --cluster-node-timeout 5000 --appendonly no --save "" --dir /cluster-data/17004 &
+        redis-server --bind 0.0.0.0 --port 17005 --cluster-enabled yes --cluster-config-file /cluster-data/17005/nodes.conf --cluster-node-timeout 5000 --appendonly no --save "" --dir /cluster-data/17005 &
+        sleep 5
+        echo "Creating cluster..."
+        redis-cli --cluster create 127.0.0.1:17000 127.0.0.1:17001 127.0.0.1:17002 127.0.0.1:17003 127.0.0.1:17004 127.0.0.1:17005 --cluster-replicas 1 --cluster-yes
+        wait
+    volumes:
+      - redis-cluster-data:/cluster-data
+
+volumes:
+  redis-cluster-data:

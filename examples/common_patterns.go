@@ -69,9 +69,10 @@ func Example_CacheAsidePattern() {
 	// Got user: Alice Smith <alice@example.com>
 }
 
-// Example_WriteThroughPattern demonstrates write-through caching where
-// database writes are immediately reflected in cache. This ensures cache
-// consistency after updates.
+// Example_WriteThroughPattern demonstrates the write-through caching pattern where
+// the callback updates the database and the library caches the result. This ensures
+// cache consistency after updates. The callback controls the backing store behavior -
+// in this case, it implements write-through by updating the database first.
 func Example_WriteThroughPattern() {
 	pca, err := redcache.NewPrimeableCacheAside(
 		rueidis.ClientOption{InitAddress: []string{"localhost:6379"}},

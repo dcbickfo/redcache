@@ -108,6 +108,8 @@ var crc16tab = [256]uint16{
 
 func crc16(key string) (crc uint16) {
 	for i := 0; i < len(key); i++ {
+		// G115: Safe conversion - crc>>8 is guaranteed to fit in uint8
+		//nolint:gosec
 		crc = (crc << 8) ^ crc16tab[(uint8(crc>>8)^key[i])&0x00FF]
 	}
 	return crc

@@ -114,8 +114,7 @@ linters:
       max-func-lines: 30
 
     unparam:
-      # Check exported functions
-      check-exported: false
+      check-exported: true
 
     whitespace:
       multi-if: false
@@ -155,27 +154,10 @@ linters:
         linters:
           - revive
 
-      # Exclude context-as-argument for test helper functions
-      - path: _test\.go
-        linters:
-          - revive
-        text: "context-as-argument"
-
-      # Exclude known issues in vendor
+      # Exclude vendor
       - path: vendor/
         linters:
           - all
-
-      # Ignore "new" parameter name shadowing built-in
-      - text: "redefines-builtin-id"
-        linters:
-          - revive
-
-      # Ignore integer overflow in CRC16 - this is intentional and safe
-      - text: "G115.*integer overflow"
-        path: internal/cmdx/slot.go
-        linters:
-          - gosec
 
 issues:
   # Maximum issues count per one linter

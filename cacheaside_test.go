@@ -3,7 +3,6 @@ package redcache_test
 import (
 	"context"
 	"fmt"
-	"maps"
 	"math/rand/v2"
 	"slices"
 	"sync"
@@ -44,25 +43,20 @@ func TestCacheAside_Get(t *testing.T) {
 	val := "val:" + uuid.New().String()
 	called := false
 
-	cb := func(ctx context.Context, key string) (string, error) {
-		called = true
-		return val, nil
-	}
+	cb := makeGetCallback(val, &called)
 
+	// First call should execute callback
 	res, err := client.Get(ctx, time.Second*10, key, cb)
 	require.NoError(t, err)
-	if diff := cmp.Diff(val, res); diff != "" {
-		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
-	}
-	require.True(t, called)
+	assertValueEquals(t, val, res)
+	assertCallbackCalled(t, called, "first Get should execute callback")
 
+	// Second call should hit cache
 	called = false
 	res, err = client.Get(ctx, time.Second*10, key, cb)
 	require.NoError(t, err)
-	if diff := cmp.Diff(val, res); diff != "" {
-		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
-	}
-	require.False(t, called)
+	assertValueEquals(t, val, res)
+	assertCallbackNotCalled(t, called, "second Get should hit cache")
 }
 
 func TestCacheAside_GetMulti(t *testing.T) {
@@ -78,30 +72,24 @@ func TestCacheAside_GetMulti(t *testing.T) {
 		keys = append(keys, k)
 	}
 	called := false
+	cb := makeGetMultiCallback(keyAndVals, &called)
 
-	cb := func(ctx context.Context, keys []string) (map[string]string, error) {
-		called = true
-		res := make(map[string]string, len(keys))
-		for _, key := range keys {
-			res[key] = keyAndVals[key]
-		}
-		return res, nil
-	}
-
+	// First call should execute callback
 	res, err := client.GetMulti(ctx, time.Second*10, keys, cb)
 	require.NoError(t, err)
 	if diff := cmp.Diff(keyAndVals, res); diff != "" {
-		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
+		t.Errorf("GetMulti() mismatch (-want +got):\n%s", diff)
 	}
-	require.True(t, called)
+	assertCallbackCalled(t, called, "first GetMulti should execute callback")
 
+	// Second call should hit cache
 	called = false
 	res, err = client.GetMulti(ctx, time.Second*10, keys, cb)
 	require.NoError(t, err)
 	if diff := cmp.Diff(keyAndVals, res); diff != "" {
-		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
+		t.Errorf("GetMulti() mismatch (-want +got):\n%s", diff)
 	}
-	require.False(t, called)
+	assertCallbackNotCalled(t, called, "second GetMulti should hit cache")
 }
 
 func TestCacheAside_GetMulti_Partial(t *testing.T) {
@@ -609,7 +597,11 @@ func TestCacheAside_DelMulti(t *testing.T) {
 		require.NoErrorf(t, err, "expected no error, got %v", err)
 	}
 
-	err := client.DelMulti(ctx, slices.Collect(maps.Keys(keyAndVals))...)
+	keys := make([]string, 0, len(keyAndVals))
+	for k := range keyAndVals {
+		keys = append(keys, k)
+	}
+	err := client.DelMulti(ctx, keys...)
 	require.NoError(t, err)
 
 	for key := range keyAndVals {
@@ -978,4 +970,89 @@ func TestDeleteDuringGetMultiWithLocks(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Equal(t, 2, callCount, "callback should be called twice due to Delete invalidation")
+}
+
+// TestCacheAside_LockExpiration tests Get/GetMulti behavior when locks expire naturally
+func TestCacheAside_LockExpiration(t *testing.T) {
+	t.Run("Get with callback exceeding lock TTL", func(t *testing.T) {
+		ctx := context.Background()
+		key := "get-exceed-ttl:" + uuid.New().String()
+
+		callCount := 0
+		client, err := redcache.NewRedCacheAside(
+			rueidis.ClientOption{InitAddress: addr},
+			redcache.CacheAsideOption{LockTTL: 500 * time.Millisecond},
+		)
+		require.NoError(t, err)
+		defer client.Close()
+
+		// Get with callback that exceeds lock TTL
+		// With CSC populated, lock expiration triggers invalidation and Get retries
+		value, err := client.Get(ctx, 10*time.Second, key, func(ctx context.Context, key string) (string, error) {
+			callCount++
+			// First call: simulate computation that exceeds lock TTL
+			// Lock will expire during callback, triggering CSC invalidation
+			// Second call: should complete quickly and succeed
+			if callCount == 1 {
+				time.Sleep(600 * time.Millisecond)
+			}
+			return "computed-value", nil
+		})
+
+		// Get should succeed after retry (CSC invalidation triggers retry)
+		require.NoError(t, err, "Get should succeed after lock expiration triggers retry")
+		assert.Equal(t, "computed-value", value)
+		assert.Equal(t, 2, callCount, "callback should be called twice: first fails CAS, second succeeds")
+
+		// Value should be cached after successful retry
+		innerClient := client.Client()
+		cachedVal, getErr := innerClient.Do(ctx, innerClient.B().Get().Key(key).Build()).ToString()
+		require.NoError(t, getErr)
+		assert.Equal(t, "computed-value", cachedVal)
+	})
+
+	t.Run("GetMulti with callback exceeding lock TTL", func(t *testing.T) {
+		ctx := context.Background()
+		key1 := "getmulti-exceed-1:" + uuid.New().String()
+		key2 := "getmulti-exceed-2:" + uuid.New().String()
+
+		callCount := 0
+		client, err := redcache.NewRedCacheAside(
+			rueidis.ClientOption{InitAddress: addr},
+			redcache.CacheAsideOption{LockTTL: 500 * time.Millisecond},
+		)
+		require.NoError(t, err)
+		defer client.Close()
+
+		// GetMulti with callback that exceeds lock TTL
+		// With CSC populated, lock expiration triggers invalidation and GetMulti retries
+		result, err := client.GetMulti(ctx, 10*time.Second, []string{key1, key2}, func(ctx context.Context, keys []string) (map[string]string, error) {
+			callCount++
+			// First call: exceed lock TTL, second call: complete quickly
+			if callCount == 1 {
+				time.Sleep(600 * time.Millisecond)
+			}
+			return map[string]string{
+				key1: "value1",
+				key2: "value2",
+			}, nil
+		})
+
+		// GetMulti should succeed after retry (CSC invalidation triggers retry)
+		require.NoError(t, err, "GetMulti should succeed after lock expiration triggers retry")
+		assert.Len(t, result, 2)
+		assert.Equal(t, "value1", result[key1])
+		assert.Equal(t, "value2", result[key2])
+		assert.Equal(t, 2, callCount, "callback should be called twice")
+
+		// Values should be cached after successful retry
+		innerClient := client.Client()
+		cached1, cached1Err := innerClient.Do(ctx, innerClient.B().Get().Key(key1).Build()).ToString()
+		cached2, cached2Err := innerClient.Do(ctx, innerClient.B().Get().Key(key2).Build()).ToString()
+
+		require.NoError(t, cached1Err)
+		require.NoError(t, cached2Err)
+		assert.Equal(t, "value1", cached1)
+		assert.Equal(t, "value2", cached2)
+	})
 }

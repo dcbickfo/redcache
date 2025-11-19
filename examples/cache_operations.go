@@ -14,8 +14,8 @@ import (
 )
 
 // Example_ProductInventoryUpdate demonstrates a realistic use case:
-// updating product inventory with write-through caching to ensure
-// cache consistency after stock changes.
+// updating product inventory with write-through caching (callback handles database update)
+// to ensure cache consistency after stock changes.
 func Example_ProductInventoryUpdate() {
 	pca, err := redcache.NewPrimeableCacheAside(
 		rueidis.ClientOption{InitAddress: []string{"localhost:6379"}},
