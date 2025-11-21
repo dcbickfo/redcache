@@ -1,3 +1,5 @@
+//go:build integration
+
 package redcache_test
 
 import (

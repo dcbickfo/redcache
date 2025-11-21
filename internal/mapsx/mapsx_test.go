@@ -39,90 +39,44 @@ func TestKeys(t *testing.T) {
 	})
 }
 
-func TestToSet(t *testing.T) {
-	t.Run("converts string map to set", func(t *testing.T) {
-		input := map[string]string{
-			"key1": "value1",
-			"key2": "value2",
-			"key3": "value3",
-		}
-
-		result := mapsx.ToSet(input)
-
-		expected := map[string]bool{
-			"key1": true,
-			"key2": true,
-			"key3": true,
-		}
-		assert.Equal(t, expected, result)
+func TestValues(t *testing.T) {
+	t.Run("empty map returns empty slice", func(t *testing.T) {
+		m := make(map[string]int)
+		values := mapsx.Values(m)
+		assert.Empty(t, values)
+		assert.NotNil(t, values) // Should return empty slice, not nil
 	})
 
-	t.Run("converts int map to set", func(t *testing.T) {
-		input := map[int]string{
+	t.Run("extracts all values from map", func(t *testing.T) {
+		m := map[string]int{
+			"a": 1,
+			"b": 2,
+			"c": 3,
+		}
+		values := mapsx.Values(m)
+		assert.Len(t, values, 3)
+		assert.ElementsMatch(t, []int{1, 2, 3}, values)
+	})
+
+	t.Run("works with different types", func(t *testing.T) {
+		m := map[int]string{
 			1: "one",
 			2: "two",
 			3: "three",
 		}
-
-		result := mapsx.ToSet(input)
-
-		expected := map[int]bool{
-			1: true,
-			2: true,
-			3: true,
-		}
-		assert.Equal(t, expected, result)
+		values := mapsx.Values(m)
+		assert.Len(t, values, 3)
+		assert.ElementsMatch(t, []string{"one", "two", "three"}, values)
 	})
 
-	t.Run("returns empty set for empty map", func(t *testing.T) {
-		input := map[string]int{}
-
-		result := mapsx.ToSet(input)
-
-		assert.Empty(t, result)
-	})
-
-	t.Run("returns empty set for nil map", func(t *testing.T) {
-		var input map[string]string
-
-		result := mapsx.ToSet(input)
-
-		assert.Empty(t, result)
-	})
-
-	t.Run("works with struct values", func(t *testing.T) {
-		type Value struct {
-			Name string
-			Age  int
+	t.Run("handles duplicate values", func(t *testing.T) {
+		m := map[string]int{
+			"a": 1,
+			"b": 1,
+			"c": 2,
 		}
-		input := map[string]Value{
-			"alice": {Name: "Alice", Age: 30},
-			"bob":   {Name: "Bob", Age: 25},
-		}
-
-		result := mapsx.ToSet(input)
-
-		expected := map[string]bool{
-			"alice": true,
-			"bob":   true,
-		}
-		assert.Equal(t, expected, result)
-	})
-
-	t.Run("preserves all keys with different value types", func(t *testing.T) {
-		input := map[string]interface{}{
-			"key1": "string",
-			"key2": 123,
-			"key3": true,
-		}
-
-		result := mapsx.ToSet(input)
-
-		expected := map[string]bool{
-			"key1": true,
-			"key2": true,
-			"key3": true,
-		}
-		assert.Equal(t, expected, result)
+		values := mapsx.Values(m)
+		assert.Len(t, values, 3)
+		assert.ElementsMatch(t, []int{1, 1, 2}, values)
 	})
 }

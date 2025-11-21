@@ -28,13 +28,3 @@ func Values[K comparable, V any](m map[K]V) []V {
 	}
 	return values
 }
-
-// ToSet converts map keys to a set (map with bool values).
-// This is useful for creating exclusion sets or membership tests.
-func ToSet[K comparable, V any](m map[K]V) map[K]bool {
-	result := make(map[K]bool, len(m))
-	for key := range m {
-		result[key] = true
-	}
-	return result
-}

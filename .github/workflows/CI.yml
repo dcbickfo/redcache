@@ -2,15 +2,8 @@ name: Go
 on: [push]
 
 jobs:
-  build:
-    services:
-      redis:
-        # Docker Hub image
-        image: redis
-        ports:
-          - 6379:6379
+  unit-tests:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v5
       - name: Setup Go
@@ -19,21 +12,86 @@ jobs:
           go-version-file: 'go.mod'
       - name: Install dependencies
         run: go mod vendor
+      - name: Run unit tests (no Redis required)
+        run: go test -short -v ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.6.1
           args: --timeout=5m
           only-new-issues: false
-      - name: Test with Go
+
+  integration-tests:
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+      - name: Install dependencies
+        run: go mod vendor
+      - name: Run integration tests
         run: |
           set +e
-          go test -tags=examples -json ./... > TestResults.json
+          go test -tags=integration -json ./... > TestResults-integration.json
           TEST_EXIT_CODE=$?
           exit $TEST_EXIT_CODE
-      - name: Upload Go test results
+      - name: Upload integration test results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: Go-results
-          path: TestResults.json
+          name: Integration-results
+          path: TestResults-integration.json
+
+  distributed-tests:
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+      - name: Install dependencies
+        run: go mod vendor
+      - name: Run distributed tests
+        run: |
+          set +e
+          go test -tags=distributed -json ./... > TestResults-distributed.json
+          TEST_EXIT_CODE=$?
+          exit $TEST_EXIT_CODE
+      - name: Upload distributed test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Distributed-results
+          path: TestResults-distributed.json

@@ -3,6 +3,8 @@ package redcache
 import (
 	"errors"
 	"fmt"
+
+	"github.com/dcbickfo/redcache/internal/errs"
 )
 
 // Common errors returned by redcache operations.
@@ -10,12 +12,14 @@ var (
 	// ErrNoKeys is returned when an operation is called with an empty key list.
 	ErrNoKeys = errors.New("no keys provided")
 
-	// ErrLockFailed is returned when a lock cannot be acquired.
-	ErrLockFailed = errors.New("failed to acquire lock")
+	// ErrLockFailed is an alias for the shared lock failed error.
+	// It is returned when a lock cannot be acquired.
+	ErrLockFailed = errs.ErrLockFailed
 
-	// ErrLockLost indicates the distributed lock was lost or expired before the value could be set.
+	// ErrLockLost is an alias for the shared lock lost error.
+	// It indicates the distributed lock was lost or expired before the value could be set.
 	// This can occur if the lock TTL expires during callback execution or if Redis invalidates the lock.
-	ErrLockLost = errors.New("lock was lost or expired before value could be set")
+	ErrLockLost = errs.ErrLockLost
 
 	// ErrInvalidTTL is returned when a TTL value is invalid (e.g., negative or zero).
 	ErrInvalidTTL = errors.New("invalid TTL value")

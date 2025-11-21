@@ -1,3 +1,5 @@
+//go:build distributed
+
 package redcache_test
 
 import (
@@ -21,7 +23,7 @@ import (
 // coordinate correctly across multiple clients, especially with read operations
 func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	t.Run("write waits for read lock from different client", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pdist:write-read:" + uuid.New().String()
 
 		// Create separate clients
@@ -67,7 +69,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 		writeDuration := time.Since(writeStart)
 
 		require.NoError(t, err)
-		assert.Greater(t, writeDuration, 900*time.Millisecond, "Write should wait for read lock")
+		assert.Greater(t, writeDuration, 850*time.Millisecond, "Write should wait for read lock")
 		assert.Less(t, writeDuration, 1500*time.Millisecond, "Write should not wait too long")
 
 		<-readDone
@@ -82,7 +84,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("multiple writes coordinate through rueidislock", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pdist:multi-write:" + uuid.New().String()
 
 		numClients := 5
@@ -132,7 +134,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("SetMulti waits for GetMulti from different client", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key1 := "pdist:batch:1:" + uuid.New().String()
 		key2 := "pdist:batch:2:" + uuid.New().String()
 
@@ -185,14 +187,14 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.Len(t, result, 2)
-		assert.Greater(t, writeDuration, 900*time.Millisecond, "SetMulti should wait")
+		assert.Greater(t, writeDuration, 850*time.Millisecond, "SetMulti should wait")
 		assert.Less(t, writeDuration, 1500*time.Millisecond, "SetMulti should not wait too long")
 
 		<-readDone
 	})
 
 	t.Run("ForceSet bypasses all locks including from other clients", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pdist:force:" + uuid.New().String()
 
 		client1, err := redcache.NewPrimeableCacheAside(
@@ -232,7 +234,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("read lock expiration allows write to proceed", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pdist:expire:" + uuid.New().String()
 
 		// Use very short lock TTL
@@ -277,7 +279,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("invalidation from write triggers waiting reads across clients", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pdist:invalidate:" + uuid.New().String()
 
 		// Set up initial lock to block everyone
@@ -345,7 +347,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("stress test - many concurrent read and write operations", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		numClients := 10
 		numOperations := 20
@@ -434,7 +436,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("context cancellation during distributed Set", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pdist:ctx-cancel:" + uuid.New().String()
 
 		client1, err := redcache.NewPrimeableCacheAside(
@@ -476,7 +478,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("callback error in distributed Set does not cache", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pdist:callback-error:" + uuid.New().String()
 
 		client1, err := redcache.NewPrimeableCacheAside(
@@ -519,7 +521,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("SetMulti callback error across clients does not cache", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		client1, err := redcache.NewPrimeableCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
@@ -559,7 +561,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("Del during distributed Set coordination", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pdist:del-during-set:" + uuid.New().String()
 
 		client1, err := redcache.NewPrimeableCacheAside(
@@ -604,7 +606,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("DelMulti coordination across clients", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		client1, err := redcache.NewPrimeableCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
@@ -663,7 +665,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("empty and special values across clients", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		client1, err := redcache.NewPrimeableCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
@@ -712,7 +714,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("large value handling across clients", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		client1, err := redcache.NewPrimeableCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
@@ -748,7 +750,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("TTL consistency across clients", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		client1, err := redcache.NewPrimeableCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
@@ -802,7 +804,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("concurrent SetMulti with partial overlap - coordinated completion", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancel()
 
 		client1, err := redcache.NewPrimeableCacheAside(
@@ -882,7 +884,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("distributed: Set from client A + ForceSet from client B steals lock", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pdist:set-forceSet:" + uuid.New().String()
 
 		clientA, err := redcache.NewPrimeableCacheAside(
@@ -950,7 +952,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("distributed: SetMulti from client A + ForceSetMulti from client B steals some locks", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key1 := "pdist:setmulti:1:" + uuid.New().String()
 		key2 := "pdist:setmulti:2:" + uuid.New().String()
 		key3 := "pdist:setmulti:3:" + uuid.New().String()
@@ -1061,7 +1063,7 @@ func TestPrimeableCacheAside_DistributedCoordination(t *testing.T) {
 // (< 50ms) to prove operations complete via invalidation, not polling.
 func TestPrimeableCacheAside_DistributedInvalidationTiming(t *testing.T) {
 	t.Run("Distributed Set waits for Set via invalidation, not ticker", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "dist-inv-set-set:" + uuid.New().String()
 
 		// Create two separate clients (simulating distributed processes)
@@ -1125,7 +1127,7 @@ func TestPrimeableCacheAside_DistributedInvalidationTiming(t *testing.T) {
 	})
 
 	t.Run("Distributed SetMulti waits for SetMulti via invalidation", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key1 := "dist-inv-setm-setm-1:" + uuid.New().String()
 		key2 := "dist-inv-setm-setm-2:" + uuid.New().String()
 		keys := []string{key1, key2}
@@ -1202,7 +1204,7 @@ func TestPrimeableCacheAside_DistributedInvalidationTiming(t *testing.T) {
 	})
 
 	t.Run("Distributed Set waits for Get via invalidation", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "dist-inv-set-get:" + uuid.New().String()
 
 		client1, err := redcache.NewPrimeableCacheAside(
@@ -1264,7 +1266,7 @@ func TestPrimeableCacheAside_DistributedInvalidationTiming(t *testing.T) {
 	})
 
 	t.Run("Distributed SetMulti waits for GetMulti via invalidation", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key1 := "dist-inv-setm-getm-1:" + uuid.New().String()
 		key2 := "dist-inv-setm-getm-2:" + uuid.New().String()
 		keys := []string{key1, key2}

@@ -1,0 +1,17 @@
+# Mockery v3 Configuration
+# Generate moq-style mocks for all internal interfaces
+
+# Use matryer/moq style templates
+template: matryer
+
+# Global output configuration
+dir: "mocks/{{.SrcPackageName}}"
+pkgname: "mock{{.SrcPackageName}}"
+filename: "mock_{{.InterfaceName}}.go"
+
+# Packages to scan
+packages:
+  github.com/dcbickfo/redcache/internal:
+    config:
+      all: true
+      recursive: true

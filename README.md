@@ -212,28 +212,75 @@ tx.Exec("UPDATE accounts SET balance = balance - $1 WHERE id = $2 AND balance >=
 
 ## Testing
 
-Run tests with different configurations:
+redcache uses a layered testing approach with build tags for fast feedback and comprehensive coverage:
+
+### Quick Start
 
 ```bash
-# View all available test targets
-make help
+# Unit tests with mocks (no Redis required, <0.3s)
+make test-unit
+# or
+go test -short ./...
 
-# Run unit tests (requires single Redis instance)
+# Integration tests (requires Redis on localhost:6379)
 make docker-up
-make test
+make test-integration
+# or
+go test -tags=integration ./...
 
-# Run distributed tests (multi-client coordination)
+# Distributed coordination tests (requires Redis)
 make test-distributed
+# or
+go test -tags=distributed ./...
 
-# Run Redis cluster tests
+# Redis cluster tests (requires cluster on ports 17000-17005)
 make docker-cluster-up
 make test-cluster
+# or
+go test -tags=cluster ./...
 
-# Run everything (unit + distributed + cluster + examples)
+# Run multiple test suites together
+go test -tags="integration,distributed" ./...
+
+# All tests (comprehensive, includes all categories)
 make docker-up && make docker-cluster-up
-make test-complete
+make test
+# or
+go test -tags="integration,distributed,cluster,examples" ./...
+```
 
-# Cleanup
+### Test Categories
+
+redcache uses Go build tags to organize tests:
+
+- **Unit Tests**: No build tag, use `-short` flag. Fast isolated tests using mocks, no external dependencies.
+- **Integration Tests**: `//go:build integration` tag. Test with real Redis to verify end-to-end functionality.
+- **Distributed Tests**: `//go:build distributed` tag. Multi-client coordination tests to verify locking behavior.
+- **Cluster Tests**: `//go:build cluster` tag. Redis Cluster specific tests for slot routing and cluster operations.
+
+### Mock Generation
+
+redcache uses mockery v3 to generate moq-style mocks for all internal interfaces:
+
+```bash
+# Generate mocks (auto-scans internal/ packages)
+make mocks
+
+# Mocks are generated in mocks/{package}/ directories
+# Example: mocks/lockmanager/mock_LockManager.go
+```
+
+### Writing Tests
+
+See [TESTING.md](./TESTING.md) for comprehensive testing guide including:
+- How to write unit tests with mocks
+- Integration test patterns
+- Best practices and troubleshooting
+- CI/CD integration examples
+
+### Cleanup
+
+```bash
 make docker-down && make docker-cluster-down
 ```
 

@@ -6,6 +6,11 @@ type Map[K comparable, V any] struct {
 	m sync.Map
 }
 
+// NewMap creates a new generic sync.Map wrapper.
+func NewMap[K comparable, V any]() *Map[K, V] {
+	return &Map[K, V]{}
+}
+
 func (sm *Map[K, V]) CompareAndDelete(key K, old V) bool {
 	return sm.m.CompareAndDelete(key, old)
 }

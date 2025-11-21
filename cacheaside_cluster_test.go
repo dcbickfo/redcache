@@ -1,3 +1,5 @@
+//go:build cluster
+
 package redcache_test
 
 import (
@@ -50,7 +52,7 @@ func makeClusterCacheAside(t *testing.T) *redcache.CacheAside {
 	}
 
 	// Test cluster connectivity
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	innerClient := cacheAside.Client()
 	if pingErr := innerClient.Do(ctx, innerClient.B().Ping().Build()).Error(); pingErr != nil {
@@ -71,7 +73,7 @@ func TestCacheAside_Cluster_BasicOperations(t *testing.T) {
 		}
 		defer client.Client().Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "cluster:basic:" + uuid.New().String()
 		expectedValue := "value:" + uuid.New().String()
 		called := false
@@ -98,7 +100,7 @@ func TestCacheAside_Cluster_BasicOperations(t *testing.T) {
 		}
 		defer client.Client().Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Use hash tags to ensure keys are in the same slot
 		keys := []string{
@@ -146,7 +148,7 @@ func TestCacheAside_Cluster_BasicOperations(t *testing.T) {
 		}
 		defer client.Client().Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Generate keys guaranteed to be in different hash slots
 		keys := generateKeysInDifferentSlots("cluster:multiSlot", 3)
@@ -187,7 +189,7 @@ func TestCacheAside_Cluster_LargeKeySet(t *testing.T) {
 	}
 	defer client.Client().Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Create 100 keys that will span multiple slots
 	numKeys := 100
@@ -249,7 +251,7 @@ func TestCacheAside_Cluster_ConcurrentOperations(t *testing.T) {
 		client2 := makeClusterCacheAside(t)
 		defer client2.Client().Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Create keys in different slots
 		key1 := "{shard:1}:key"
@@ -305,7 +307,7 @@ func TestCacheAside_Cluster_ConcurrentOperations(t *testing.T) {
 		client2 := makeClusterCacheAside(t)
 		defer client2.Client().Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "cluster:concurrent:" + uuid.New().String()
 
 		var callbackCount atomic.Int32
@@ -354,7 +356,7 @@ func TestCacheAside_Cluster_PartialResults(t *testing.T) {
 	}
 	defer client.Client().Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Create keys across different slots
 	keys := []string{
@@ -406,7 +408,7 @@ func TestCacheAside_Cluster_Invalidation(t *testing.T) {
 		}
 		defer client.Client().Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "cluster:del:" + uuid.New().String()
 
 		// Set a value
@@ -435,7 +437,7 @@ func TestCacheAside_Cluster_Invalidation(t *testing.T) {
 		}
 		defer client.Client().Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Create keys across different slots
 		keys := []string{
@@ -472,7 +474,7 @@ func TestCacheAside_Cluster_ErrorHandling(t *testing.T) {
 		}
 		defer client.Client().Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "cluster:error:" + uuid.New().String()
 
 		callCount := 0
@@ -505,7 +507,7 @@ func TestCacheAside_Cluster_ErrorHandling(t *testing.T) {
 
 		key := "cluster:cancel:" + uuid.New().String()
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 
 		// Set a lock manually to force waiting
 		innerClient := client.Client()
@@ -539,7 +541,7 @@ func TestCacheAside_Cluster_StressTest(t *testing.T) {
 	}
 	defer client.Client().Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Create many keys across all slots
 	numKeys := 50

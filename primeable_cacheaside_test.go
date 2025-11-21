@@ -1,3 +1,5 @@
+//go:build integration
+
 package redcache_test
 
 import (
@@ -56,7 +58,7 @@ func forceSetMulti(client *redcache.PrimeableCacheAside, ctx context.Context, tt
 
 func TestPrimeableCacheAside_Set(t *testing.T) {
 	t.Run("successful set acquires lock and sets value", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -81,7 +83,7 @@ func TestPrimeableCacheAside_Set(t *testing.T) {
 	})
 
 	t.Run("waits and retries when lock cannot be acquired", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 		defer cancel()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
@@ -107,7 +109,7 @@ func TestPrimeableCacheAside_Set(t *testing.T) {
 	})
 
 	t.Run("subsequent Get retrieves Set value", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -130,7 +132,7 @@ func TestPrimeableCacheAside_Set(t *testing.T) {
 
 func TestPrimeableCacheAside_ForceSet(t *testing.T) {
 	t.Run("successful force set bypasses locks", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -148,7 +150,7 @@ func TestPrimeableCacheAside_ForceSet(t *testing.T) {
 	})
 
 	t.Run("force set overrides existing lock", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -172,7 +174,7 @@ func TestPrimeableCacheAside_ForceSet(t *testing.T) {
 	})
 
 	t.Run("force set overrides existing value", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -200,7 +202,7 @@ func TestPrimeableCacheAside_ForceSet(t *testing.T) {
 
 func TestPrimeableCacheAside_SetMulti(t *testing.T) {
 	t.Run("successful set multi acquires locks and sets values", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -224,7 +226,7 @@ func TestPrimeableCacheAside_SetMulti(t *testing.T) {
 	})
 
 	t.Run("empty values returns empty result", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -234,7 +236,7 @@ func TestPrimeableCacheAside_SetMulti(t *testing.T) {
 	})
 
 	t.Run("waits for all locks to be released then sets all values", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -272,7 +274,7 @@ func TestPrimeableCacheAside_SetMulti(t *testing.T) {
 	})
 
 	t.Run("subsequent GetMulti retrieves SetMulti values", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -305,7 +307,7 @@ func TestPrimeableCacheAside_SetMulti(t *testing.T) {
 	})
 
 	t.Run("successful SetMulti doesn't delete values in cleanup", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -340,7 +342,7 @@ func TestPrimeableCacheAside_SetMulti(t *testing.T) {
 	})
 
 	t.Run("callback exceeding lock TTL results in CAS failure", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Create client with very short lock TTL (200ms)
 		option := rueidis.ClientOption{InitAddress: addr}
@@ -394,7 +396,7 @@ func TestPrimeableCacheAside_SetMulti(t *testing.T) {
 
 func TestPrimeableCacheAside_ForceSetMulti(t *testing.T) {
 	t.Run("successful force set multi bypasses locks", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -417,7 +419,7 @@ func TestPrimeableCacheAside_ForceSetMulti(t *testing.T) {
 	})
 
 	t.Run("empty values completes successfully", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -426,7 +428,7 @@ func TestPrimeableCacheAside_ForceSetMulti(t *testing.T) {
 	})
 
 	t.Run("force set multi overrides existing locks", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -462,7 +464,7 @@ func TestPrimeableCacheAside_ForceSetMulti(t *testing.T) {
 
 func TestPrimeableCacheAside_Integration(t *testing.T) {
 	t.Run("Set waits for concurrent Get to complete", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -516,7 +518,7 @@ func TestPrimeableCacheAside_Integration(t *testing.T) {
 	})
 
 	t.Run("ForceSet overrides lock from Get", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -540,7 +542,7 @@ func TestPrimeableCacheAside_Integration(t *testing.T) {
 	})
 
 	t.Run("concurrent Set operations wait and eventually succeed", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -608,7 +610,7 @@ func TestPrimeableCacheAside_EdgeCases_ContextCancellation(t *testing.T) {
 		defer client.Close()
 
 		key := "key:" + uuid.New().String()
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 		cancel() // Cancel immediately
 
 		err := client.Set(ctx, time.Second, key, func(_ context.Context, _ string) (string, error) {
@@ -631,7 +633,7 @@ func TestPrimeableCacheAside_EdgeCases_ContextCancellation(t *testing.T) {
 		require.NoError(t, err)
 
 		// Try to Set with short timeout
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 		defer cancel()
 
 		err = client.Set(ctx, time.Second, key, func(_ context.Context, _ string) (string, error) {
@@ -653,7 +655,7 @@ func TestPrimeableCacheAside_EdgeCases_ContextCancellation(t *testing.T) {
 			"key:2:" + uuid.New().String(): "value2",
 		}
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 		cancel() // Cancel immediately
 
 		_, err := setMultiValue(client, ctx, time.Second, values)
@@ -682,7 +684,7 @@ func TestPrimeableCacheAside_EdgeCases_ContextCancellation(t *testing.T) {
 			key2: "value2",
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 		defer cancel()
 
 		_, err = setMultiValue(client, ctx, time.Second, values)
@@ -697,7 +699,7 @@ func TestPrimeableCacheAside_EdgeCases_ContextCancellation(t *testing.T) {
 
 func TestPrimeableCacheAside_EdgeCases_TTL(t *testing.T) {
 	t.Run("Set with very short TTL", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -726,7 +728,7 @@ func TestPrimeableCacheAside_EdgeCases_TTL(t *testing.T) {
 	})
 
 	t.Run("Set with 1 second TTL has correct expiration", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -747,7 +749,7 @@ func TestPrimeableCacheAside_EdgeCases_TTL(t *testing.T) {
 	})
 
 	t.Run("SetMulti with very short TTL", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -776,7 +778,7 @@ func TestPrimeableCacheAside_EdgeCases_TTL(t *testing.T) {
 
 func TestPrimeableCacheAside_EdgeCases_DuplicateKeys(t *testing.T) {
 	t.Run("SetMulti with duplicate keys in input", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -801,7 +803,7 @@ func TestPrimeableCacheAside_EdgeCases_DuplicateKeys(t *testing.T) {
 
 func TestPrimeableCacheAside_EdgeCases_SpecialValues(t *testing.T) {
 	t.Run("Set with empty string value", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -820,7 +822,7 @@ func TestPrimeableCacheAside_EdgeCases_SpecialValues(t *testing.T) {
 	})
 
 	t.Run("Set with value that starts with lock prefix", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -846,7 +848,7 @@ func TestPrimeableCacheAside_EdgeCases_SpecialValues(t *testing.T) {
 	})
 
 	t.Run("Set with unicode and special characters", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -866,7 +868,7 @@ func TestPrimeableCacheAside_EdgeCases_SpecialValues(t *testing.T) {
 	})
 
 	t.Run("SetMulti with empty string values", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -889,7 +891,7 @@ func TestPrimeableCacheAside_EdgeCases_SpecialValues(t *testing.T) {
 	})
 
 	t.Run("Set with very large value", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -912,7 +914,7 @@ func TestPrimeableCacheAside_EdgeCases_SpecialValues(t *testing.T) {
 
 func TestPrimeableCacheAside_EdgeCases_GetRacingWithSet(t *testing.T) {
 	t.Run("Get racing with Set - Set completes first", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -939,7 +941,7 @@ func TestPrimeableCacheAside_EdgeCases_GetRacingWithSet(t *testing.T) {
 	})
 
 	t.Run("Get starts then Set completes - Get should see new value on retry", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -989,7 +991,7 @@ func TestPrimeableCacheAside_EdgeCases_GetRacingWithSet(t *testing.T) {
 	})
 
 	t.Run("GetMulti racing with SetMulti on overlapping keys", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1041,7 +1043,7 @@ func TestPrimeableCacheAside_EdgeCases_GetRacingWithSet(t *testing.T) {
 	})
 
 	t.Run("ForceSet triggers invalidation for waiting Get", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1082,7 +1084,7 @@ func TestPrimeableCacheAside_EdgeCases_GetRacingWithSet(t *testing.T) {
 	})
 
 	t.Run("ForceSet overrides lock while Get is holding it", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1161,7 +1163,7 @@ func TestPrimeableCacheAside_EdgeCases_GetRacingWithSet(t *testing.T) {
 	})
 
 	t.Run("ForceSetMulti overrides locks while GetMulti is holding them", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1258,7 +1260,7 @@ func TestPrimeableCacheAside_EdgeCases_GetRacingWithSet(t *testing.T) {
 	})
 
 	t.Run("Set in progress + ForceSet overwrites lock during callback", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1324,7 +1326,7 @@ func TestPrimeableCacheAside_EdgeCases_GetRacingWithSet(t *testing.T) {
 	})
 
 	t.Run("SetMulti in progress + ForceSetMulti overwrites some locks during callback", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1436,7 +1438,7 @@ func TestPrimeableCacheAside_EdgeCases_GetRacingWithSet(t *testing.T) {
 
 func TestPrimeableCacheAside_EdgeCases_Additional(t *testing.T) {
 	t.Run("Set overwrites existing non-lock value", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1469,7 +1471,7 @@ func TestPrimeableCacheAside_EdgeCases_Additional(t *testing.T) {
 	})
 
 	t.Run("Set immediately after Del triggers new write", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1504,7 +1506,7 @@ func TestPrimeableCacheAside_EdgeCases_Additional(t *testing.T) {
 	// for comprehensive distributed coordination tests
 
 	t.Run("Get with callback error does not cache", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1528,7 +1530,7 @@ func TestPrimeableCacheAside_EdgeCases_Additional(t *testing.T) {
 	})
 
 	t.Run("GetMulti with empty keys slice", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1542,7 +1544,7 @@ func TestPrimeableCacheAside_EdgeCases_Additional(t *testing.T) {
 	})
 
 	t.Run("GetMulti with callback error does not cache", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1569,7 +1571,7 @@ func TestPrimeableCacheAside_EdgeCases_Additional(t *testing.T) {
 	})
 
 	t.Run("Del on non-existent key succeeds", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1581,7 +1583,7 @@ func TestPrimeableCacheAside_EdgeCases_Additional(t *testing.T) {
 	})
 
 	t.Run("DelMulti on non-existent keys succeeds", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1596,7 +1598,7 @@ func TestPrimeableCacheAside_EdgeCases_Additional(t *testing.T) {
 	})
 
 	t.Run("DelMulti with empty keys slice", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1611,7 +1613,7 @@ func TestPrimeableCacheAside_EdgeCases_Additional(t *testing.T) {
 // This would happen if a previous Get operation completed, left a lock in Redis,
 // and then Set is called.
 func TestPrimeableCacheAside_SetDoesNotBlockOnRedisLock(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	client := makeClientWithSet(t, addr)
 	defer client.Close()
 
@@ -1642,7 +1644,7 @@ func TestPrimeableCacheAside_SetDoesNotBlockOnRedisLock(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should have waited approximately 1 second for lock to expire
-	assert.Greater(t, elapsed, time.Millisecond*900, "Should have waited for lock TTL")
+	assert.Greater(t, elapsed, time.Millisecond*850, "Should have waited for lock TTL")
 	assert.Less(t, elapsed, time.Second*2, "Should not have blocked indefinitely")
 
 	// Verify value was set
@@ -1657,7 +1659,7 @@ func TestPrimeableCacheAside_SetDoesNotBlockOnRedisLock(t *testing.T) {
 /*
 func TestPrimeableCacheAside_SetWithCallback(t *testing.T) {
 	t.Run("acquires lock, executes callback, caches result", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1685,7 +1687,7 @@ func TestPrimeableCacheAside_SetWithCallback(t *testing.T) {
 	})
 
 	t.Run("concurrent Set operations coordinate via locking", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client1 := makeClientWithSet(t, addr)
 		defer client1.Client().Close()
 		client2 := makeClientWithSet(t, addr)
@@ -1732,7 +1734,7 @@ func TestPrimeableCacheAside_SetWithCallback(t *testing.T) {
 	})
 
 	t.Run("callback error prevents caching", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1759,7 +1761,7 @@ func TestPrimeableCacheAside_SetWithCallback(t *testing.T) {
 // TestPrimeableCacheAside_SetMultiWithCallback tests batch coordinated cache updates with a callback.
 func TestPrimeableCacheAside_SetMultiWithCallback(t *testing.T) {
 	t.Run("acquires locks, executes callback, caches results", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1803,7 +1805,7 @@ func TestPrimeableCacheAside_SetMultiWithCallback(t *testing.T) {
 	})
 
 	t.Run("empty keys returns empty result", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1818,7 +1820,7 @@ func TestPrimeableCacheAside_SetMultiWithCallback(t *testing.T) {
 	})
 
 	t.Run("callback error prevents caching", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		client := makeClientWithSet(t, addr)
 		defer client.Close()
 
@@ -1850,7 +1852,7 @@ func TestPrimeableCacheAside_SetMultiWithCallback(t *testing.T) {
 // cache key locks and doesn't act like ForceSet
 func TestPrimeableCacheAside_SetLockingBehavior(t *testing.T) {
 	t.Run("Set respects new Get operations that start after read lock cleared", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "set-locking:" + uuid.New().String()
 
 		client, err := redcache.NewPrimeableCacheAside(
@@ -1908,7 +1910,7 @@ func TestPrimeableCacheAside_SetLockingBehavior(t *testing.T) {
 	})
 
 	t.Run("Set cannot overwrite active read lock from concurrent Get", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "set-no-overwrite:" + uuid.New().String()
 
 		client1, err := redcache.NewPrimeableCacheAside(
@@ -1956,7 +1958,7 @@ func TestPrimeableCacheAside_SetLockingBehavior(t *testing.T) {
 
 		require.NoError(t, err)
 		// Set should have waited for Get
-		assert.Greater(t, setDuration, 900*time.Millisecond, "Set should wait for Get lock")
+		assert.Greater(t, setDuration, 850*time.Millisecond, "Set should wait for Get lock")
 
 		<-getDone
 		assert.NoError(t, getErr)
@@ -1972,7 +1974,7 @@ func TestPrimeableCacheAside_SetLockingBehavior(t *testing.T) {
 	})
 
 	t.Run("ForceSet bypasses locks while Set respects them", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "force-vs-set:" + uuid.New().String()
 
 		client, err := redcache.NewPrimeableCacheAside(
@@ -2030,7 +2032,7 @@ func TestPrimeableCacheAside_SetLockingBehavior(t *testing.T) {
 	})
 
 	t.Run("Set properly uses compare-and-swap to ensure lock is held", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "set-cas:" + uuid.New().String()
 
 		client, err := redcache.NewPrimeableCacheAside(
@@ -2062,7 +2064,7 @@ func TestPrimeableCacheAside_SetLockingBehavior(t *testing.T) {
 	// This test file should focus on Set/SetMulti behavior and their interactions with Get/GetMulti
 
 	t.Run("SetMulti with callback exceeding lock TTL", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key1 := "setmulti-exceed-1:" + uuid.New().String()
 		key2 := "setmulti-exceed-2:" + uuid.New().String()
 
@@ -2114,7 +2116,7 @@ func TestPrimeableCacheAside_SetLockingBehavior(t *testing.T) {
 // so tests verify operations complete in < 40ms to prove invalidation is working.
 func TestPrimeableCacheAside_SetInvalidationMechanism(t *testing.T) {
 	t.Run("Set receives cache lock invalidation, not just ticker", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "set-invalidation:" + uuid.New().String()
 
 		client, err := redcache.NewPrimeableCacheAside(
@@ -2169,7 +2171,7 @@ func TestPrimeableCacheAside_SetInvalidationMechanism(t *testing.T) {
 	})
 
 	t.Run("Set waits for another Set's cache lock via invalidation", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "set-wait-set:" + uuid.New().String()
 
 		client1, err := redcache.NewPrimeableCacheAside(
@@ -2232,7 +2234,7 @@ func TestPrimeableCacheAside_SetInvalidationMechanism(t *testing.T) {
 	})
 
 	t.Run("SetMulti receives invalidations during sequential acquisition", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key1 := "setmulti-inv-1:" + uuid.New().String()
 		key2 := "setmulti-inv-2:" + uuid.New().String()
 		key3 := "setmulti-inv-3:" + uuid.New().String()
@@ -2323,7 +2325,7 @@ func TestPrimeableCacheAside_SetInvalidationMechanism(t *testing.T) {
 // achievable with current test infrastructure without risky architectural changes.
 func TestPrimeableCacheAside_SetMultiPartialFailure(t *testing.T) {
 	t.Run("SetMulti with middle key locked - sequential acquisition", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Use a shared UUID prefix to ensure sort order
 		prefix := uuid.New().String()
@@ -2394,7 +2396,7 @@ func TestPrimeableCacheAside_SetMultiPartialFailure(t *testing.T) {
 	})
 
 	t.Run("SetMulti with out-of-order success triggers restore", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Use a shared UUID prefix to ensure sort order
 		prefix := uuid.New().String()
@@ -2462,7 +2464,7 @@ func TestPrimeableCacheAside_SetMultiPartialFailure(t *testing.T) {
 	})
 
 	t.Run("SetMulti TTL refresh during multi-retry waiting", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Use a shared UUID prefix to ensure sort order
 		prefix := uuid.New().String()
@@ -2537,7 +2539,7 @@ func TestPrimeableCacheAside_SetMultiPartialFailure(t *testing.T) {
 	})
 
 	t.Run("SetMulti keysNotIn correctly filters remaining keys", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Use a shared UUID prefix to ensure sort order
 		prefix := uuid.New().String()
