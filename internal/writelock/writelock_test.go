@@ -2,7 +2,7 @@
 
 package writelock_test
 
-import(
+import (
 	"context"
 	"testing"
 	"time"
@@ -56,7 +56,7 @@ func TestWriteLockManager_AcquireWriteLock(t *testing.T) {
 	defer client.Close()
 
 	wlm := makeWriteLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("acquires lock for new key", func(t *testing.T) {
 		lockVal, err := wlm.AcquireWriteLock(ctx, "key1")
@@ -84,7 +84,7 @@ func TestWriteLockManager_AcquireMultiWriteLocks(t *testing.T) {
 	defer client.Close()
 
 	wlm := makeWriteLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("acquires locks for multiple keys", func(t *testing.T) {
 		keys := []string{"k1", "k2", "k3"}
@@ -121,7 +121,7 @@ func TestWriteLockManager_ReleaseWriteLock(t *testing.T) {
 	defer client.Close()
 
 	wlm := makeWriteLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("releases owned lock", func(t *testing.T) {
 		lockVal, err := wlm.AcquireWriteLock(ctx, "rel1")
@@ -147,7 +147,7 @@ func TestWriteLockManager_CommitWriteLocks(t *testing.T) {
 	defer client.Close()
 
 	wlm := makeWriteLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("commits locks to real values", func(t *testing.T) {
 		keys := []string{"c1", "c2"}
@@ -191,7 +191,7 @@ func TestWriteLockManager_AcquireMultiWriteLocksSequential(t *testing.T) {
 	defer client.Close()
 
 	wlm := makeWriteLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("acquires all locks sequentially", func(t *testing.T) {
 		keys := []string{"s1", "s2", "s3"}
@@ -225,7 +225,7 @@ func TestWriteLockManager_TouchLocks(t *testing.T) {
 	defer client.Close()
 
 	wlm := makeWriteLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("refreshes lock TTL", func(t *testing.T) {
 		lockVal, err := wlm.AcquireWriteLock(ctx, "touch1")
@@ -251,7 +251,7 @@ func TestWriteLockManager_RestoreValues(t *testing.T) {
 	defer client.Close()
 
 	wlm := makeWriteLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("restores backed up values", func(t *testing.T) {
 		// Set initial value

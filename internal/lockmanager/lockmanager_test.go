@@ -55,7 +55,7 @@ func TestLockManager_TryAcquire(t *testing.T) {
 	defer client.Close()
 
 	lm := makeLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("acquires lock for new key", func(t *testing.T) {
 		lockVal, retry, err := lm.TryAcquire(ctx, "key1")
@@ -82,7 +82,7 @@ func TestLockManager_TryAcquire(t *testing.T) {
 	})
 
 	t.Run("context cancellation", func(t *testing.T) {
-		cancelCtx, cancel := context.WithCancel(context.Background())
+		cancelCtx, cancel := context.WithCancel(t.Context())
 		cancel()
 
 		_, _, err := lm.TryAcquire(cancelCtx, "key3")
@@ -96,7 +96,7 @@ func TestLockManager_TryAcquireMulti(t *testing.T) {
 	defer client.Close()
 
 	lm := makeLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("acquires locks for multiple keys", func(t *testing.T) {
 		keys := []string{"m1", "m2", "m3"}
@@ -136,7 +136,7 @@ func TestLockManager_AcquireLockBlocking(t *testing.T) {
 	defer client.Close()
 
 	lm := makeLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("acquires lock immediately if available", func(t *testing.T) {
 		lockVal, err := lm.AcquireLockBlocking(ctx, "b1")
@@ -172,7 +172,7 @@ func TestLockManager_AcquireLockBlocking(t *testing.T) {
 	})
 
 	t.Run("context cancellation", func(t *testing.T) {
-		cancelCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		cancelCtx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 		defer cancel()
 
 		// Hold lock in another goroutine
@@ -193,7 +193,7 @@ func TestLockManager_AcquireMultiLocksBlocking(t *testing.T) {
 	defer client.Close()
 
 	lm := makeLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("acquires all locks", func(t *testing.T) {
 		keys := []string{"mb1", "mb2", "mb3"}
@@ -237,7 +237,7 @@ func TestLockManager_ReleaseLock(t *testing.T) {
 	defer client.Close()
 
 	lm := makeLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("releases owned lock", func(t *testing.T) {
 		lockVal, err := lm.AcquireLockBlocking(ctx, "r1")
@@ -271,7 +271,7 @@ func TestLockManager_CheckKeyLocked(t *testing.T) {
 	defer client.Close()
 
 	lm := makeLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("returns false for unlocked key", func(t *testing.T) {
 		locked := lm.CheckKeyLocked(ctx, "c1")
@@ -302,7 +302,7 @@ func TestLockManager_CheckMultiKeysLocked(t *testing.T) {
 	defer client.Close()
 
 	lm := makeLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("identifies locked keys", func(t *testing.T) {
 		// Set up: lock some keys, leave others unlocked
@@ -329,7 +329,7 @@ func TestLockManager_CommitReadLocks(t *testing.T) {
 	defer client.Close()
 
 	lm := makeLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("commits locks to real values", func(t *testing.T) {
 		// Acquire locks
@@ -384,7 +384,7 @@ func TestLockManager_CleanupUnusedLocks(t *testing.T) {
 	defer client.Close()
 
 	lm := makeLockManager(t, client)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("releases unused locks only", func(t *testing.T) {
 		// Acquire 3 locks

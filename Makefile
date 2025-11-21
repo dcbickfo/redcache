@@ -57,12 +57,19 @@ install-tools:
 	@echo "$(BOLD)Installed versions:$(RESET)"
 	@asdf current
 
-# Run all tests including examples (default, most comprehensive)
+# Run all tests: unit + integration + distributed + cluster + examples (default, most comprehensive)
 test:
-	@echo "$(YELLOW)Running all tests including examples...$(RESET)"
+	@echo "$(YELLOW)Running all tests (unit + integration + distributed + cluster + examples)...$(RESET)"
 	@echo "$(YELLOW)Note: Requires Redis on localhost:6379 AND Redis Cluster on localhost:17000-17005$(RESET)"
 	@echo "$(YELLOW)      Start with: make docker-up && make docker-cluster-up$(RESET)"
-	@go test -tags="integration,distributed,cluster,examples" -v ./... && echo "$(GREEN)✓ All tests passed!$(RESET)" || (echo "$(RED)✗ Tests failed!$(RESET)" && exit 1)
+	@echo ""
+	@echo "$(CYAN)Step 1/2: Running unit tests (no Redis)...$(RESET)"
+	@go test -v ./... && echo "$(GREEN)✓ Unit tests passed!$(RESET)" || (echo "$(RED)✗ Unit tests failed!$(RESET)" && exit 1)
+	@echo ""
+	@echo "$(CYAN)Step 2/2: Running integration/distributed/cluster/examples tests...$(RESET)"
+	@go test -tags="integration,distributed,cluster,examples" -v ./... && echo "$(GREEN)✓ All integration tests passed!$(RESET)" || (echo "$(RED)✗ Integration tests failed!$(RESET)" && exit 1)
+	@echo ""
+	@echo "$(GREEN)$(BOLD)✓ All tests passed!$(RESET)"
 
 # Run tests quickly without examples
 test-fast:
@@ -71,10 +78,10 @@ test-fast:
 	@echo "$(YELLOW)      Start with: make docker-up && make docker-cluster-up$(RESET)"
 	@go test -tags="integration,distributed,cluster" -v ./... && echo "$(GREEN)✓ Tests passed!$(RESET)" || (echo "$(RED)✗ Tests failed!$(RESET)" && exit 1)
 
-# Run only unit tests with mocks (no Redis required)
+# Run only unit tests (no Redis required, no build tags)
 test-unit:
-	@echo "$(YELLOW)Running unit tests with mocks (no Redis required)...$(RESET)"
-	@go test -v -short ./... && echo "$(GREEN)✓ Unit tests passed!$(RESET)" || (echo "$(RED)✗ Unit tests failed!$(RESET)" && exit 1)
+	@echo "$(YELLOW)Running unit tests (no Redis required)...$(RESET)"
+	@go test -v ./... && echo "$(GREEN)✓ Unit tests passed!$(RESET)" || (echo "$(RED)✗ Unit tests failed!$(RESET)" && exit 1)
 
 # Run integration tests (requires Redis)
 test-integration:

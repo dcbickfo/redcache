@@ -20,10 +20,6 @@ import (
 
 // TestPrimeableCacheAside_Set tests all Set() scenarios using subtests
 func TestPrimeableCacheAside_Set(t *testing.T) {
-	if !testing.Short() {
-		t.Skip("Skipping unit test in non-short mode (use -short flag)")
-	}
-
 	mockLogger := &mocklogger.MockLogger{
 		DebugFunc: func(msg string, keysAndValues ...interface{}) {},
 		ErrorFunc: func(msg string, keysAndValues ...interface{}) {},
@@ -262,10 +258,6 @@ func TestPrimeableCacheAside_Set(t *testing.T) {
 
 // TestPrimeableCacheAside_SetMulti tests all SetMulti() scenarios using subtests
 func TestPrimeableCacheAside_SetMulti(t *testing.T) {
-	if !testing.Short() {
-		t.Skip("Skipping unit test in non-short mode (use -short flag)")
-	}
-
 	mockLogger := &mocklogger.MockLogger{
 		DebugFunc: func(msg string, keysAndValues ...interface{}) {},
 		ErrorFunc: func(msg string, keysAndValues ...interface{}) {},
@@ -485,10 +477,6 @@ func TestPrimeableCacheAside_SetMulti(t *testing.T) {
 
 // TestPrimeableCacheAside_ForceSet tests ForceSet() scenarios using subtests
 func TestPrimeableCacheAside_ForceSet(t *testing.T) {
-	if !testing.Short() {
-		t.Skip("Skipping unit test in non-short mode (use -short flag)")
-	}
-
 	mockLogger := &mocklogger.MockLogger{
 		DebugFunc: func(msg string, keysAndValues ...interface{}) {},
 		ErrorFunc: func(msg string, keysAndValues ...interface{}) {},
@@ -531,10 +519,6 @@ func TestPrimeableCacheAside_ForceSet(t *testing.T) {
 
 // TestPrimeableCacheAside_ForceSetMulti tests ForceSetMulti() scenarios using subtests
 func TestPrimeableCacheAside_ForceSetMulti(t *testing.T) {
-	if !testing.Short() {
-		t.Skip("Skipping unit test in non-short mode (use -short flag)")
-	}
-
 	mockLogger := &mocklogger.MockLogger{
 		DebugFunc: func(msg string, keysAndValues ...interface{}) {},
 		ErrorFunc: func(msg string, keysAndValues ...interface{}) {},

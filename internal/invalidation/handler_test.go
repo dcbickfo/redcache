@@ -123,7 +123,7 @@ func TestWaitForSingleLock(t *testing.T) {
 		ch := make(chan struct{})
 		close(ch)
 
-		ctx := context.Background()
+		ctx := t.Context()
 		err := invalidation.WaitForSingleLock(ctx, ch, 5*time.Second)
 		assert.NoError(t, err)
 	})
@@ -137,7 +137,7 @@ func TestWaitForSingleLock(t *testing.T) {
 			close(ch)
 		}()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		start := time.Now()
 		err := invalidation.WaitForSingleLock(ctx, ch, 5*time.Second)
 		duration := time.Since(start)
@@ -160,7 +160,7 @@ func TestWaitForSingleLock(t *testing.T) {
 	t.Run("returns on lock TTL timeout", func(t *testing.T) {
 		ch := make(chan struct{})
 
-		ctx := context.Background()
+		ctx := t.Context()
 		err := invalidation.WaitForSingleLock(ctx, ch, 50*time.Millisecond)
 		assert.NoError(t, err) // TTL timeout is not an error, just a signal to retry
 	})

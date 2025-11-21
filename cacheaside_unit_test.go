@@ -19,10 +19,6 @@ import (
 
 // TestCacheAside_Get tests all Get() scenarios using subtests.
 func TestCacheAside_Get(t *testing.T) {
-	if !testing.Short() {
-		t.Skip("Skipping unit test in non-short mode (use -short flag)")
-	}
-
 	t.Run("CacheHit", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
@@ -328,10 +324,6 @@ func TestCacheAside_Get(t *testing.T) {
 
 // TestCacheAside_GetMulti tests all GetMulti() scenarios using subtests.
 func TestCacheAside_GetMulti(t *testing.T) {
-	if !testing.Short() {
-		t.Skip("Skipping unit test in non-short mode (use -short flag)")
-	}
-
 	t.Run("AllCacheHits", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
@@ -578,10 +570,6 @@ func TestCacheAside_GetMulti(t *testing.T) {
 
 // TestCacheAside_Del tests deletion operations using subtests.
 func TestCacheAside_Del(t *testing.T) {
-	if !testing.Short() {
-		t.Skip("Skipping unit test in non-short mode (use -short flag)")
-	}
-
 	t.Run("SingleKey", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()

@@ -38,3 +38,45 @@ func TestKeys(t *testing.T) {
 		assert.ElementsMatch(t, []int{1, 2, 3}, keys)
 	})
 }
+
+func TestValues(t *testing.T) {
+	t.Run("empty map returns empty slice", func(t *testing.T) {
+		m := make(map[string]int)
+		values := mapsx.Values(m)
+		assert.Empty(t, values)
+		assert.NotNil(t, values) // Should return empty slice, not nil
+	})
+
+	t.Run("extracts all values from map", func(t *testing.T) {
+		m := map[string]int{
+			"a": 1,
+			"b": 2,
+			"c": 3,
+		}
+		values := mapsx.Values(m)
+		assert.Len(t, values, 3)
+		assert.ElementsMatch(t, []int{1, 2, 3}, values)
+	})
+
+	t.Run("works with different types", func(t *testing.T) {
+		m := map[int]string{
+			1: "one",
+			2: "two",
+			3: "three",
+		}
+		values := mapsx.Values(m)
+		assert.Len(t, values, 3)
+		assert.ElementsMatch(t, []string{"one", "two", "three"}, values)
+	})
+
+	t.Run("handles duplicate values", func(t *testing.T) {
+		m := map[string]int{
+			"a": 1,
+			"b": 1,
+			"c": 2,
+		}
+		values := mapsx.Values(m)
+		assert.Len(t, values, 3)
+		assert.ElementsMatch(t, []int{1, 1, 2}, values)
+	})
+}
