@@ -10,6 +10,9 @@ import (
 	"github.com/dcbickfo/redcache/internal/cmdx"
 )
 
+// Shared test configuration variables
+var addr = []string{"localhost:6379"}
+
 // assertValueEquals checks if the actual value matches the expected value.
 // This helper reduces boilerplate in tests that need to verify returned values.
 func assertValueEquals(t *testing.T, expected, actual string, msgAndArgs ...interface{}) bool {

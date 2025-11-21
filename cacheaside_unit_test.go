@@ -342,12 +342,29 @@ func TestCacheAside_GetMulti(t *testing.T) {
 		mockClient.EXPECT().
 			DoMultiCache(gomock.Any(), gomock.Any()).
 			DoAndReturn(func(ctx context.Context, commands ...rueidis.CacheableTTL) []rueidis.RedisResult {
-				// Return cached values for all keys in order
-				return []rueidis.RedisResult{
-					mock.Result(mock.RedisString("value1")),
-					mock.Result(mock.RedisString("value2")),
-					mock.Result(mock.RedisString("value3")),
+				// Build key-based response map to handle any key order
+				cacheValues := map[string]string{
+					"key1": "value1",
+					"key2": "value2",
+					"key3": "value3",
 				}
+
+				results := make([]rueidis.RedisResult, len(commands))
+				for i, cmd := range commands {
+					// Extract the key from the command
+					cmdStrings := cmd.Cmd.Commands()
+					if len(cmdStrings) >= 2 {
+						key := cmdStrings[1] // GET <key>
+						if val, exists := cacheValues[key]; exists {
+							results[i] = mock.Result(mock.RedisString(val))
+						} else {
+							results[i] = mock.Result(mock.RedisNil())
+						}
+					} else {
+						results[i] = mock.Result(mock.RedisNil())
+					}
+				}
+				return results
 			})
 
 		mockLockManager := &mocklockmanager.MockLockManager{
@@ -499,13 +516,28 @@ func TestCacheAside_GetMulti(t *testing.T) {
 		mockClient.EXPECT().
 			DoMultiCache(gomock.Any(), gomock.Any()).
 			DoAndReturn(func(ctx context.Context, commands ...rueidis.CacheableTTL) []rueidis.RedisResult {
-				// Return: hit, miss, hit, miss (in order of keys: cached1, miss1, cached2, miss2)
-				return []rueidis.RedisResult{
-					mock.Result(mock.RedisString("value1")), // cached1
-					mock.Result(mock.RedisNil()),            // miss1
-					mock.Result(mock.RedisString("value2")), // cached2
-					mock.Result(mock.RedisNil()),            // miss2
+				// Build key-based response map to handle any key order
+				cacheValues := map[string]string{
+					"cached1": "value1",
+					"cached2": "value2",
 				}
+
+				results := make([]rueidis.RedisResult, len(commands))
+				for i, cmd := range commands {
+					// Extract the key from the command
+					cmdStrings := cmd.Cmd.Commands()
+					if len(cmdStrings) >= 2 {
+						key := cmdStrings[1] // GET <key>
+						if val, exists := cacheValues[key]; exists {
+							results[i] = mock.Result(mock.RedisString(val))
+						} else {
+							results[i] = mock.Result(mock.RedisNil())
+						}
+					} else {
+						results[i] = mock.Result(mock.RedisNil())
+					}
+				}
+				return results
 			})
 
 		tryAcquireCalled := false

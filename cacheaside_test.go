@@ -20,8 +20,6 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-var addr = []string{"127.0.0.1:6379"}
-
 func makeClient(t *testing.T, addr []string) *redcache.CacheAside {
 	client, err := redcache.NewRedCacheAside(
 		rueidis.ClientOption{
