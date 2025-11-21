@@ -6,6 +6,9 @@ run:
   modules-download-mode: readonly
   build-tags:
     - examples
+    - integration
+    - distributed
+    - cluster
 
 formatters:
   enable:

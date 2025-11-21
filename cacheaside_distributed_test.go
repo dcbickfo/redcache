@@ -1,3 +1,5 @@
+//go:build distributed
+
 package redcache_test
 
 import (
@@ -20,7 +22,7 @@ import (
 // coordinate correctly across multiple clients
 func TestCacheAside_DistributedCoordination(t *testing.T) {
 	t.Run("multiple clients Get same key - only one calls callback", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "dist:get:" + uuid.New().String()
 
 		// Create multiple clients
@@ -78,7 +80,7 @@ func TestCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("multiple clients GetMulti with overlapping keys", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key1 := "dist:multi:1:" + uuid.New().String()
 		key2 := "dist:multi:2:" + uuid.New().String()
 		key3 := "dist:multi:3:" + uuid.New().String()
@@ -167,7 +169,7 @@ func TestCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("client invalidation propagates across clients", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "dist:invalidate:" + uuid.New().String()
 
 		// Create two clients
@@ -218,7 +220,7 @@ func TestCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("lock expiration handled correctly across clients", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "dist:expire:" + uuid.New().String()
 
 		// Create client with short lock TTL
@@ -242,7 +244,7 @@ func TestCacheAside_DistributedCoordination(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			// This will timeout and lock will expire
-			timeoutCtx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+			timeoutCtx, cancel := context.WithTimeout(t.Context(), 400*time.Millisecond)
 			defer cancel()
 			_, getErr := client1.Get(timeoutCtx, 10*time.Second, key, func(ctx context.Context, key string) (string, error) {
 				// Hang until context cancels
@@ -273,7 +275,7 @@ func TestCacheAside_DistributedCoordination(t *testing.T) {
 	})
 
 	t.Run("concurrent Gets from many clients - stress test", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Create many clients
 		numClients := 20

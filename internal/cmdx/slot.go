@@ -7,6 +7,25 @@ const (
 	RedisClusterSlots = 16383
 )
 
+// EstimateSlotDistribution estimates the number of Redis cluster slots and keys per slot
+// for pre-allocating maps and slices when grouping operations by slot.
+//
+// The estimation assumes approximately 8 keys will be distributed across different slots
+// (a reasonable assumption for hash-distributed keys), and calculates the expected number
+// of keys per slot based on this distribution.
+//
+// Returns:
+//   - estimatedSlots: estimated number of unique slots that will contain keys
+//   - estimatedPerSlot: estimated number of keys per slot
+func EstimateSlotDistribution(itemCount int) (estimatedSlots, estimatedPerSlot int) {
+	estimatedSlots = itemCount / 8
+	if estimatedSlots < 1 {
+		estimatedSlots = 1
+	}
+	estimatedPerSlot = (itemCount / estimatedSlots) + 1
+	return
+}
+
 func Slot(key string) uint16 {
 	var s, e int
 	for ; s < len(key); s++ {

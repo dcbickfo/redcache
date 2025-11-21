@@ -1,3 +1,5 @@
+//go:build integration
+
 package redcache_test
 
 import (
@@ -38,7 +40,7 @@ func makeClient(t *testing.T, addr []string) *redcache.CacheAside {
 func TestCacheAside_Get(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 	called := false
@@ -62,7 +64,7 @@ func TestCacheAside_Get(t *testing.T) {
 func TestCacheAside_GetMulti(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -95,7 +97,7 @@ func TestCacheAside_GetMulti(t *testing.T) {
 func TestCacheAside_GetMulti_Partial(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -157,7 +159,7 @@ func TestCacheAside_GetMulti_Partial(t *testing.T) {
 func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -201,7 +203,7 @@ func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 func TestCacheAside_Del(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
@@ -226,7 +228,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 	client2 := makeClient(t, addr)
 	defer client2.Client().Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 6 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -324,7 +326,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 	client4 := makeClient(t, addr)
 	defer client4.Client().Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 6 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -452,7 +454,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 6 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -579,7 +581,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 func TestCacheAside_DelMulti(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
@@ -614,7 +616,7 @@ func TestCacheAside_GetParentContextCancellation(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
@@ -655,7 +657,7 @@ func TestConcurrentRegisterRace(t *testing.T) {
 	require.NoError(t, err)
 	defer client.Client().Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
@@ -713,7 +715,7 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
@@ -771,7 +773,7 @@ func TestConcurrentInvalidation(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 
 	callCount := 0
@@ -834,7 +836,7 @@ func TestDeleteDuringGetWithLock(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	expectedValue := "val:" + uuid.New().String()
 
@@ -901,7 +903,7 @@ func TestDeleteDuringGetMultiWithLocks(t *testing.T) {
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -975,7 +977,7 @@ func TestDeleteDuringGetMultiWithLocks(t *testing.T) {
 // TestCacheAside_LockExpiration tests Get/GetMulti behavior when locks expire naturally
 func TestCacheAside_LockExpiration(t *testing.T) {
 	t.Run("Get with callback exceeding lock TTL", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "get-exceed-ttl:" + uuid.New().String()
 
 		callCount := 0
@@ -1012,7 +1014,7 @@ func TestCacheAside_LockExpiration(t *testing.T) {
 	})
 
 	t.Run("GetMulti with callback exceeding lock TTL", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key1 := "getmulti-exceed-1:" + uuid.New().String()
 		key2 := "getmulti-exceed-2:" + uuid.New().String()
 

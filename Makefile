@@ -1,4 +1,4 @@
-.PHONY: help test test-fast test-unit test-distributed test-cluster test-examples test-coverage lint lint-fix build clean vendor install-tools docker-up docker-down docker-cluster-up docker-cluster-down
+.PHONY: help test test-fast test-unit test-unit-mocked test-integration test-distributed test-cluster test-examples test-coverage lint lint-fix build clean vendor install-tools mocks docker-up docker-down docker-cluster-up docker-cluster-down
 
 # Colors for output
 CYAN := \033[36m
@@ -18,11 +18,15 @@ help:
 	@echo "$(BOLD)Testing:$(RESET)"
 	@echo "  $(CYAN)make test$(RESET)              - Run all tests including examples (default)"
 	@echo "  $(CYAN)make test-fast$(RESET)         - Run all tests quickly (no examples)"
-	@echo "  $(CYAN)make test-unit$(RESET)         - Run unit tests only (no distributed/cluster)"
+	@echo "  $(CYAN)make test-unit$(RESET)         - Run unit tests with mocks (no Redis required)"
+	@echo "  $(CYAN)make test-integration$(RESET)  - Run integration tests (requires Redis)"
 	@echo "  $(CYAN)make test-distributed$(RESET)  - Run distributed tests (multi-client coordination)"
 	@echo "  $(CYAN)make test-cluster$(RESET)      - Run Redis cluster tests (requires cluster)"
 	@echo "  $(CYAN)make test-examples$(RESET)     - Run example tests only"
 	@echo "  $(CYAN)make test-coverage$(RESET)     - Run tests with coverage report"
+	@echo ""
+	@echo "$(BOLD)Mocking:$(RESET)"
+	@echo "  $(CYAN)make mocks$(RESET)             - Generate all mocks using mockery v3"
 	@echo ""
 	@echo "$(BOLD)Docker/Redis:$(RESET)"
 	@echo "  $(CYAN)make docker-up$(RESET)         - Start single Redis instance"
@@ -58,32 +62,37 @@ test:
 	@echo "$(YELLOW)Running all tests including examples...$(RESET)"
 	@echo "$(YELLOW)Note: Requires Redis on localhost:6379 AND Redis Cluster on localhost:17000-17005$(RESET)"
 	@echo "$(YELLOW)      Start with: make docker-up && make docker-cluster-up$(RESET)"
-	@go test -tags=examples -v ./... && echo "$(GREEN)✓ All tests passed!$(RESET)" || (echo "$(RED)✗ Tests failed!$(RESET)" && exit 1)
+	@go test -tags="integration,distributed,cluster,examples" -v ./... && echo "$(GREEN)✓ All tests passed!$(RESET)" || (echo "$(RED)✗ Tests failed!$(RESET)" && exit 1)
 
 # Run tests quickly without examples
 test-fast:
 	@echo "$(YELLOW)Running tests (no examples)...$(RESET)"
 	@echo "$(YELLOW)Note: Requires Redis on localhost:6379 AND Redis Cluster on localhost:17000-17005$(RESET)"
 	@echo "$(YELLOW)      Start with: make docker-up && make docker-cluster-up$(RESET)"
-	@go test -v ./... && echo "$(GREEN)✓ Tests passed!$(RESET)" || (echo "$(RED)✗ Tests failed!$(RESET)" && exit 1)
+	@go test -tags="integration,distributed,cluster" -v ./... && echo "$(GREEN)✓ Tests passed!$(RESET)" || (echo "$(RED)✗ Tests failed!$(RESET)" && exit 1)
 
-# Run only unit tests (no distributed or cluster tests)
+# Run only unit tests with mocks (no Redis required)
 test-unit:
-	@echo "$(YELLOW)Running unit tests only (excluding distributed and cluster tests)...$(RESET)"
+	@echo "$(YELLOW)Running unit tests with mocks (no Redis required)...$(RESET)"
+	@go test -v -short ./... && echo "$(GREEN)✓ Unit tests passed!$(RESET)" || (echo "$(RED)✗ Unit tests failed!$(RESET)" && exit 1)
+
+# Run integration tests (requires Redis)
+test-integration:
+	@echo "$(YELLOW)Running integration tests (requires Redis)...$(RESET)"
 	@echo "$(YELLOW)Note: Requires Redis on localhost:6379$(RESET)"
-	@go test -v -run '^Test[^_]*$$|TestCacheAside_Get$$|TestCacheAside_GetMulti$$|TestPrimeableCacheAside_Set$$' ./... && echo "$(GREEN)✓ Unit tests passed!$(RESET)" || (echo "$(RED)✗ Unit tests failed!$(RESET)" && exit 1)
+	@go test -tags=integration -v ./... && echo "$(GREEN)✓ Integration tests passed!$(RESET)" || (echo "$(RED)✗ Integration tests failed!$(RESET)" && exit 1)
 
 # Run distributed tests (multi-client, single Redis instance)
 test-distributed:
 	@echo "$(YELLOW)Running distributed tests (multi-client coordination)...$(RESET)"
 	@echo "$(YELLOW)Note: Requires Redis on localhost:6379 (start with: make docker-up)$(RESET)"
-	@go test -v -run 'Distributed' ./... && echo "$(GREEN)✓ Distributed tests passed!$(RESET)" || (echo "$(RED)✗ Distributed tests failed!$(RESET)" && exit 1)
+	@go test -tags=distributed -v ./... && echo "$(GREEN)✓ Distributed tests passed!$(RESET)" || (echo "$(RED)✗ Distributed tests failed!$(RESET)" && exit 1)
 
 # Run Redis cluster tests (requires cluster setup)
 test-cluster:
 	@echo "$(YELLOW)Running Redis cluster tests...$(RESET)"
 	@echo "$(YELLOW)Note: Requires Redis Cluster on localhost:17000-17005 (start with: make docker-cluster-up)$(RESET)"
-	@go test -v -run 'Cluster' ./... && echo "$(GREEN)✓ Cluster tests passed!$(RESET)" || (echo "$(RED)✗ Cluster tests failed!$(RESET)" && exit 1)
+	@go test -tags=cluster -v ./... && echo "$(GREEN)✓ Cluster tests passed!$(RESET)" || (echo "$(RED)✗ Cluster tests failed!$(RESET)" && exit 1)
 
 # Run example tests with build tag
 test-examples:
@@ -95,7 +104,7 @@ test-coverage:
 	@echo "$(YELLOW)Running tests with coverage...$(RESET)"
 	@echo "$(YELLOW)Note: Requires Redis on localhost:6379 AND Redis Cluster on localhost:17000-17005$(RESET)"
 	@echo "$(YELLOW)      Start with: make docker-up && make docker-cluster-up$(RESET)"
-	@go test -v -coverprofile=coverage.out -covermode=atomic ./... && echo "$(GREEN)✓ Tests passed!$(RESET)" || (echo "$(RED)✗ Tests failed!$(RESET)" && exit 1)
+	@go test -tags="integration,distributed,cluster" -v -coverprofile=coverage.out -covermode=atomic ./... && echo "$(GREEN)✓ Tests passed!$(RESET)" || (echo "$(RED)✗ Tests failed!$(RESET)" && exit 1)
 	@echo ""
 	@echo "$(CYAN)Coverage report:$(RESET)"
 	@go tool cover -func=coverage.out | tail -1
@@ -121,6 +130,12 @@ build:
 build-examples:
 	@echo "$(YELLOW)Building all packages (including examples)...$(RESET)"
 	@go build -tags=examples ./... && echo "$(GREEN)✓ Build successful!$(RESET)" || (echo "$(RED)✗ Build failed!$(RESET)" && exit 1)
+
+# Generate mocks using mockery v3
+mocks:
+	@echo "$(YELLOW)Generating mocks with mockery v3...$(RESET)"
+	@command -v mockery >/dev/null 2>&1 || { echo "$(RED)Error: mockery is not installed. Install with: go install github.com/vektra/mockery/v3@latest$(RESET)"; exit 1; }
+	@mockery --config .mockery.yaml && echo "$(GREEN)✓ Mocks generated successfully!$(RESET)" || (echo "$(RED)✗ Mock generation failed!$(RESET)" && exit 1)
 
 # Clean build artifacts
 clean:

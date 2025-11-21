@@ -18,27 +18,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Testing
 
+redcache uses Go build tags to organize tests by category:
+
 ```bash
-# Run all tests (requires Redis on localhost:6379)
-make test
+# Unit tests only (no Redis required, <0.3s)
+make test-unit
+go test -short ./...
 
-# Run tests with single test
-go test . -run TestName -v
-
-# Run tests with race detector
-go test . -race -count=1
-
-# Run specific package tests
-go test ./internal/writelock -v
+# Integration tests (requires Redis on localhost:6379)
+make test-integration
+go test -tags=integration ./...
 
 # Distributed tests (multi-client coordination)
 make test-distributed
+go test -tags=distributed ./...
 
-# Redis Cluster tests (requires cluster on ports 7000-7005)
+# Redis Cluster tests (requires cluster on ports 17000-17005)
 make test-cluster
+go test -tags=cluster ./...
 
-# Complete test suite (unit + distributed + cluster + examples)
-make test-complete
+# Run multiple test suites
+go test -tags="integration,distributed" ./...
+
+# All tests (comprehensive: unit + integration + distributed + cluster + examples)
+make test
+go test -tags="integration,distributed,cluster,examples" ./...
+
+# Run specific test with race detector
+go test -tags=integration -run TestName -race -count=1 -v
+
+# Run specific package tests
+go test -tags=integration ./internal/writelock -v
 ```
 
 ### Docker/Redis
@@ -210,21 +220,50 @@ The linter enforces cognitive complexity < 15 per function. When implementing co
 
 ### Testing Patterns
 
-**Test Categories:**
-1. **Unit tests**: Basic functionality, single client
-2. **Distributed tests** (`*_distributed_test.go`): Multi-client coordination
-3. **Cluster tests** (`*_cluster_test.go`): Redis Cluster specific (gracefully skip if cluster unavailable)
-4. **Edge tests** (`*_edge_test.go`): Race conditions, context cancellation, error handling
+**Test Categories with Build Tags:**
+1. **Unit tests** (`*_unit_test.go`): No build tag, use `-short` flag. Fast isolated tests with mocks, no Redis required.
+2. **Integration tests** (`*_test.go`): `//go:build integration` tag. Test with real Redis for end-to-end functionality.
+3. **Distributed tests** (`*_distributed_test.go`): `//go:build distributed` tag. Multi-client coordination tests.
+4. **Cluster tests** (`*_cluster_test.go`): `//go:build cluster` tag. Redis Cluster specific tests (ports 17000-17005).
+5. **Examples** (`examples/*_test.go`): `//go:build examples` tag. Runnable documentation examples.
+
+**Test Organization - IMPORTANT:**
+- **Always use subtests** with `t.Run()` for test organization
+- **Always use `t.Context()`** instead of `context.Background()` in tests
+- **Unit tests must check `testing.Short()`**: Skip when NOT in short mode (`if !testing.Short() { t.Skip(...) }`)
 
 **Test Naming Convention:**
-- `Test<Component>_<Operation>_<Scenario>`
-- Example: `TestPrimeableCacheAside_SetMulti_ConcurrentWrites`
+- Parent test: `Test<Component>_<Operation>`
+- Subtests: Descriptive names like `"CacheHit"`, `"CacheMiss_LockAcquired"`, `"CallbackError"`
+- Example: `TestCacheAside_Get` with subtests `"CacheHit"` and `"CacheMiss_LockAcquired"`
+
+**Test Structure Pattern:**
+```go
+func TestCacheAside_Get(t *testing.T) {
+    if !testing.Short() {
+        t.Skip("Skipping unit test in non-short mode")
+    }
+
+    // Shared setup here if needed
+
+    t.Run("CacheHit", func(t *testing.T) {
+        ctx := t.Context()  // Use test context
+        // ... test logic
+    })
+
+    t.Run("CacheMiss_LockAcquired", func(t *testing.T) {
+        ctx := t.Context()
+        // ... test logic
+    })
+}
+```
 
 **Redis Setup:**
 - Single Redis: Tests assume `localhost:6379`
-- Cluster: Tests check ports 7000-7005, skip if unavailable
+- Cluster: Tests use ports 17000-17005
 - Always use `makeClient(t)` helper for setup
 - Always defer `client.Close()`
+- Always use `t.Context()` for automatic cleanup
 
 ### Benchmarking Best Practices
 
@@ -263,18 +302,21 @@ go tool pprof -inuse_space mem.prof
 
 3. **Test sequence**:
    ```bash
-   # Unit tests
-   go test . -run TestNewFeature -v
+   # Unit tests (with mocks, no Redis)
+   go test -short -run TestNewFeature -v
+
+   # Integration tests (with real Redis)
+   go test -tags=integration -run TestNewFeature -v
 
    # Race detector
-   go test . -run TestNewFeature -race -count=1
+   go test -tags=integration -run TestNewFeature -race -count=1
 
    # Distributed coordination
-   go test . -run TestNewFeature_Distributed -v
+   go test -tags=distributed -run TestNewFeature -v
 
    # Cluster support
    make docker-cluster-up
-   go test . -run TestNewFeature_Cluster -v
+   go test -tags=cluster -run TestNewFeature -v
    ```
 
 4. **Linter verification**:
@@ -353,9 +395,13 @@ redcache/
 5. **Don't create high cognitive complexity** - Extract helper functions to stay under 15
 6. **Don't forget cleanup in tests** - Always `defer client.Close()` and `defer cleanup()`
 7. **Don't assume keys are in same slot** - Even similar-looking keys may hash differently
+8. **Don't use `context.Background()` in tests** - Always use `t.Context()` for automatic cleanup
+9. **Don't skip organizing tests with subtests** - Always use `t.Run()` for better structure and isolation
+10. **Don't forget build tags** - Unit tests need `testing.Short()` check, integration tests need `//go:build integration` tag
 
 ## Additional Resources
 
+- See `TESTING.md` for comprehensive testing guide (build tags, mocks, best practices)
 - See `README.md` for user-facing documentation
 - See `DISTRIBUTED_LOCK_SAFETY.md` for lock safety analysis
 - See `REDIS_CLUSTER.md` for cluster deployment guide

@@ -1,3 +1,5 @@
+//go:build cluster
+
 package redcache_test
 
 import (
@@ -42,7 +44,7 @@ func makeClusterPrimeableCacheAside(t *testing.T) *redcache.PrimeableCacheAside 
 	}
 
 	// Test cluster connectivity
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	innerClient := cacheAside.Client()
 	if pingErr := innerClient.Do(ctx, innerClient.B().Ping().Build()).Error(); pingErr != nil {
@@ -63,7 +65,7 @@ func TestPrimeableCacheAside_Cluster_BasicSetOperations(t *testing.T) {
 		}
 		defer client.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pcluster:set:" + uuid.New().String()
 		expectedValue := "value:" + uuid.New().String()
 
@@ -96,7 +98,7 @@ func TestPrimeableCacheAside_Cluster_BasicSetOperations(t *testing.T) {
 		}
 		defer client.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pcluster:force:" + uuid.New().String()
 
 		// Manually set a lock
@@ -126,7 +128,7 @@ func TestPrimeableCacheAside_Cluster_SetMultiOperations(t *testing.T) {
 		}
 		defer client.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Use hash tags to ensure same slot
 		keys := []string{
@@ -174,7 +176,7 @@ func TestPrimeableCacheAside_Cluster_SetMultiOperations(t *testing.T) {
 		}
 		defer client.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Create keys in different slots
 		keys := []string{
@@ -223,7 +225,7 @@ func TestPrimeableCacheAside_Cluster_SetMultiOperations(t *testing.T) {
 		}
 		defer client.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 
 		keys := []string{
 			"{shard:400}:key1",
@@ -265,7 +267,7 @@ func TestPrimeableCacheAside_Cluster_LargeKeySet(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Create 50 keys across multiple slots
 	numKeys := 50
@@ -328,7 +330,7 @@ func TestPrimeableCacheAside_Cluster_ConcurrentSetOperations(t *testing.T) {
 		client2 := makeClusterPrimeableCacheAside(t)
 		defer client2.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 
 		// Keys in different slots
 		key1 := "{shard:700}:concurrent1"
@@ -378,7 +380,7 @@ func TestPrimeableCacheAside_Cluster_ConcurrentSetOperations(t *testing.T) {
 		client2 := makeClusterPrimeableCacheAside(t)
 		defer client2.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pcluster:same:" + uuid.New().String()
 
 		var callbackCount atomic.Int32
@@ -431,7 +433,7 @@ func TestPrimeableCacheAside_Cluster_SetAndGetIntegration(t *testing.T) {
 		client2 := makeClusterPrimeableCacheAside(t)
 		defer client2.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pcluster:setget:" + uuid.New().String()
 		setValue := "set-value:" + uuid.New().String()
 
@@ -462,7 +464,7 @@ func TestPrimeableCacheAside_Cluster_SetAndGetIntegration(t *testing.T) {
 		client2 := makeClusterPrimeableCacheAside(t)
 		defer client2.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pcluster:getwait:" + uuid.New().String()
 
 		// Client 1 starts slow Get
@@ -509,7 +511,7 @@ func TestPrimeableCacheAside_Cluster_Invalidation(t *testing.T) {
 		}
 		defer client.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pcluster:del:" + uuid.New().String()
 
 		// Set a value
@@ -535,7 +537,7 @@ func TestPrimeableCacheAside_Cluster_Invalidation(t *testing.T) {
 		}
 		defer client.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 
 		keys := []string{
 			"{shard:900}:del1",
@@ -574,7 +576,7 @@ func TestPrimeableCacheAside_Cluster_Invalidation(t *testing.T) {
 		client2 := makeClusterPrimeableCacheAside(t)
 		defer client2.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pcluster:del-set:" + uuid.New().String()
 
 		// Client 1 starts Set
@@ -612,7 +614,7 @@ func TestPrimeableCacheAside_Cluster_ErrorHandling(t *testing.T) {
 		}
 		defer client.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pcluster:error:" + uuid.New().String()
 
 		callCount := 0
@@ -650,7 +652,7 @@ func TestPrimeableCacheAside_Cluster_ErrorHandling(t *testing.T) {
 		err := innerClient.Do(context.Background(), innerClient.B().Set().Key(key).Value(lockVal).Ex(time.Second*5).Build()).Error()
 		require.NoError(t, err)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 		defer cancel()
 
 		// Set should fail with timeout
@@ -674,7 +676,7 @@ func TestPrimeableCacheAside_Cluster_SpecialValues(t *testing.T) {
 		}
 		defer client.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pcluster:empty:" + uuid.New().String()
 
 		err := client.Set(ctx, time.Second*10, key, func(_ context.Context, _ string) (string, error) {
@@ -696,7 +698,7 @@ func TestPrimeableCacheAside_Cluster_SpecialValues(t *testing.T) {
 		}
 		defer client.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 
 		testCases := []struct {
 			name  string
@@ -731,7 +733,7 @@ func TestPrimeableCacheAside_Cluster_SpecialValues(t *testing.T) {
 		}
 		defer client.Close()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "pcluster:large:" + uuid.New().String()
 		largeValue := strings.Repeat("x", 1024*1024) // 1MB
 
@@ -756,7 +758,7 @@ func TestPrimeableCacheAside_Cluster_StressTest(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Create many keys across slots
 	numKeys := 50
@@ -835,7 +837,7 @@ func TestPrimeableCacheAside_Cluster_TTLConsistency(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "pcluster:ttl:" + uuid.New().String()
 
 	// Set with short TTL
