@@ -289,7 +289,8 @@ func TestLockManager_CheckKeyLocked(t *testing.T) {
 
 	t.Run("returns false for real cached value", func(t *testing.T) {
 		// Set a real value (not a lock)
-		client.Do(ctx, client.B().Set().Key("c3").Value("real-value").Build())
+		err := client.Do(ctx, client.B().Set().Key("c3").Value("real-value").Build()).Error()
+		require.NoError(t, err)
 
 		locked := lm.CheckKeyLocked(ctx, "c3")
 		assert.False(t, locked)
@@ -361,13 +362,19 @@ func TestLockManager_CommitReadLocks(t *testing.T) {
 	})
 
 	t.Run("returns needsRetry if lock lost", func(t *testing.T) {
-		lock1, err := lm.AcquireLockBlocking(ctx, "co3")
+		// Generate a lock value manually
+		lockVal := lm.GenerateLockValue()
+
+		// Set the lock directly (simpler than AcquireLockBlocking which creates CSC subscriptions)
+		err := client.Do(ctx, client.B().Set().Key("co3").Value(lockVal).Px(5*time.Second).Build()).Error()
 		require.NoError(t, err)
 
-		// Manually overwrite the lock
-		client.Do(ctx, client.B().Set().Key("co3").Value("stolen").Build())
+		// Overwrite with a different value to simulate lock being stolen
+		err = client.Do(ctx, client.B().Set().Key("co3").Value("stolen").Build()).Error()
+		require.NoError(t, err)
 
-		lockValues := map[string]string{"co3": lock1}
+		// Try to commit with the original lock value (should fail CAS)
+		lockValues := map[string]string{"co3": lockVal}
 		actualValues := map[string]string{"co3": "new-value"}
 
 		succeeded, needsRetry, err := lm.CommitReadLocks(ctx, 10*time.Second, lockValues, actualValues)
