@@ -61,40 +61,15 @@ package redcache
 import (
 	"context"
 	"errors"
-	"fmt"
-	"iter"
 	"log/slog"
-	"maps"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
-	"golang.org/x/sync/errgroup"
 
-	"github.com/dcbickfo/redcache/internal/cmdx"
-	"github.com/dcbickfo/redcache/internal/lockpool"
+	"github.com/dcbickfo/redcache/internal/cachelock"
 	"github.com/dcbickfo/redcache/internal/mapsx"
-	"github.com/dcbickfo/redcache/internal/syncx"
 )
-
-// Pools for map reuse in hot paths to reduce allocations.
-var (
-	// stringStringMapPool is used for temporary maps in cleanup operations.
-	stringStringMapPool = sync.Pool{
-		New: func() any {
-			m := make(map[string]string, 100)
-			return &m
-		},
-	}
-)
-
-type lockEntry struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-}
 
 // Logger defines the logging interface used by CacheAside.
 // Implementations must be safe for concurrent use and should handle log levels internally.
@@ -119,12 +94,11 @@ type Logger interface {
 //   - Context-aware cleanup ensures locks are released even on errors
 type CacheAside struct {
 	client      rueidis.Client
-	locks       syncx.Map[string, *lockEntry]
 	lockTTL     time.Duration
 	logger      Logger
 	lockPrefix  string
 	maxRetries  int
-	lockValPool *lockpool.Pool
+	lockManager *cachelock.RedisManager
 }
 
 // CacheAsideOption configures the behavior of the CacheAside instance.
@@ -208,11 +182,10 @@ func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOpti
 	}
 
 	rca := &CacheAside{
-		lockTTL:     caOption.LockTTL,
-		logger:      caOption.Logger,
-		lockPrefix:  caOption.LockPrefix,
-		maxRetries:  caOption.MaxRetries,
-		lockValPool: lockpool.New(caOption.LockPrefix, 10000),
+		lockTTL:    caOption.LockTTL,
+		logger:     caOption.Logger,
+		lockPrefix: caOption.LockPrefix,
+		maxRetries: caOption.MaxRetries,
 	}
 	clientOption.OnInvalidations = rca.onInvalidate
 
@@ -225,6 +198,15 @@ func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOpti
 	if err != nil {
 		return nil, err
 	}
+
+	// Initialize the lock manager after client is created
+	rca.lockManager = cachelock.NewRedisManager(cachelock.RedisManagerConfig{
+		Client:     rca.client,
+		LockTTL:    caOption.LockTTL,
+		LockPrefix: caOption.LockPrefix,
+		Logger:     caOption.Logger,
+	})
+
 	return rca, nil
 }
 
@@ -239,112 +221,18 @@ func (rca *CacheAside) Client() rueidis.Client {
 // It cancels all pending lock wait operations and cleans up internal state.
 // Note: This does NOT close the underlying Redis client, as that's owned by the caller.
 func (rca *CacheAside) Close() {
-	// Cancel all pending lock wait operations
-	rca.locks.Range(func(_ string, entry *lockEntry) bool {
-		if entry != nil {
-			entry.cancel() // Cancel context, which closes the channel
-		}
-		return true
-	})
+	rca.lockManager.Close()
 }
 
 func (rca *CacheAside) onInvalidate(messages []rueidis.RedisMessage) {
-	for _, m := range messages {
-		key, err := m.ToString()
-		if err != nil {
-			rca.logger.Error("failed to parse invalidation message", "error", err)
-			continue
-		}
-		entry, loaded := rca.locks.LoadAndDelete(key)
-		if loaded {
-			entry.cancel() // Cancel context, which closes the channel
-		}
-	}
+	// Delegate to lock manager for proper invalidation handling
+	rca.lockManager.OnInvalidate(messages)
 }
 
-var (
-	delKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("DEL",KEYS[1]) else return 0 end`)
-	setKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("SET",KEYS[1],ARGV[2],"PX",ARGV[3]) else return 0 end`)
-)
-
-//nolint:gocognit // Complex due to atomic operations and retry logic
+// register creates or returns an existing wait channel for a key.
+// Used by PrimeableCacheAside for CSC invalidation subscription.
 func (rca *CacheAside) register(key string) <-chan struct{} {
-retry:
-	// First check if an entry already exists (common case for concurrent requests)
-	// This avoids creating a context unnecessarily
-	if existing, ok := rca.locks.Load(key); ok {
-		// Check if the existing context is still active
-		select {
-		case <-existing.ctx.Done():
-			// Context is done - try to atomically delete it and retry
-			if rca.locks.CompareAndDelete(key, existing) {
-				goto retry
-			}
-			// Another goroutine modified it, try loading again
-			if newEntry, found := rca.locks.Load(key); found {
-				return newEntry.ctx.Done()
-			}
-			// Entry was deleted, retry
-			goto retry
-		default:
-			// Context is still active, use it
-			return existing.ctx.Done()
-		}
-	}
-
-	// No existing entry or it was expired, create new one
-	// The extra time allows the invalidation message to arrive (primary flow)
-	// while still providing a fallback timeout for missed messages.
-	// We use a proportional buffer (20% of lockTTL) with a minimum of 200ms
-	// to account for network delays, ensuring the timeout scales appropriately
-	// with different lock durations.
-	buffer := rca.lockTTL / 5 // 20%
-	if buffer < 200*time.Millisecond {
-		buffer = 200 * time.Millisecond
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), rca.lockTTL+buffer)
-
-	newEntry := &lockEntry{
-		ctx:    ctx,
-		cancel: cancel,
-	}
-
-	// Store or get existing entry atomically
-	actual, loaded := rca.locks.LoadOrStore(key, newEntry)
-
-	// If we successfully stored, schedule automatic cleanup on expiration
-	if !loaded {
-		// Use context.AfterFunc to clean up expired entry without blocking goroutine
-		context.AfterFunc(ctx, func() {
-			rca.locks.CompareAndDelete(key, newEntry)
-		})
-		return ctx.Done()
-	}
-
-	// Another goroutine stored first, cancel our context to prevent leak
-	cancel()
-
-	// Check if their context is still active (not cancelled/timed out)
-	select {
-	case <-actual.ctx.Done():
-		// Context is done - try to atomically delete it and retry
-		if rca.locks.CompareAndDelete(key, actual) {
-			// We successfully deleted the expired entry, retry
-			goto retry
-		}
-		// CompareAndDelete failed - another goroutine modified it
-		// Load the new entry and use it
-		waitEntry, ok := rca.locks.Load(key)
-		if !ok {
-			// Entry was deleted by another goroutine, retry registration
-			goto retry
-		}
-		// Use the new entry's context
-		return waitEntry.ctx.Done()
-	default:
-		// Context is still active - use it
-		return actual.ctx.Done()
-	}
+	return rca.lockManager.Register(key)
 }
 
 // Get retrieves a value from cache or computes it using the provided callback function.
@@ -410,37 +298,83 @@ func (rca *CacheAside) getWithRegistration(
 	key string,
 	fn func(ctx context.Context, key string) (val string, err error),
 ) (string, error) {
-retry:
-	wait := rca.register(key)
-	val, err := rca.tryGet(ctx, ttl, key)
+	for {
+		val, done, err := rca.tryAcquireAndProcess(ctx, ttl, key, fn)
+		if err != nil {
+			return "", err
+		}
+		if done {
+			return val, nil
+		}
+		// Retry the loop - lock was contended or lost
+	}
+}
 
-	if err != nil && !errors.Is(err, errNotFound) {
-		return "", err
+// tryAcquireAndProcess attempts to acquire lock and process a single key.
+// Returns (value, done, error) where done indicates if a value was obtained.
+func (rca *CacheAside) tryAcquireAndProcess(
+	ctx context.Context,
+	ttl time.Duration,
+	key string,
+	fn func(ctx context.Context, key string) (val string, err error),
+) (string, bool, error) {
+	result, err := rca.lockManager.TryAcquire(ctx, []string{key}, cachelock.LockModeRead)
+	if err != nil {
+		return "", false, err
 	}
 
-	if err == nil && val != "" {
-		return val, nil
+	// Cache hit - return immediately
+	if val, ok := result.CachedValues[key]; ok {
+		return val, true, nil
 	}
 
-	if val == "" {
-		val, err = rca.trySetKeyFunc(ctx, ttl, key, fn)
+	// Lock acquired - run callback and commit
+	if _, ok := result.Acquired[key]; ok {
+		return rca.executeAndCommit(ctx, ttl, key, result.Acquired, fn)
 	}
 
-	if err != nil && !errors.Is(err, errLockFailed) && !errors.Is(err, ErrLockLost) {
-		return "", err
-	}
-
-	if val == "" || errors.Is(err, ErrLockLost) {
-		// Wait for lock release or invalidation
-		select {
-		case <-wait:
-			goto retry
-		case <-ctx.Done():
-			return "", ctx.Err()
+	// Need to wait for lock release
+	if len(result.WaitChans) > 0 {
+		if waitErr := rca.lockManager.WaitForRelease(ctx, result.WaitChans); waitErr != nil {
+			return "", false, waitErr
 		}
 	}
 
-	return val, err
+	return "", false, nil
+}
+
+// executeAndCommit runs the callback and commits the result.
+// Returns (value, done, error) where done indicates if the operation completed successfully.
+func (rca *CacheAside) executeAndCommit(
+	ctx context.Context,
+	ttl time.Duration,
+	key string,
+	acquired map[string]string,
+	fn func(ctx context.Context, key string) (val string, err error),
+) (string, bool, error) {
+	val, callbackErr := fn(ctx, key)
+	if callbackErr != nil {
+		// Release lock on callback error
+		rca.lockManager.Release(ctx, acquired)
+		return "", false, callbackErr
+	}
+
+	// Commit the value
+	committed, commitErr := rca.lockManager.Commit(ctx, acquired, map[string]string{key: val}, ttl)
+	if commitErr != nil {
+		return "", false, commitErr
+	}
+
+	// Check if commit succeeded
+	for _, k := range committed {
+		if k == key {
+			return val, true, nil
+		}
+	}
+
+	// Lock was lost during commit
+	rca.logger.Debug("lock lost during commit, retrying", "key", key)
+	return "", false, nil
 }
 
 // Del removes a key from Redis cache.
@@ -482,12 +416,7 @@ func (rca *CacheAside) DelMulti(ctx context.Context, keys ...string) error {
 	return nil
 }
 
-var (
-	errNotFound   = errors.New("not found")
-	errLockFailed = errors.New("lock failed")
-)
-
-// ErrLockLost is now defined in errors.go for consistency across the package.
+var errNotFound = errors.New("not found")
 
 func (rca *CacheAside) tryGet(ctx context.Context, ttl time.Duration, key string) (string, error) {
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), ttl)
@@ -505,88 +434,6 @@ func (rca *CacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 	}
 	rca.logger.Debug("cache hit", "key", key)
 	return val, nil
-}
-
-// trySetKeyFunc is used internally by Get operations to populate cache on miss.
-// This is cache-aside behavior - it only acquires locks when the key doesn't exist.
-func (rca *CacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key string, fn func(ctx context.Context, key string) (string, error)) (val string, err error) {
-	setVal := false
-	lockVal, err := rca.tryLock(ctx, key)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if !setVal {
-			rca.unlockWithCleanup(ctx, key, lockVal)
-		}
-	}()
-	if val, err = fn(ctx, key); err == nil {
-		val, err = rca.setWithLock(ctx, ttl, key, valAndLock{val, lockVal})
-		if err == nil {
-			setVal = true
-		}
-		return val, err
-	}
-	return "", err
-}
-
-// tryLock attempts to acquire a distributed lock for cache-aside operations.
-// For Get operations, if a real value already exists, we fail to acquire the lock
-// (another process has already populated the cache).
-func (rca *CacheAside) tryLock(ctx context.Context, key string) (string, error) {
-	uuidv7, err := uuid.NewV7()
-	if err != nil {
-		return "", fmt.Errorf("failed to generate lock UUID for key %q: %w", key, err)
-	}
-	lockVal := rca.lockPrefix + uuidv7.String()
-	err = rca.client.Do(ctx, rca.client.B().Set().Key(key).Value(lockVal).Nx().Get().Px(rca.lockTTL).Build()).Error()
-	if !rueidis.IsRedisNil(err) {
-		rca.logger.Debug("lock contention - failed to acquire lock", "key", key)
-		return "", fmt.Errorf("failed to acquire lock for key %q: %w", key, errLockFailed)
-	}
-	rca.logger.Debug("lock acquired", "key", key, "lockVal", lockVal)
-
-	// Note: CSC subscription already established by tryGet's DoCache call (line 493).
-	// No need for additional DoCache here - invalidation notifications are already active.
-
-	return lockVal, nil
-}
-
-// generateLockValue creates a unique lock identifier using UUID v7.
-// UUID v7 provides time-ordered uniqueness which helps with debugging and monitoring.
-// Values are pooled to reduce allocation overhead during high-throughput operations.
-func (rca *CacheAside) generateLockValue() string {
-	// Use pool for better performance (~15% improvement in lock acquisition)
-	return rca.lockValPool.Get()
-}
-
-func (rca *CacheAside) setWithLock(ctx context.Context, ttl time.Duration, key string, valLock valAndLock) (string, error) {
-	result := setKeyLua.Exec(ctx, rca.client, []string{key}, []string{valLock.lockVal, valLock.val, strconv.FormatInt(ttl.Milliseconds(), 10)})
-
-	// Check for Redis errors first
-	if err := result.Error(); err != nil {
-		if !rueidis.IsRedisNil(err) {
-			return "", fmt.Errorf("failed to set value for key %q: %w", key, err)
-		}
-		rca.logger.Debug("lock lost during set operation", "key", key)
-		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
-	}
-
-	// Check the Lua script return value
-	// The script returns 0 if the lock doesn't match, or the SET result if successful
-	returnValue, err := result.AsInt64()
-	if err == nil && returnValue == 0 {
-		// Lock was lost - the current value doesn't match our lock
-		rca.logger.Debug("lock lost during set operation - lock value mismatch", "key", key)
-		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
-	}
-
-	rca.logger.Debug("value set successfully", "key", key)
-	return valLock.val, nil
-}
-
-func (rca *CacheAside) unlock(ctx context.Context, key string, lock string) error {
-	return delKeyLua.Exec(ctx, rca.client, []string{key}, []string{lock}).Error()
 }
 
 // GetMulti retrieves multiple values from cache or computes them using the provided callback.
@@ -637,434 +484,135 @@ func (rca *CacheAside) GetMulti(
 	fn func(ctx context.Context, key []string) (val map[string]string, err error),
 ) (map[string]string, error) {
 	res := make(map[string]string, len(keys))
+	remaining := make([]string, len(keys))
+	copy(remaining, keys)
 
-	waitLock := make(map[string]<-chan struct{}, len(keys))
-	for _, key := range keys {
-		waitLock[key] = nil
-	}
-
-retry:
-	waitLock = rca.registerAll(maps.Keys(waitLock), len(waitLock))
-
-	vals, err := rca.tryGetMulti(ctx, ttl, mapsx.Keys(waitLock))
-	if err != nil && !rueidis.IsRedisNil(err) {
-		return nil, err
-	}
-
-	for k, v := range vals {
-		res[k] = v
-		delete(waitLock, k)
-	}
-
-	if len(waitLock) > 0 {
-		var shouldRetry bool
-		shouldRetry, err = rca.processRemainingKeys(ctx, ttl, waitLock, res, fn)
+	for len(remaining) > 0 {
+		done, err := rca.processMultiKeys(ctx, ttl, remaining, res, fn)
 		if err != nil {
 			return nil, err
 		}
-		if shouldRetry {
-			goto retry
+		if done {
+			break
 		}
+		// Update remaining keys for next iteration
+		remaining = rca.getRemainingKeys(keys, res)
 	}
 
 	return res, nil
 }
 
-// processRemainingKeys handles the logic for keys that weren't in cache.
-// Returns true if we should retry the operation, or an error if something went wrong.
-func (rca *CacheAside) processRemainingKeys(
+// getRemainingKeys returns keys not yet in the result map.
+func (rca *CacheAside) getRemainingKeys(keys []string, res map[string]string) []string {
+	remaining := make([]string, 0, len(keys)-len(res))
+	for _, key := range keys {
+		if _, ok := res[key]; !ok {
+			remaining = append(remaining, key)
+		}
+	}
+	return remaining
+}
+
+// processMultiKeys handles a single iteration of the GetMulti loop.
+// Returns (done, error) where done indicates all keys are resolved.
+func (rca *CacheAside) processMultiKeys(
 	ctx context.Context,
 	ttl time.Duration,
-	waitLock map[string]<-chan struct{},
+	keys []string,
 	res map[string]string,
 	fn func(ctx context.Context, key []string) (val map[string]string, err error),
 ) (bool, error) {
-	shouldWait, handleErr := rca.handleMissingKeys(ctx, ttl, waitLock, res, fn)
-	if handleErr != nil {
-		// Check if locks expired (don't retry in this case)
-		if errors.Is(handleErr, ErrLockLost) {
-			return false, fmt.Errorf("locks expired during GetMulti callback: %w", handleErr)
-		}
-		return false, handleErr
+	result, err := rca.lockManager.TryAcquire(ctx, keys, cachelock.LockModeRead)
+	if err != nil {
+		return false, err
 	}
 
-	if shouldWait {
-		// Convert map values to slice for WaitForAll
-		channels := mapsx.Values(waitLock)
-		err := syncx.WaitForAll(ctx, channels)
-		if err != nil {
-			return false, err
+	// Add cached values to result
+	for k, v := range result.CachedValues {
+		res[k] = v
+	}
+
+	// Process acquired locks
+	if len(result.Acquired) > 0 {
+		if commitErr := rca.executeAndCommitMulti(ctx, ttl, result.Acquired, res, fn); commitErr != nil {
+			return false, commitErr
 		}
+	}
+
+	// Check if all keys are resolved
+	if rca.allKeysResolved(keys, res) {
 		return true, nil
+	}
+
+	// Wait for locks to be released if there are wait channels
+	if len(result.WaitChans) > 0 {
+		if waitErr := rca.lockManager.WaitForRelease(ctx, result.WaitChans); waitErr != nil {
+			return false, waitErr
+		}
 	}
 
 	return false, nil
 }
 
-// handleMissingKeys attempts to acquire locks and populate missing keys.
-// Returns true if we should wait for other processes to populate remaining keys.
-func (rca *CacheAside) handleMissingKeys(
+// allKeysResolved checks if all requested keys have been resolved.
+func (rca *CacheAside) allKeysResolved(keys []string, res map[string]string) bool {
+	for _, key := range keys {
+		if _, ok := res[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// executeAndCommitMulti executes callback for acquired locks and commits results.
+func (rca *CacheAside) executeAndCommitMulti(
 	ctx context.Context,
 	ttl time.Duration,
-	waitLock map[string]<-chan struct{},
+	acquired map[string]string,
 	res map[string]string,
 	fn func(ctx context.Context, key []string) (val map[string]string, err error),
-) (bool, error) {
-	acquiredVals, err := rca.tryAcquireAndExecute(ctx, ttl, waitLock, fn)
-	if err != nil {
-		return false, err
-	}
-
-	// Merge acquired values into result and remove from waitLock
-	for k, v := range acquiredVals {
-		res[k] = v
-		delete(waitLock, k)
-	}
-
-	// Return whether there are still keys we need to wait for
-	// This handles the case where we acquired all locks but some SET operations failed
-	return len(waitLock) > 0, nil
-}
-
-// tryAcquireAndExecute attempts to acquire locks and execute the callback for missing keys.
-// Returns the values retrieved and any error.
-// It uses an optimistic approach: if not all locks can be acquired, it releases them
-// and assumes other processes will populate the keys.
-func (rca *CacheAside) tryAcquireAndExecute(
-	ctx context.Context,
-	ttl time.Duration,
-	waitLock map[string]<-chan struct{},
-	fn func(ctx context.Context, key []string) (val map[string]string, err error),
-) (map[string]string, error) {
-	keysNeeded := mapsx.Keys(waitLock)
-	lockVals := rca.tryLockMulti(ctx, keysNeeded)
-
-	// If we got all locks, execute callback
-	if len(lockVals) == len(keysNeeded) {
-		vals, err := rca.executeAndCacheMulti(ctx, ttl, keysNeeded, lockVals, fn)
-		if err != nil {
-			return nil, err
-		}
-		return vals, nil
-	}
-
-	// Didn't get all locks - release what we got and wait optimistically
-	rca.unlockMultiWithCleanup(ctx, lockVals)
-	return nil, nil
-}
-
-func (rca *CacheAside) registerAll(keys iter.Seq[string], length int) map[string]<-chan struct{} {
-	res := make(map[string]<-chan struct{}, length)
-	for key := range keys {
-		res[key] = rca.register(key)
-	}
-	return res
-}
-
-func (rca *CacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string) (map[string]string, error) {
-	multi := make([]rueidis.CacheableTTL, len(keys))
-	for i, key := range keys {
-		cmd := rca.client.B().Get().Key(key).Cache()
-		multi[i] = rueidis.CacheableTTL{
-			Cmd: cmd,
-			TTL: ttl,
-		}
-	}
-	resps := rca.client.DoMultiCache(ctx, multi...)
-
-	res := make(map[string]string, len(keys))
-	for i, resp := range resps {
-		val, err := resp.ToString()
-		if err != nil && rueidis.IsRedisNil(err) {
-			continue
-		} else if err != nil {
-			return nil, fmt.Errorf("failed to get key %q: %w", keys[i], err)
-		}
-		if !strings.HasPrefix(val, rca.lockPrefix) {
-			res[keys[i]] = val
-			continue
-		}
-	}
-	return res, nil
-}
-
-// executeAndCacheMulti executes the callback with all locked keys and caches the results.
-func (rca *CacheAside) executeAndCacheMulti(
-	ctx context.Context,
-	ttl time.Duration,
-	keys []string,
-	lockVals map[string]string,
-	fn func(ctx context.Context, key []string) (val map[string]string, err error),
-) (map[string]string, error) {
-	res := make(map[string]string, len(keys))
-
-	// Defer cleanup of locks that weren't successfully set
-	defer func() {
-		rca.cleanupUnusedLocks(ctx, lockVals, res)
-	}()
+) error {
+	// Get keys we need to fetch
+	keysToFetch := mapsx.Keys(acquired)
 
 	// Execute callback
-	vals, err := fn(ctx, keys)
+	vals, err := fn(ctx, keysToFetch)
 	if err != nil {
-		return nil, err
+		// Release locks on callback error
+		rca.lockManager.Release(ctx, acquired)
+		return err
 	}
 
-	// Build value-lock pairs
-	vL := make(map[string]valAndLock, len(vals))
-	for k, v := range vals {
-		vL[k] = valAndLock{v, lockVals[k]}
+	// Commit values
+	committed, commitErr := rca.lockManager.Commit(ctx, acquired, vals, ttl)
+	if commitErr != nil {
+		return commitErr
 	}
 
-	// Cache values with locks
-	keysSet, err := rca.setMultiWithLock(ctx, ttl, vL)
-	if err != nil {
-		return nil, err
-	}
-
-	// Build result map
-	for _, keySet := range keysSet {
-		res[keySet] = vals[keySet]
-	}
-
-	return res, nil
-}
-
-// cleanupUnusedLocks releases locks that were acquired but not successfully cached.
-func (rca *CacheAside) cleanupUnusedLocks(ctx context.Context, lockVals map[string]string, successfulKeys map[string]string) {
-	// Use pooled map for temp toUnlock map
-	toUnlockPtr := stringStringMapPool.Get().(*map[string]string)
-	toUnlock := *toUnlockPtr
-	defer func() {
-		clear(toUnlock)
-		stringStringMapPool.Put(toUnlockPtr)
-	}()
-
-	for key, lockVal := range lockVals {
-		if _, ok := successfulKeys[key]; !ok {
-			toUnlock[key] = lockVal
+	// Add successfully committed values to result
+	for _, key := range committed {
+		if val, ok := vals[key]; ok {
+			res[key] = val
 		}
 	}
 
-	if len(toUnlock) == 0 {
-		return
-	}
-
-	rca.unlockMultiWithCleanup(ctx, toUnlock)
-}
-
-// buildLockCommands generates lock values and builds SET NX GET commands for the given keys.
-// Returns a map of key->lockValue and the commands to execute.
-func (rca *CacheAside) buildLockCommands(keys []string) (map[string]string, rueidis.Commands) {
-	lockVals := make(map[string]string, len(keys))
-	cmds := make(rueidis.Commands, 0, len(keys))
-
-	for _, k := range keys {
-		lockVal := rca.generateLockValue()
-		lockVals[k] = lockVal
-		// SET NX GET returns the old value if key exists, or nil if SET succeeded
-		cmds = append(cmds, rca.client.B().Set().Key(k).Value(lockVal).Nx().Get().Px(rca.lockTTL).Build())
-	}
-
-	return lockVals, cmds
-}
-
-// tryLockMulti attempts to acquire distributed locks for cache-aside operations.
-// For Get operations, if real values already exist, we fail to acquire those locks
-// (another process has already populated the cache).
-func (rca *CacheAside) tryLockMulti(ctx context.Context, keys []string) map[string]string {
-	lockVals, cmds := rca.buildLockCommands(keys)
-
-	resps := rca.client.DoMulti(ctx, cmds...)
-
-	// Process responses - remove keys we couldn't lock
-	for i, r := range resps {
-		key := keys[i]
-		err := r.Error()
-		if !rueidis.IsRedisNil(err) {
-			if err != nil {
-				rca.logger.Error("failed to acquire lock", "key", key, "error", err)
-			} else {
-				// Key already exists (either lock from another process or real value)
-				rca.logger.Debug("key already exists, cannot acquire lock", "key", key)
+	// Release any locks for uncommitted keys
+	uncommitted := make(map[string]string)
+	for key, lockVal := range acquired {
+		found := false
+		for _, k := range committed {
+			if k == key {
+				found = true
+				break
 			}
-			delete(lockVals, key)
+		}
+		if !found {
+			uncommitted[key] = lockVal
 		}
 	}
-
-	// Note: CSC subscriptions already established by tryGetMulti's DoMultiCache call (line 752).
-	// No need for additional DoMultiCache here - invalidation notifications are already active.
-
-	return lockVals
-}
-
-type valAndLock struct {
-	val     string
-	lockVal string
-}
-
-type keyOrderAndSet struct {
-	keyOrder []string
-	setStmts []rueidis.LuaExec
-}
-
-// groupBySlot groups keys by their Redis cluster slot for Lua script execution.
-// This is necessary because Lua scripts in Redis Cluster must execute on a single node.
-// Unlike regular SET commands which rueidis.DoMulti routes automatically, Lua scripts
-// (LuaExec) need manual slot grouping to ensure each script runs on the correct node.
-func groupBySlot(keyValLock map[string]valAndLock, ttl time.Duration) map[uint16]keyOrderAndSet {
-	// Pre-allocate with estimated capacity (avg ~8 slots for 50 keys)
-	estimatedSlots := len(keyValLock) / 8
-	if estimatedSlots < 1 {
-		estimatedSlots = 1
-	}
-	stmts := make(map[uint16]keyOrderAndSet, estimatedSlots)
-
-	// Pre-calculate TTL string once
-	ttlStr := strconv.FormatInt(ttl.Milliseconds(), 10)
-
-	for k, vl := range keyValLock {
-		slot := cmdx.Slot(k)
-		kos := stmts[slot]
-
-		// Pre-allocate slices on first access to this slot
-		if kos.keyOrder == nil {
-			// Estimate ~6-7 keys per slot for typical workloads
-			estimatedKeysPerSlot := (len(keyValLock) / estimatedSlots) + 1
-			kos.keyOrder = make([]string, 0, estimatedKeysPerSlot)
-			kos.setStmts = make([]rueidis.LuaExec, 0, estimatedKeysPerSlot)
-		}
-
-		kos.keyOrder = append(kos.keyOrder, k)
-		kos.setStmts = append(kos.setStmts, rueidis.LuaExec{
-			Keys: []string{k},
-			Args: []string{vl.lockVal, vl.val, ttlStr},
-		})
-		stmts[slot] = kos
+	if len(uncommitted) > 0 {
+		rca.lockManager.Release(ctx, uncommitted)
 	}
 
-	return stmts
-}
-
-// processSetResponse checks if a set operation succeeded and returns true if it did.
-func (rca *CacheAside) processSetResponse(resp rueidis.RedisResult) (bool, error) {
-	// Check for Redis errors first
-	if err := resp.Error(); err != nil {
-		if !rueidis.IsRedisNil(err) {
-			return false, err
-		}
-		return false, nil
-	}
-
-	// Check the Lua script return value
-	// The script returns 0 if the lock doesn't match
-	returnValue, err := resp.AsInt64()
-	if err == nil && returnValue == 0 {
-		// Lock was lost for this key
-		return false, nil
-	}
-
-	return true, nil
-}
-
-// executeSetStatements executes Lua set statements in parallel, grouped by slot.
-func (rca *CacheAside) executeSetStatements(ctx context.Context, stmts map[uint16]keyOrderAndSet) ([]string, error) {
-	// Calculate total keys for pre-allocation
-	totalKeys := 0
-	for _, kos := range stmts {
-		totalKeys += len(kos.keyOrder)
-	}
-
-	keyByStmt := make([][]string, len(stmts))
-	i := 0
-	eg, ctx := errgroup.WithContext(ctx)
-
-	for _, kos := range stmts {
-		ii := i
-		// Pre-allocate slice for this statement's successful keys
-		keyByStmt[ii] = make([]string, 0, len(kos.keyOrder))
-
-		eg.Go(func() error {
-			setResps := setKeyLua.ExecMulti(ctx, rca.client, kos.setStmts...)
-			for j, resp := range setResps {
-				success, err := rca.processSetResponse(resp)
-				if err != nil {
-					return err
-				}
-				if success {
-					keyByStmt[ii] = append(keyByStmt[ii], kos.keyOrder[j])
-				}
-			}
-			return nil
-		})
-		i++
-	}
-
-	if err := eg.Wait(); err != nil {
-		return nil, err
-	}
-
-	// Pre-allocate output slice with exact capacity
-	out := make([]string, 0, totalKeys)
-	for _, keys := range keyByStmt {
-		out = append(out, keys...)
-	}
-	return out, nil
-}
-
-func (rca *CacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, keyValLock map[string]valAndLock) ([]string, error) {
-	stmts := groupBySlot(keyValLock, ttl)
-	return rca.executeSetStatements(ctx, stmts)
-}
-
-// unlockWithCleanup releases a single lock using a cleanup context derived from the parent.
-// It preserves tracing/request context while allowing cleanup even if parent is cancelled.
-// Best effort - errors are logged but non-fatal as locks will expire.
-func (rca *CacheAside) unlockWithCleanup(ctx context.Context, key string, lockVal string) {
-	cleanupCtx := context.WithoutCancel(ctx)
-	toCtx, cancel := context.WithTimeout(cleanupCtx, rca.lockTTL)
-	defer cancel()
-	if unlockErr := rca.unlock(toCtx, key, lockVal); unlockErr != nil {
-		rca.logger.Error("failed to unlock key", "key", key, "error", unlockErr)
-	}
-}
-
-// unlockMultiWithCleanup releases multiple locks using a cleanup context derived from the parent.
-// It preserves tracing/request context while allowing cleanup even if parent is cancelled.
-func (rca *CacheAside) unlockMultiWithCleanup(ctx context.Context, lockVals map[string]string) {
-	if len(lockVals) == 0 {
-		return
-	}
-	cleanupCtx := context.WithoutCancel(ctx)
-	toCtx, cancel := context.WithTimeout(cleanupCtx, rca.lockTTL)
-	defer cancel()
-	rca.unlockMulti(toCtx, lockVals)
-}
-
-func (rca *CacheAside) unlockMulti(ctx context.Context, lockVals map[string]string) {
-	if len(lockVals) == 0 {
-		return
-	}
-	delStmts := make(map[uint16][]rueidis.LuaExec)
-	for key, lockVal := range lockVals {
-		slot := cmdx.Slot(key)
-		delStmts[slot] = append(delStmts[slot], rueidis.LuaExec{
-			Keys: []string{key},
-			Args: []string{lockVal},
-		})
-	}
-	wg := sync.WaitGroup{}
-	for _, stmts := range delStmts {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// Best effort unlock - errors are non-fatal as locks will expire
-			resps := delKeyLua.ExecMulti(ctx, rca.client, stmts...)
-			for _, resp := range resps {
-				if err := resp.Error(); err != nil {
-					rca.logger.Error("failed to unlock key in batch", "error", err)
-				}
-			}
-		}()
-	}
-	wg.Wait()
+	return nil
 }

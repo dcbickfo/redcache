@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/redis/rueidis"
 
-	"github.com/dcbickfo/redcache/internal/cmdx"
+	"github.com/dcbickfo/redcache/internal/cachelock"
 	"github.com/dcbickfo/redcache/internal/lockutil"
 	"github.com/dcbickfo/redcache/internal/mapsx"
 	"github.com/dcbickfo/redcache/internal/syncx"
@@ -19,148 +18,6 @@ const (
 	// lockRetryInterval is the interval for periodic lock acquisition retries.
 	// Used when waiting for locks to be released.
 	lockRetryInterval = 50 * time.Millisecond
-)
-
-// Pre-compiled Lua scripts for atomic operations.
-var (
-	unlockKeyScript = rueidis.NewLuaScript(`
-		local key = KEYS[1]
-		local expected = ARGV[1]
-		if redis.call("GET", key) == expected then
-			return redis.call("DEL", key)
-		else
-			return 0
-		end
-	`)
-
-	// acquireWriteLockScript atomically acquires a write lock for Set operations.
-	//
-	// IMPORTANT: We CANNOT use SET NX here like CacheAside does for Get operations.
-	//
-	// Why SET NX doesn't work for Set operations:
-	// - SET NX only succeeds if the key doesn't exist at all
-	// - Set operations need to overwrite existing real values (not locks)
-	// - If we used SET NX, Set would fail when trying to update an existing cached value
-	//
-	// This Lua script provides the correct behavior:
-	// - Acquires lock if key is empty (like SET NX)
-	// - Acquires lock if key contains a real value (overwrites to prepare for Set)
-	// - REFUSES to acquire if there's an active lock from a Get operation
-	//
-	// This prevents the race condition where Set would overwrite Get's lock,
-	// causing Get to lose its lock and retry, ultimately seeing Set's value
-	// instead of its own callback result.
-	//
-	// Returns 0 if there's an existing lock (cannot acquire).
-	// Returns 1 if lock was successfully acquired.
-	acquireWriteLockScript = rueidis.NewLuaScript(`
-		local key = KEYS[1]
-		local lock_value = ARGV[1]
-		local ttl = ARGV[2]
-		local lock_prefix = ARGV[3]
-
-		local current = redis.call("GET", key)
-
-		-- If key is empty, we can set our lock
-		if current == false then
-			redis.call("SET", key, lock_value, "PX", ttl)
-			return 1
-		end
-
-		-- If current value is a lock (has lock prefix), we cannot acquire
-		if string.sub(current, 1, string.len(lock_prefix)) == lock_prefix then
-			return 0
-		end
-
-		-- Current value is a real value (not a lock), we can overwrite with our lock
-		redis.call("SET", key, lock_value, "PX", ttl)
-		return 1
-	`)
-
-	// acquireWriteLockWithBackupScript acquires a lock and returns the previous value.
-	// This is used for sequential lock acquisition where we need to restore values
-	// if we can't acquire all locks.
-	//
-	// Returns: [success (0 or 1), previous_value or false]
-	//   - [0, current] if lock exists (cannot acquire)
-	//   - [1, false] if key was empty (acquired from nothing)
-	//   - [1, current] if key had real value (acquired, can restore)
-	acquireWriteLockWithBackupScript = rueidis.NewLuaScript(`
-		local key = KEYS[1]
-		local lock_value = ARGV[1]
-		local ttl = ARGV[2]
-		local lock_prefix = ARGV[3]
-
-		local current = redis.call("GET", key)
-
-		-- If key is empty, acquire and return false (nothing to restore)
-		if current == false then
-			redis.call("SET", key, lock_value, "PX", ttl)
-			return {1, false}
-		end
-
-		-- If current value is a lock, cannot acquire
-		if string.sub(current, 1, string.len(lock_prefix)) == lock_prefix then
-			return {0, current}
-		end
-
-		-- Current value is real data - save it before overwriting
-		redis.call("SET", key, lock_value, "PX", ttl)
-		return {1, current}
-	`)
-
-	// restoreValueOrDeleteScript restores a saved value or deletes the key.
-	// Used when releasing locks during sequential acquisition rollback.
-	//
-	// ARGV[2] can be:
-	//   - false/nil: delete the key (was empty before)
-	//   - string: restore the original value
-	restoreValueOrDeleteScript = rueidis.NewLuaScript(`
-		local key = KEYS[1]
-		local expected_lock = ARGV[1]
-		local restore_value = ARGV[2]
-
-		-- Only restore if we still hold our lock
-		if redis.call("GET", key) == expected_lock then
-			if restore_value and restore_value ~= "" then
-				-- Restore original value
-				redis.call("SET", key, restore_value)
-			else
-				-- Was empty before, delete
-				redis.call("DEL", key)
-			end
-			return 1
-		else
-			-- Someone else has the key now, don't touch it
-			return 0
-		end
-	`)
-
-	setWithLockScript = rueidis.NewLuaScript(`
-		local key = KEYS[1]
-		local value = ARGV[1]
-		local ttl = ARGV[2]
-		local expected_lock = ARGV[3]
-
-		local current = redis.call("GET", key)
-
-		-- STRICT CAS: We can ONLY set if we still hold our exact lock value
-		-- This prevents Set from overwriting ForceSet values that stole our lock
-		--
-		-- If current is nil (false in Lua), our lock expired or was deleted
-		-- If current is different, either:
-		--   - Another Set operation acquired a different lock
-		--   - A ForceSet operation overwrote our lock with a real value
-		--   - Our lock naturally expired
-		--
-		-- In all cases where we don't hold our exact lock, we return 0 (failure)
-		if current == expected_lock then
-			redis.call("SET", key, value, "PX", ttl)
-			return 1
-		else
-			return 0
-		end
-	`)
 )
 
 // PrimeableCacheAside extends CacheAside with explicit Set operations for cache priming
@@ -268,45 +125,24 @@ func (pca *PrimeableCacheAside) trySetKeyFuncForWrite(ctx context.Context, ttl t
 		return "", waitErr
 	}
 
-	// Acquire cache lock using acquireWriteLockScript
-	// The Lua script provides write-write coordination by checking for existing locks
-	// and refusing to acquire if another Set operation holds the lock.
-	//
-	// IMPORTANT: Do NOT use SET NX here (see acquireWriteLockScript comment for details).
-	// The script ensures Set can overwrite real values but won't overwrite active locks.
-	lockVal := pca.generateLockValue()
-	ticker := time.NewTicker(lockRetryInterval)
-	defer ticker.Stop()
-
+	// Acquire cache lock using lockManager
+	var lockVal string
 	for {
-		result := acquireWriteLockScript.Exec(ctx, pca.client,
-			[]string{key},
-			[]string{lockVal, strconv.FormatInt(pca.lockTTL.Milliseconds(), 10), pca.lockPrefix})
-
-		success, execErr := result.AsInt64()
-		if execErr != nil {
-			return "", fmt.Errorf("failed to acquire cache lock for key %q: %w", key, execErr)
+		result, acquireErr := pca.lockManager.TryAcquire(ctx, []string{key}, cachelock.LockModeWrite)
+		if acquireErr != nil {
+			return "", fmt.Errorf("failed to acquire cache lock for key %q: %w", key, acquireErr)
 		}
 
-		if success == 1 {
-			// Successfully acquired the lock
+		if len(result.Acquired) > 0 {
+			lockVal = result.Acquired[key]
 			break
 		}
 
-		// There's an active lock (from Get or another Set)
-		// Wait for it to be released via invalidation
-		waitChan := pca.register(key)
-		_ = pca.client.DoCache(ctx, pca.client.B().Get().Key(key).Cache(), pca.lockTTL)
-
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-waitChan:
-			// Lock was released, retry acquisition
-			continue
-		case <-ticker.C:
-			// Periodic retry
-			continue
+		// Wait for lock release
+		if len(result.WaitChans) > 0 {
+			if waitErr := pca.lockManager.WaitForRelease(ctx, result.WaitChans); waitErr != nil {
+				return "", waitErr
+			}
 		}
 	}
 
@@ -316,91 +152,26 @@ func (pca *PrimeableCacheAside) trySetKeyFuncForWrite(ctx context.Context, ttl t
 	val, err = fn(ctx, key)
 	if err != nil {
 		// Release the cache lock on error
-		pca.unlockKey(ctx, key, lockVal)
+		pca.lockManager.Release(ctx, map[string]string{key: lockVal})
 		return "", err
 	}
 
-	// Set the value in Redis using a Lua script that verifies we still hold the lock
-	// This uses strict compare-and-swap (CAS): only sets if we hold our exact lock value
-	// This prevents Set from overwriting ForceSet values that may have stolen our lock
-	setResult := setWithLockScript.Exec(ctx, pca.client,
-		[]string{key},
-		[]string{val, strconv.FormatInt(ttl.Milliseconds(), 10), lockVal})
-
-	setSuccess, err := setResult.AsInt64()
-	if err != nil {
-		return "", fmt.Errorf("failed to set value for key %q: %w", key, err)
+	// Commit the value using CAS
+	committed, commitErr := pca.lockManager.Commit(ctx, map[string]string{key: lockVal}, map[string]string{key: val}, ttl)
+	if commitErr != nil {
+		return "", fmt.Errorf("failed to set value for key %q: %w", key, commitErr)
 	}
 
-	if setSuccess == 0 {
+	if len(committed) == 0 {
 		return "", fmt.Errorf("%w for key %q", ErrLockLost, key)
 	}
-
-	// Note: No DoCache needed here. Redis automatically sends invalidation messages to all
-	// clients currently tracking this key when SET executes. Any Get operation will call
-	// DoCache to both fetch the value and subscribe to future invalidations (cacheaside.go:493).
-	// The Set-performing client doesn't need to track the key it just wrote.
 
 	pca.logger.Debug("value set successfully", "key", key)
 	return val, nil
 }
 
-// unlockKey releases a cache lock if it matches the expected value.
-func (pca *PrimeableCacheAside) unlockKey(ctx context.Context, key string, lockVal string) {
-	_ = unlockKeyScript.Exec(ctx, pca.client, []string{key}, []string{lockVal}).Error()
-}
-
-// lockAcquisitionResult holds the result of processing a single lock acquisition response.
-type lockAcquisitionResult struct {
-	acquired   bool
-	lockValue  string
-	savedValue string
-	hasSaved   bool
-}
-
-// processLockAcquisitionResponse processes a single lock acquisition response.
-// Returns the result or an error if the response is invalid.
-func processLockAcquisitionResponse(resp rueidis.RedisResult, key, lockVal string) (lockAcquisitionResult, error) {
-	// Response is [success, previous_value]
-	result, err := resp.ToArray()
-	if err != nil {
-		return lockAcquisitionResult{}, fmt.Errorf("failed to acquire cache lock for key %q: %w", key, err)
-	}
-
-	if len(result) != 2 {
-		return lockAcquisitionResult{}, fmt.Errorf("unexpected response length for key %q: got %d, expected 2", key, len(result))
-	}
-
-	success, err := result[0].AsInt64()
-	if err != nil {
-		return lockAcquisitionResult{}, fmt.Errorf("failed to parse success for key %q: %w", key, err)
-	}
-
-	if success == 1 {
-		// Acquired successfully - check if there's a previous value to save
-		prevValue, prevErr := result[1].ToString()
-		if prevErr == nil && prevValue != "" {
-			// Previous value exists and is not empty
-			return lockAcquisitionResult{
-				acquired:   true,
-				lockValue:  lockVal,
-				savedValue: prevValue,
-				hasSaved:   true,
-			}, nil
-		}
-		// No previous value (key was empty)
-		return lockAcquisitionResult{
-			acquired:  true,
-			lockValue: lockVal,
-		}, nil
-	}
-
-	// Failed to acquire
-	return lockAcquisitionResult{acquired: false}, nil
-}
-
 // tryAcquireMultiCacheLocksBatched attempts to acquire cache locks for multiple keys in batches.
-// Uses acquireWriteLockWithBackupScript which saves the previous value before acquiring the lock.
+// Uses lockManager.TryAcquire which saves the previous value before acquiring the lock.
 //
 // Returns:
 //   - acquired: map of keys to their lock values (successfully acquired)
@@ -415,105 +186,25 @@ func (pca *PrimeableCacheAside) tryAcquireMultiCacheLocksBatched(
 		return make(map[string]string), make(map[string]string), nil, nil
 	}
 
-	acquired = make(map[string]string)
-	savedValues = make(map[string]string)
-	failed = make([]string, 0)
-
-	// Group by slot and build Lua exec statements
-	stmtsBySlot := pca.groupLockAcquisitionsBySlot(keys)
-
-	// Execute all slots and collect results
-	for _, stmts := range stmtsBySlot {
-		// Batch execute all lock acquisitions for this slot
-		resps := acquireWriteLockWithBackupScript.ExecMulti(ctx, pca.client, stmts.execStmts...)
-
-		// Process responses in order
-		for i, resp := range resps {
-			key := stmts.keyOrder[i]
-			lockVal := stmts.lockVals[i]
-
-			result, respErr := processLockAcquisitionResponse(resp, key, lockVal)
-			if respErr != nil {
-				return nil, nil, nil, respErr
-			}
-
-			if result.acquired {
-				acquired[key] = result.lockValue
-				if result.hasSaved {
-					savedValues[key] = result.savedValue
-				}
-			} else {
-				failed = append(failed, key)
-			}
-		}
+	result, err := pca.lockManager.TryAcquire(ctx, keys, cachelock.LockModeWrite)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
-	return acquired, savedValues, failed, nil
-}
-
-// slotLockStatements holds lock acquisition statements grouped by slot.
-type slotLockStatements struct {
-	keyOrder  []string
-	lockVals  []string
-	execStmts []rueidis.LuaExec
-}
-
-// estimateSlotDistribution estimates the number of Redis cluster slots and keys per slot
-// for efficient pre-allocation when grouping operations by slot.
-// Uses a heuristic of ~8 slots for typical Redis Cluster distributions.
-func estimateSlotDistribution(itemCount int) (estimatedSlots, estimatedPerSlot int) {
-	estimatedSlots = itemCount / 8
-	if estimatedSlots < 1 {
-		estimatedSlots = 1
-	}
-	estimatedPerSlot = (itemCount / estimatedSlots) + 1
-	return
-}
-
-// groupLockAcquisitionsBySlot groups lock acquisition operations by Redis cluster slot.
-// This is necessary for Lua scripts which must execute on a single node in Redis Cluster.
-// Unlike regular commands, Lua scripts (LuaExec) require manual slot grouping.
-func (pca *PrimeableCacheAside) groupLockAcquisitionsBySlot(keys []string) map[uint16]slotLockStatements {
-	if len(keys) == 0 {
-		return nil
-	}
-
-	// Pre-allocate with estimated capacity
-	estimatedSlots, estimatedPerSlot := estimateSlotDistribution(len(keys))
-	stmtsBySlot := make(map[uint16]slotLockStatements, estimatedSlots)
-
-	// Pre-calculate lock TTL string once
-	lockTTLStr := strconv.FormatInt(pca.lockTTL.Milliseconds(), 10)
-
+	// Build failed list from keys not in Acquired
+	failed = make([]string, 0, len(keys)-len(result.Acquired))
 	for _, key := range keys {
-		lockVal := pca.generateLockValue()
-		slot := cmdx.Slot(key)
-		stmts := stmtsBySlot[slot]
-
-		// Pre-allocate slices on first access to this slot
-		if stmts.keyOrder == nil {
-			stmts.keyOrder = make([]string, 0, estimatedPerSlot)
-			stmts.lockVals = make([]string, 0, estimatedPerSlot)
-			stmts.execStmts = make([]rueidis.LuaExec, 0, estimatedPerSlot)
+		if _, ok := result.Acquired[key]; !ok {
+			failed = append(failed, key)
 		}
-
-		stmts.keyOrder = append(stmts.keyOrder, key)
-		stmts.lockVals = append(stmts.lockVals, lockVal)
-		stmts.execStmts = append(stmts.execStmts, rueidis.LuaExec{
-			Keys: []string{key},
-			Args: []string{lockVal, lockTTLStr, pca.lockPrefix},
-		})
-		stmtsBySlot[slot] = stmts
 	}
 
-	return stmtsBySlot
+	return result.Acquired, result.SavedValues, failed, nil
 }
 
 // releaseMultiCacheLocks releases multiple cache locks.
 func (pca *PrimeableCacheAside) releaseMultiCacheLocks(ctx context.Context, lockValues map[string]string) {
-	for key, lockVal := range lockValues {
-		pca.unlockKey(ctx, key, lockVal)
-	}
+	pca.lockManager.Release(ctx, lockValues)
 }
 
 // acquireMultiCacheLocks acquires cache locks for multiple keys using sequential acquisition
@@ -650,27 +341,14 @@ func (pca *PrimeableCacheAside) sortKeys(keys []string) []string {
 }
 
 // restoreMultiValues restores original values for keys that were acquired.
-// Uses the restoreValueOrDeleteScript to atomically restore values or delete keys.
+// Uses lockManager.ReleaseWithRestore to atomically restore values or delete keys.
 // This is critical for preventing cache misses when releasing locks on partial failure.
 func (pca *PrimeableCacheAside) restoreMultiValues(
 	ctx context.Context,
 	lockValues map[string]string,
 	savedValues map[string]string,
 ) {
-	if len(lockValues) == 0 {
-		return
-	}
-
-	for key, lockVal := range lockValues {
-		// Get the saved value (empty string if key didn't exist before)
-		savedVal := savedValues[key] // Empty string if not in map
-
-		// Use Lua script to restore value or delete key atomically
-		_ = restoreValueOrDeleteScript.Exec(ctx, pca.client,
-			[]string{key},
-			[]string{lockVal, savedVal},
-		).Error()
-	}
+	pca.lockManager.ReleaseWithRestore(ctx, lockValues, savedValues)
 }
 
 // findFirstKey finds the first key from sortedKeys that appears in targetKeys.
@@ -785,7 +463,7 @@ func (pca *PrimeableCacheAside) waitForSingleLock(ctx context.Context, key strin
 
 // setMultiValuesWithCAS sets multiple values using CAS to verify we still hold the locks.
 // Returns maps of succeeded and failed keys.
-// Uses batched Lua script execution grouped by Redis cluster slot for optimal performance.
+// Uses lockManager.Commit for batched CAS execution grouped by Redis cluster slot.
 func (pca *PrimeableCacheAside) setMultiValuesWithCAS(
 	ctx context.Context,
 	ttl time.Duration,
@@ -796,36 +474,29 @@ func (pca *PrimeableCacheAside) setMultiValuesWithCAS(
 		return make(map[string]string), make(map[string]error)
 	}
 
-	succeeded := make(map[string]string)
+	// Use lockManager.Commit for CAS write
+	committedKeys, err := pca.lockManager.Commit(ctx, lockValues, values, ttl)
+	if err != nil {
+		// On error, mark all keys as failed
+		failed := make(map[string]error, len(values))
+		for key := range values {
+			failed[key] = err
+		}
+		return make(map[string]string), failed
+	}
+
+	// Build succeeded map from committed keys
+	succeeded := make(map[string]string, len(committedKeys))
+	for _, key := range committedKeys {
+		succeeded[key] = values[key]
+	}
+
+	// Build failed map from keys not in committed
 	failed := make(map[string]error)
-
-	// Group by slot for efficient batching
-	stmtsBySlot := pca.groupSetValuesBySlot(values, lockValues, ttl)
-
-	// Execute all slots in parallel and collect results
-	for slot, stmts := range stmtsBySlot {
-		// Execute all Lua scripts for this slot in a single batch
-		setResps := setWithLockScript.ExecMulti(ctx, pca.client, stmts.execStmts...)
-
-		// Process responses in order
-		for i, resp := range setResps {
-			key := stmts.keyOrder[i]
-			value := values[key]
-
-			setSuccess, err := resp.AsInt64()
-			if err != nil {
-				pca.logger.Debug("set CAS failed for key", "key", key, "slot", slot, "error", err)
-				failed[key] = fmt.Errorf("failed to set value: %w", err)
-				continue
-			}
-
-			if setSuccess == 0 {
-				pca.logger.Debug("set CAS lock lost for key", "key", key, "slot", slot)
-				failed[key] = fmt.Errorf("%w", ErrLockLost)
-				continue
-			}
-
-			succeeded[key] = value
+	for key := range values {
+		if _, ok := succeeded[key]; !ok {
+			pca.logger.Debug("set CAS lock lost for key", "key", key)
+			failed[key] = fmt.Errorf("%w", ErrLockLost)
 		}
 	}
 
@@ -844,60 +515,6 @@ func (pca *PrimeableCacheAside) setMultiValuesWithCAS(
 	}
 
 	return succeeded, failed
-}
-
-// slotSetStatements holds Lua execution statements grouped by slot.
-type slotSetStatements struct {
-	keyOrder  []string
-	execStmts []rueidis.LuaExec
-}
-
-// groupSetValuesBySlot groups set operations by Redis cluster slot for Lua script execution.
-// This is necessary for CAS (compare-and-swap) Lua scripts which must execute on a single node.
-// Unlike regular SET commands which rueidis.DoMulti routes automatically, Lua scripts
-// (LuaExec) require manual slot grouping to ensure atomic operations on the correct node.
-func (pca *PrimeableCacheAside) groupSetValuesBySlot(
-	values map[string]string,
-	lockValues map[string]string,
-	ttl time.Duration,
-) map[uint16]slotSetStatements {
-	if len(values) == 0 {
-		return nil
-	}
-
-	// Pre-allocate with estimated capacity
-	estimatedSlots, estimatedPerSlot := estimateSlotDistribution(len(values))
-	stmtsBySlot := make(map[uint16]slotSetStatements, estimatedSlots)
-
-	// Pre-calculate TTL string once
-	ttlStr := strconv.FormatInt(ttl.Milliseconds(), 10)
-
-	for key, value := range values {
-		lockVal, hasLock := lockValues[key]
-		if !hasLock {
-			// Skip keys without locks (shouldn't happen, but be defensive)
-			pca.logger.Error("no lock value for key in groupSetValuesBySlot", "key", key)
-			continue
-		}
-
-		slot := cmdx.Slot(key)
-		stmts := stmtsBySlot[slot]
-
-		// Pre-allocate slices on first access to this slot
-		if stmts.keyOrder == nil {
-			stmts.keyOrder = make([]string, 0, estimatedPerSlot)
-			stmts.execStmts = make([]rueidis.LuaExec, 0, estimatedPerSlot)
-		}
-
-		stmts.keyOrder = append(stmts.keyOrder, key)
-		stmts.execStmts = append(stmts.execStmts, rueidis.LuaExec{
-			Keys: []string{key},
-			Args: []string{value, ttlStr, lockVal},
-		})
-		stmtsBySlot[slot] = stmts
-	}
-
-	return stmtsBySlot
 }
 
 // NewPrimeableCacheAside creates a new PrimeableCacheAside instance with the specified
@@ -1106,11 +723,9 @@ func (pca *PrimeableCacheAside) SetMulti(
 	defer func() {
 		// Release cache locks only for keys that weren't successfully set.
 		// Successfully set keys no longer contain locks (they contain the real values),
-		// so unlockKey would fail the comparison check and do nothing, but it's wasteful
+		// so Release would fail the comparison check and do nothing, but it's wasteful
 		// to attempt the unlock at all.
-		for key, lockVal := range lockValues {
-			pca.unlockKey(ctx, key, lockVal)
-		}
+		pca.lockManager.Release(ctx, lockValues)
 	}()
 
 	// Execute the callback with locked keys
