@@ -1,12 +1,23 @@
+// Package cmdx provides Redis cluster slot calculation utilities.
 package cmdx
-
-// https://redis.io/topics/cluster-spec
 
 const (
 	// RedisClusterSlots is the maximum slot number in a Redis cluster (16384 total slots, numbered 0-16383).
 	RedisClusterSlots = 16383
 )
 
+// GroupBySlot groups items by their Redis cluster slot, using keyFn to extract
+// the key for slot computation.
+func GroupBySlot[V any](items []V, keyFn func(V) string) map[uint16][]V {
+	groups := make(map[uint16][]V)
+	for _, item := range items {
+		slot := Slot(keyFn(item))
+		groups[slot] = append(groups[slot], item)
+	}
+	return groups
+}
+
+// Slot returns the Redis cluster slot for the given key, following the CRC16 hash tag spec.
 func Slot(key string) uint16 {
 	var s, e int
 	for ; s < len(key); s++ {

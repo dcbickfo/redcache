@@ -1,7 +1,9 @@
+// Package syncx provides generic typed wrappers around standard library sync primitives.
 package syncx
 
 import "sync"
 
+// Map is a generic typed wrapper around sync.Map that avoids interface{} casts at call sites.
 type Map[K comparable, V any] struct {
 	m sync.Map
 }

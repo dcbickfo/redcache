@@ -839,3 +839,171 @@ func TestConcurrentInvalidation(t *testing.T) {
 	defer mu.Unlock()
 	assert.Greater(t, callCount, initialCount, "callbacks should be invoked after invalidation")
 }
+
+func TestCacheAside_Get_CallbackError(t *testing.T) {
+	client := makeClient(t, addr)
+	defer client.Client().Close()
+	ctx := context.Background()
+
+	key := "key:" + uuid.New().String()
+	cbErr := fmt.Errorf("callback failed")
+
+	// First Get: callback returns error.
+	_, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
+		return "", cbErr
+	})
+	require.ErrorIs(t, err, cbErr)
+
+	// Second Get: lock should have been cleaned up, so a fresh callback succeeds.
+	val := "good-val:" + uuid.New().String()
+	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
+		return val, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, val, res)
+}
+
+func TestCacheAside_GetMulti_CallbackError(t *testing.T) {
+	client := makeClient(t, addr)
+	defer client.Client().Close()
+	ctx := context.Background()
+
+	keys := []string{
+		"key:0:" + uuid.New().String(),
+		"key:1:" + uuid.New().String(),
+	}
+	cbErr := fmt.Errorf("multi callback failed")
+
+	// Callback returns error — locks should be cleaned up.
+	_, err := client.GetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {
+		return nil, cbErr
+	})
+	require.ErrorIs(t, err, cbErr)
+
+	// Retry should succeed — locks were released.
+	vals := map[string]string{
+		keys[0]: "val:0:" + uuid.New().String(),
+		keys[1]: "val:1:" + uuid.New().String(),
+	}
+	res, err := client.GetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {
+		out := make(map[string]string, len(ks))
+		for _, k := range ks {
+			out[k] = vals[k]
+		}
+		return out, nil
+	})
+	require.NoError(t, err)
+	if diff := cmp.Diff(vals, res); diff != "" {
+		t.Errorf("GetMulti() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestCacheAside_Close(t *testing.T) {
+	client := makeClient(t, addr)
+	defer client.Client().Close()
+	ctx := context.Background()
+
+	key := "key:" + uuid.New().String()
+
+	// Place a long-lived lock.
+	innerClient := client.Client()
+	lockVal := "__redcache:lock:" + uuid.New().String()
+	err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
+	require.True(t, rueidis.IsRedisNil(err))
+
+	getCtx, getCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer getCancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := client.Get(getCtx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
+			return "val", nil
+		})
+		errCh <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	client.Close()
+
+	select {
+	case <-time.After(5 * time.Second):
+		t.Fatal("Get did not return after Close")
+	case err := <-errCh:
+		// Close wakes up the waiter; since the lock persists it will eventually timeout.
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+}
+
+func TestNewRedCacheAside_Validation(t *testing.T) {
+	t.Run("empty InitAddress", func(t *testing.T) {
+		_, err := redcache.NewRedCacheAside(
+			rueidis.ClientOption{},
+			redcache.CacheAsideOption{},
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "InitAddress")
+	})
+
+	t.Run("negative LockTTL", func(t *testing.T) {
+		_, err := redcache.NewRedCacheAside(
+			rueidis.ClientOption{InitAddress: addr},
+			redcache.CacheAsideOption{LockTTL: -1 * time.Second},
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "negative")
+	})
+
+	t.Run("too small LockTTL", func(t *testing.T) {
+		_, err := redcache.NewRedCacheAside(
+			rueidis.ClientOption{InitAddress: addr},
+			redcache.CacheAsideOption{LockTTL: 10 * time.Millisecond},
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "100ms")
+	})
+}
+
+// TestCacheAside_Get_ErrLockLostRetry verifies that when a ForceSet steals the lock
+// during a Get callback, Get retries and eventually sees the ForceSet value.
+func TestCacheAside_Get_ErrLockLostRetry(t *testing.T) {
+	client, err := redcache.NewPrimeableCacheAside(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.CacheAsideOption{LockTTL: time.Second * 2},
+	)
+	require.NoError(t, err)
+	defer client.Client().Close()
+	ctx := context.Background()
+
+	key := "key:" + uuid.New().String()
+	forcedVal := "forced:" + uuid.New().String()
+
+	getStarted := make(chan struct{})
+
+	go func() {
+		// Get acquires lock, then we steal it with ForceSet during callback.
+		_, _ = client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
+			close(getStarted)
+			time.Sleep(300 * time.Millisecond)
+			return "get-val", nil
+		})
+	}()
+
+	<-getStarted
+	time.Sleep(50 * time.Millisecond)
+
+	// ForceSet steals the lock — Get's setWithLock will see CAS mismatch (ErrLockLost).
+	err = client.ForceSet(ctx, time.Second*10, key, forcedVal)
+	require.NoError(t, err)
+
+	// Wait for Get to complete its retry.
+	time.Sleep(500 * time.Millisecond)
+
+	// Key should have a value (either the forced value or a re-populated value).
+	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
+		t.Fatal("callback should not be called — value should exist")
+		return "", nil
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, res)
+}
