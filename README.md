@@ -1,9 +1,32 @@
 # redcache
 
-redcache provides a cache aside implementation for Redis. It's based on the rueidis library and uses client side caching to reduce the number of round trips to the Redis server.
+[![CI](https://github.com/dcbickfo/redcache/actions/workflows/CI.yml/badge.svg)](https://github.com/dcbickfo/redcache/actions/workflows/CI.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/dcbickfo/redcache.svg)](https://pkg.go.dev/github.com/dcbickfo/redcache)
+[![Go Report Card](https://goreportcard.com/badge/github.com/dcbickfo/redcache)](https://goreportcard.com/report/github.com/dcbickfo/redcache)
 
+A cache-aside implementation for Redis, built on the [rueidis](https://github.com/redis/rueidis) client.
 
-### Example
+## Features
+
+- **Cache-aside pattern** — automatic cache population with `Get` and `GetMulti`.
+- **Distributed locking** — `SET NX GET PX` with UUIDv7 prevents thundering herd.
+- **Client-side caching** — rueidis client-side cache with Redis invalidation messages reduces round trips.
+- **Cluster support** — multi-key operations are grouped by slot for efficient batching.
+- **Lock ownership verification** — Lua scripts atomically verify lock ownership before SET/DEL.
+
+## Requirements
+
+- Go 1.23+
+- Redis 7+
+
+## Installation
+
+```bash
+go get github.com/dcbickfo/redcache
+```
+
+## Usage
+
 ```go
 package main
 
@@ -110,5 +133,31 @@ func (r Repository) GetByIDs(ctx context.Context, keys []string) (map[string]str
 
     return val, nil
 }
+```
 
+## Configuration
+
+`CacheAsideOption` controls the behavior of the cache-aside client:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `LockTTL` | `time.Duration` | `10s` | Maximum time a lock can be held. Also the timeout for waiting on lost invalidation messages. Must be at least 100ms. |
+| `ClientBuilder` | `func(rueidis.ClientOption) (rueidis.Client, error)` | `nil` | Custom builder for the underlying rueidis client. Uses `rueidis.NewClient` when nil. |
+| `Logger` | `Logger` | `slog.Default()` | Logger for errors and debug information. Must be safe for concurrent use. |
+| `LockPrefix` | `string` | `"__redcache:lock:"` | Prefix for distributed lock values. Choose a prefix unlikely to conflict with your data keys. |
+
+## Local Development
+
+```bash
+# Start Redis
+docker compose up -d
+
+# Run tests
+go test -race ./...
+
+# Lint
+golangci-lint run
+
+# Benchmarks
+go test -bench=. -benchtime=3s ./...
 ```
