@@ -449,6 +449,40 @@ func TestPrimeableCacheAside_Set_CallbackError(t *testing.T) {
 	assert.Equal(t, val, res)
 }
 
+func TestPrimeableCacheAside_Set_CallbackError_RestoresValue(t *testing.T) {
+	client := makePrimeableClient(t, addr)
+	defer client.Client().Close()
+	ctx := context.Background()
+
+	key := "key:" + uuid.New().String()
+	originalVal := "original:" + uuid.New().String()
+
+	// Pre-populate with a known value via Get.
+	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
+		return originalVal, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, originalVal, res)
+
+	// Set with failing callback — should restore the original value.
+	cbErr := fmt.Errorf("set callback failed")
+	err = client.Set(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
+		return "", cbErr
+	})
+	require.ErrorIs(t, err, cbErr)
+
+	// Give invalidation a moment to propagate.
+	time.Sleep(100 * time.Millisecond)
+
+	// Original value should be restored.
+	res, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
+		// If callback fires, the original was NOT restored — it was deleted.
+		return originalVal, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, originalVal, res)
+}
+
 func TestPrimeableCacheAside_SetMulti_CallbackError_RestoresValues(t *testing.T) {
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()

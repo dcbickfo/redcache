@@ -49,6 +49,7 @@ func (pca *PrimeableCacheAside) Close() {
 
 // Set acquires a write lock on the key, calls fn to produce the value, and atomically
 // sets it in Redis. If another operation holds a lock, Set waits for it to complete.
+// If the callback returns an error, the previous value is restored (matching SetMulti behavior).
 //
 // The callback fn receives the key and should return the value to cache.
 // Set respects context cancellation for timeouts.
@@ -81,12 +82,12 @@ retry:
 		}
 	}
 
-	// Try to acquire write lock.
-	result, err := acquireWriteLockScript.Exec(ctx, pca.client, []string{key}, []string{lockVal, lockTTLMs, pca.lockPrefix}).AsInt64()
+	// Try to acquire write lock, capturing the previous value for rollback.
+	acquired, savedValue, err := pca.tryAcquireWriteLock(ctx, key, lockVal, lockTTLMs)
 	if err != nil {
-		return fmt.Errorf("write lock for key %q: %w", key, err)
+		return err
 	}
-	if result == 0 {
+	if !acquired {
 		// Another lock appeared between DoCache and Exec.
 		select {
 		case <-waitChan:
@@ -99,7 +100,7 @@ retry:
 	// Lock acquired — execute callback.
 	newVal, err := fn(ctx, key)
 	if err != nil {
-		pca.bestEffortUnlock(ctx, key, lockVal)
+		pca.restoreValue(ctx, key, lockVal, savedValue)
 		return err
 	}
 

@@ -12,34 +12,10 @@ var (
 
 // Lua scripts for PrimeableCacheAside write-lock operations.
 var (
-	// acquireWriteLockScript atomically acquires a write lock.
-	// Unlike SET NX (used by Get), this allows overwriting real values but
-	// refuses to overwrite an existing lock, preventing Set from stomping
-	// on an active Get operation's lock.
-	// Returns 1 on success, 0 if an existing lock is present.
-	acquireWriteLockScript = rueidis.NewLuaScript(`
-		local key = KEYS[1]
-		local lock_value = ARGV[1]
-		local ttl = ARGV[2]
-		local lock_prefix = ARGV[3]
-
-		local current = redis.call("GET", key)
-
-		if current == false then
-			redis.call("SET", key, lock_value, "PX", ttl)
-			return 1
-		end
-
-		if string.sub(current, 1, string.len(lock_prefix)) == lock_prefix then
-			return 0
-		end
-
-		redis.call("SET", key, lock_value, "PX", ttl)
-		return 1
-	`)
-
-	// acquireWriteLockWithBackupScript acquires a lock and returns the previous value
-	// for rollback in SetMulti.
+	// acquireWriteLockWithBackupScript atomically acquires a write lock and
+	// returns the previous value for rollback. Unlike SET NX (used by Get),
+	// this allows overwriting real values but refuses to overwrite an existing
+	// lock, preventing Set from stomping on an active Get operation's lock.
 	// Returns: [success (0 or 1), previous_value or false].
 	acquireWriteLockWithBackupScript = rueidis.NewLuaScript(`
 		local key = KEYS[1]
