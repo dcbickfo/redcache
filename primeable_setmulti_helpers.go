@@ -13,6 +13,25 @@ import (
 	"github.com/dcbickfo/redcache/internal/cmdx"
 )
 
+// tryAcquireWriteLock attempts to acquire a write lock on a single key, returning the
+// previous value for rollback. Returns (acquired, savedValue, error).
+func (pca *PrimeableCacheAside) tryAcquireWriteLock(ctx context.Context, key, lockVal, lockTTLMs string) (bool, string, error) {
+	resp := acquireWriteLockWithBackupScript.Exec(ctx, pca.client, []string{key}, []string{lockVal, lockTTLMs, pca.lockPrefix})
+	arr, err := resp.ToArray()
+	if err != nil {
+		return false, "", fmt.Errorf("write lock for key %q: %w", key, err)
+	}
+	success, _ := arr[0].AsInt64()
+	if success == 0 {
+		return false, "", nil
+	}
+	var savedValue string
+	if backupVal, bErr := arr[1].ToString(); bErr == nil {
+		savedValue = backupVal
+	}
+	return true, savedValue, nil
+}
+
 // acquireMultiWriteLocks acquires write locks on all keys in sorted order with rollback.
 // Returns lockValues map and savedValues map (for rollback of previous real values).
 func (pca *PrimeableCacheAside) acquireMultiWriteLocks(
