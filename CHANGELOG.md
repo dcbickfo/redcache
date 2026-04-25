@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `PrimeableCacheAside` with `Set` and `SetMulti` for write-through caching with CAS-based lock ownership.
+- Refresh-ahead caching via `RefreshAfterFraction`, `RefreshWorkers`, and `RefreshQueueSize`. Background workers refresh stale-but-valid entries while the previous value is still served.
+- `Metrics` interface with `NoopMetrics` default. Hooks for cache hit/miss, lock contention, lock loss, and refresh triggered/skipped/dropped/panicked events.
+- `BatchError.ErrorFor(key)` and `BatchError.HasError(key)` helpers (nil-safe) for inspecting per-key failures from multi-key operations.
+- `RefreshLockPrefix` option for customizing the distributed refresh lock prefix; defaults to `__redcache:refresh:`.
+- Runnable `ExampleCacheAside_Get` and `ExampleCacheAside_GetMulti` in `example_test.go`.
+- Benchmarks in `cacheaside_bench_test.go`.
+- CI hardening: PR triggers, concurrency-group cancellation of stale runs, golangci-lint pinned to v2.11.4.
+
+### Changed
+- Library-internal errors in `tryGet`, `tryLockMulti`, and `executeSetStatements` are wrapped with key context for easier debugging.
+- `RefreshPanicked` is emitted per affected key (multi-key refreshes now tag each key).
+- Integration tests now run with `t.Parallel()` for faster CI.
+
 ## [v0.1.6] - 2025-10-06
 
 ### Fixed
