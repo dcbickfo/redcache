@@ -34,6 +34,25 @@ func (e *BatchError) HasFailures() bool {
 	return len(e.Failed) > 0
 }
 
+// ErrorFor returns the error recorded for key, or nil if the key did not fail.
+// Safe to call on a nil receiver, so callers can chain after errors.As without
+// a nil-check.
+func (e *BatchError) ErrorFor(key string) error {
+	if e == nil {
+		return nil
+	}
+	return e.Failed[key]
+}
+
+// HasError reports whether the given key failed. Safe to call on a nil receiver.
+func (e *BatchError) HasError(key string) bool {
+	if e == nil {
+		return false
+	}
+	_, ok := e.Failed[key]
+	return ok
+}
+
 // NewBatchError creates a BatchError from the given failures and successes.
 // Returns nil (untyped) if there are no failures, so it is safe to return
 // directly as an error interface value.

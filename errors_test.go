@@ -51,3 +51,25 @@ func TestNewBatchError_ReturnsErrorWhenFailures(t *testing.T) {
 	assert.Equal(t, failed, be.Failed)
 	assert.Equal(t, succeeded, be.Succeeded)
 }
+
+func TestBatchError_ErrorForAndHasError(t *testing.T) {
+	keyErr := errors.New("oops")
+	be := &redcache.BatchError{
+		Failed:    map[string]error{"key1": keyErr},
+		Succeeded: []string{"key2"},
+	}
+
+	assert.True(t, be.HasError("key1"))
+	assert.False(t, be.HasError("key2"))
+	assert.False(t, be.HasError("unknown"))
+
+	assert.ErrorIs(t, be.ErrorFor("key1"), keyErr)
+	assert.NoError(t, be.ErrorFor("key2"))
+	assert.NoError(t, be.ErrorFor("unknown"))
+}
+
+func TestBatchError_NilReceiverSafe(t *testing.T) {
+	var be *redcache.BatchError
+	assert.False(t, be.HasError("anything"))
+	assert.NoError(t, be.ErrorFor("anything"))
+}
