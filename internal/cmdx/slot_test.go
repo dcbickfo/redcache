@@ -164,6 +164,43 @@ func TestSlot_BoundaryValues(t *testing.T) {
 	}
 }
 
+func TestGroupBySlot(t *testing.T) {
+	type item struct {
+		key   string
+		value int
+	}
+
+	items := []item{
+		{key: "{user:1}:a", value: 1},
+		{key: "{user:1}:b", value: 2},
+		{key: "{user:2}:a", value: 3},
+		{key: "standalone", value: 4},
+	}
+
+	groups := cmdx.GroupBySlot(items, func(i item) string { return i.key })
+
+	// {user:1}:a and {user:1}:b should be in the same slot (same hash tag).
+	slot1 := cmdx.Slot("{user:1}:a")
+	assert.Len(t, groups[slot1], 2)
+	assert.Equal(t, 1, groups[slot1][0].value)
+	assert.Equal(t, 2, groups[slot1][1].value)
+
+	// {user:2}:a should be in its own slot.
+	slot2 := cmdx.Slot("{user:2}:a")
+	assert.Len(t, groups[slot2], 1)
+	assert.Equal(t, 3, groups[slot2][0].value)
+
+	// standalone should be in its own slot.
+	slot3 := cmdx.Slot("standalone")
+	assert.Len(t, groups[slot3], 1)
+	assert.Equal(t, 4, groups[slot3][0].value)
+}
+
+func TestGroupBySlot_Empty(t *testing.T) {
+	groups := cmdx.GroupBySlot([]string{}, func(s string) string { return s })
+	assert.Empty(t, groups)
+}
+
 func BenchmarkSlot(b *testing.B) {
 	keys := []string{
 		"simple",
