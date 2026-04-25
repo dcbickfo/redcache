@@ -440,7 +440,7 @@ func (rca *CacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 		return cacheReadResult{}, errNotFound
 	}
 	if err != nil {
-		return cacheReadResult{}, err
+		return cacheReadResult{}, fmt.Errorf("read key %q: %w", key, err)
 	}
 	rca.logger.Debug("cache hit", "key", key)
 	return cacheReadResult{val: val, pttl: resp.CachePTTL()}, nil
@@ -686,7 +686,7 @@ func (rca *CacheAside) tryLockMulti(ctx context.Context, keys []string) (map[str
 	for _, k := range keys {
 		uuidv7, err := uuid.NewV7()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("lock UUID for key %q: %w", k, err)
 		}
 		lockVals[k] = rca.lockPrefix + uuidv7.String()
 		cmds = append(cmds, rca.client.B().Set().Key(k).Value(lockVals[k]).Nx().Get().Px(rca.lockTTL).Build())
@@ -746,7 +746,7 @@ func (rca *CacheAside) executeSetStatements(ctx context.Context, stmts map[uint1
 				err := resp.Error()
 				if err != nil {
 					if !rueidis.IsRedisNil(err) {
-						return err
+						return fmt.Errorf("set key %q: %w", kos.keyOrder[j], err)
 					}
 					continue
 				}
