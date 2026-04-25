@@ -93,8 +93,8 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Give refresh worker a moment to drain.
-	time.Sleep(100 * time.Millisecond)
-
-	require.GreaterOrEqual(t, metrics.triggered.Load(), int64(1), "expected RefreshTriggered to fire")
+	// Poll until the refresh worker has emitted the metric (avoids hard-coded sleep).
+	require.Eventually(t, func() bool {
+		return metrics.triggered.Load() >= 1
+	}, 2*time.Second, 5*time.Millisecond, "expected RefreshTriggered to fire")
 }

@@ -989,13 +989,11 @@ func TestRefreshAhead_TriggersBackgroundRefresh(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "val-1", res) // stale value returned immediately
 
-	// Give the background goroutine time to complete.
-	time.Sleep(500 * time.Millisecond)
-
-	// Next Get should see the refreshed value.
-	res, err = client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-	assert.Equal(t, "val-2", res)
+	// Poll until the refresh completes and the next Get sees the refreshed value.
+	require.Eventually(t, func() bool {
+		v, e := client.Get(ctx, ttl, key, cb)
+		return e == nil && v == "val-2"
+	}, 2*time.Second, 10*time.Millisecond, "expected refreshed value after background refresh")
 
 	mu.Lock()
 	assert.Equal(t, 2, callCount, "fn should have been called exactly twice")
@@ -1045,8 +1043,12 @@ func TestRefreshAhead_Dedup(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Wait for refresh goroutine to finish.
-	time.Sleep(500 * time.Millisecond)
+	// Poll until the (single) refresh callback has finished.
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return refreshCount >= 1
+	}, 2*time.Second, 10*time.Millisecond, "refresh callback should fire")
 
 	mu.Lock()
 	assert.Equal(t, int64(1), refreshCount, "refresh callback should be called exactly once")
@@ -1158,9 +1160,10 @@ func TestRefreshAhead_PanicRecovered(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "initial", res)
 
-	// Wait for the panicking refresh to land.
-	time.Sleep(400 * time.Millisecond)
-	assert.GreaterOrEqual(t, calls.Load(), int32(2), "refresh callback should have been invoked")
+	// Poll until the panicking refresh has been attempted.
+	require.Eventually(t, func() bool {
+		return calls.Load() >= 2
+	}, 2*time.Second, 10*time.Millisecond, "refresh callback should have been invoked")
 
 	// Wait past dedup TTL so a new refresh can be triggered.
 	time.Sleep(2500 * time.Millisecond)
@@ -1177,8 +1180,9 @@ func TestRefreshAhead_PanicRecovered(t *testing.T) {
 	assert.Equal(t, "refreshed", res)
 
 	// If the worker had died, the refresh wouldn't process and calls.Load() would stall.
-	time.Sleep(400 * time.Millisecond)
-	assert.GreaterOrEqual(t, calls.Load(), int32(4), "worker should still be alive to process refreshes")
+	require.Eventually(t, func() bool {
+		return calls.Load() >= 4
+	}, 2*time.Second, 10*time.Millisecond, "worker should still be alive to process refreshes")
 }
 
 func TestRefreshAhead_DoesNotStompLockValue(t *testing.T) {
@@ -1274,15 +1278,19 @@ func TestRefreshAhead_GetMulti(t *testing.T) {
 		assert.Equal(t, "val-1", res[k]) // stale
 	}
 
-	// Wait for refresh.
-	time.Sleep(500 * time.Millisecond)
-
-	// Next GetMulti should see refreshed values.
-	res, err = client.GetMulti(ctx, ttl, keys, cb)
-	require.NoError(t, err)
-	for _, k := range keys {
-		assert.Equal(t, "val-2", res[k])
-	}
+	// Poll until the refresh completes and the next GetMulti sees refreshed values.
+	require.Eventually(t, func() bool {
+		v, e := client.GetMulti(ctx, ttl, keys, cb)
+		if e != nil {
+			return false
+		}
+		for _, k := range keys {
+			if v[k] != "val-2" {
+				return false
+			}
+		}
+		return true
+	}, 2*time.Second, 10*time.Millisecond, "expected refreshed values after background refresh")
 
 	mu.Lock()
 	assert.Equal(t, 2, callCount, "fn should have been called exactly twice")
