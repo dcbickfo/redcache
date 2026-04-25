@@ -144,7 +144,50 @@ func (r Repository) GetByIDs(ctx context.Context, keys []string) (map[string]str
 | `LockTTL` | `time.Duration` | `10s` | Maximum time a lock can be held. Also the timeout for waiting on lost invalidation messages. Must be at least 100ms. |
 | `ClientBuilder` | `func(rueidis.ClientOption) (rueidis.Client, error)` | `nil` | Custom builder for the underlying rueidis client. Uses `rueidis.NewClient` when nil. |
 | `Logger` | `Logger` | `slog.Default()` | Logger for errors and debug information. Must be safe for concurrent use. |
+| `Metrics` | `Metrics` | `NoopMetrics{}` | Receives observability events. Must be concurrent-safe — methods run on the hot path. |
 | `LockPrefix` | `string` | `"__redcache:lock:"` | Prefix for distributed lock values. Choose a prefix unlikely to conflict with your data keys. |
+| `RefreshLockPrefix` | `string` | `"__redcache:refresh:"` | Prefix for distributed refresh-ahead locks. |
+| `RefreshAfterFraction` | `float64` | `0` (disabled) | Fraction of TTL after which a refresh-ahead is triggered. Must be in `[0, 1)`. |
+| `RefreshWorkers` | `int` | `4` (when refresh enabled) | Background workers processing refresh jobs. |
+| `RefreshQueueSize` | `int` | `64` (when refresh enabled) | Capacity of the refresh job queue. Jobs are silently dropped when full; the stale value continues to serve. |
+
+## Refresh-Ahead
+
+Set `RefreshAfterFraction` to enable background refreshes. When a `Get`/`GetMulti` returns a value whose TTL has crossed the configured threshold, the stale value is returned immediately and a background worker repopulates the entry. Distributed and local dedup ensure only one refresh runs per key.
+
+```go
+client, err := redcache.NewRedCacheAside(
+    rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+    redcache.CacheAsideOption{
+        LockTTL:              5 * time.Second,
+        RefreshAfterFraction: 0.8, // refresh once 80% of TTL has elapsed
+        RefreshWorkers:       4,
+        RefreshQueueSize:     64,
+    },
+)
+```
+
+## Metrics
+
+Implement `Metrics` (or embed `NoopMetrics` and override the methods you care about) to wire counters into Prometheus, OpenTelemetry, or any other backend. Methods are called on the hot path and must be concurrent-safe.
+
+```go
+type myMetrics struct {
+    redcache.NoopMetrics
+    hits, misses atomic.Int64
+}
+
+func (m *myMetrics) CacheHit(string)  { m.hits.Add(1) }
+func (m *myMetrics) CacheMiss(string) { m.misses.Add(1) }
+
+client, err := redcache.NewRedCacheAside(
+    rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+    redcache.CacheAsideOption{
+        LockTTL: 5 * time.Second,
+        Metrics: &myMetrics{},
+    },
+)
+```
 
 ## Local Development
 
