@@ -49,10 +49,15 @@ func (pca *PrimeableCacheAside) Close() {
 
 // Set acquires a write lock on the key, calls fn to produce the value, and atomically
 // sets it in Redis. If another operation holds a lock, Set waits for it to complete.
-// If the callback returns an error, the previous value is restored (matching SetMulti behavior).
 //
 // The callback fn receives the key and should return the value to cache.
 // Set respects context cancellation for timeouts.
+//
+// On callback error, the previous value is restored only if Set still holds the lock.
+// If a concurrent ForceSet has stolen the lock, the stealer's value is preserved
+// rather than overwritten with the stale prior value, and Set returns the callback error.
+// The CAS-set after a successful callback may also return ErrLockLost under the same
+// race; in that case, the lock-stealer's value is preserved.
 func (pca *PrimeableCacheAside) Set(
 	ctx context.Context,
 	ttl time.Duration,
@@ -153,16 +158,13 @@ func (pca *PrimeableCacheAside) SetMulti(
 	succeeded, failed := pca.setMultiValuesWithCAS(ctx, ttl, vals, lockValues)
 
 	// Unlock any keys that weren't successfully written.
+	succeededSet := make(map[string]struct{}, len(succeeded))
+	for _, s := range succeeded {
+		succeededSet[s] = struct{}{}
+	}
 	toUnlock := make(map[string]string)
 	for key, lockVal := range lockValues {
-		found := false
-		for _, s := range succeeded {
-			if s == key {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if _, ok := succeededSet[key]; !ok {
 			toUnlock[key] = lockVal
 		}
 	}

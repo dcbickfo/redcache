@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/rueidis"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/dcbickfo/redcache/internal/cmdx"
 )
@@ -291,22 +291,23 @@ func (pca *PrimeableCacheAside) setMultiValuesWithCAS(
 		resps   []rueidis.RedisResult
 	}
 
-	eg, egCtx := errgroup.WithContext(ctx)
+	var wg sync.WaitGroup
 	resultsCh := make(chan slotResult, len(slotGroups))
 
 	for _, group := range slotGroups {
-		eg.Go(func() error {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			stmts := make([]rueidis.LuaExec, len(group))
 			for i, e := range group {
 				stmts[i] = e.setStmt
 			}
-			resps := setWithWriteLockScript.ExecMulti(egCtx, pca.client, stmts...)
+			resps := setWithWriteLockScript.ExecMulti(ctx, pca.client, stmts...)
 			resultsCh <- slotResult{entries: group, resps: resps}
-			return nil
-		})
+		}()
 	}
 
-	_ = eg.Wait()
+	wg.Wait()
 	close(resultsCh)
 
 	for sr := range resultsCh {
