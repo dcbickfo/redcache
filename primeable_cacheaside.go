@@ -67,57 +67,81 @@ func (pca *PrimeableCacheAside) Set(
 	lockVal := pca.lockPool.Generate()
 	lockTTLMs := strconv.FormatInt(pca.lockTTL.Milliseconds(), 10)
 
-retry:
+	for {
+		savedValue, retry, err := pca.acquireSingleWriteLock(ctx, key, lockVal, lockTTLMs)
+		if err != nil {
+			return err
+		}
+		if retry {
+			continue
+		}
+
+		// Lock acquired — execute callback.
+		newVal, err := fn(ctx, key)
+		if err != nil {
+			pca.restoreValue(ctx, key, lockVal, savedValue)
+			return err
+		}
+
+		// CAS set the value.
+		casResult, err := setWithWriteLockScript.Exec(ctx, pca.client, []string{key}, []string{newVal, strconv.FormatInt(ttl.Milliseconds(), 10), lockVal}).AsInt64()
+		if err != nil {
+			return fmt.Errorf("set key %q: %w", key, err)
+		}
+		if casResult == 0 {
+			pca.metrics.LockLost(key)
+			return fmt.Errorf("key %q: %w", key, ErrLockLost)
+		}
+		return nil
+	}
+}
+
+// acquireSingleWriteLock subscribes to the key, waits for any existing lock
+// holder, and tries to acquire a write lock. Returns:
+//   - savedValue: previous real value (for callback-error rollback), if any
+//   - retry: true when the caller should loop and try again
+//   - err: terminal error (context cancellation or Redis failure)
+func (pca *PrimeableCacheAside) acquireSingleWriteLock(
+	ctx context.Context,
+	key, lockVal, lockTTLMs string,
+) (savedValue string, retry bool, err error) {
 	waitChan := pca.register(key)
 
 	// Subscribe + read current value.
 	resp := pca.client.DoCache(ctx, pca.client.B().Get().Key(key).Cache(), pca.lockTTL)
-	val, err := resp.ToString()
-	if err != nil && !rueidis.IsRedisNil(err) {
-		return fmt.Errorf("read key %q: %w", key, err)
+	val, rerr := resp.ToString()
+	if rerr != nil && !rueidis.IsRedisNil(rerr) {
+		return "", false, fmt.Errorf("read key %q: %w", key, rerr)
 	}
 
 	// If current value is a lock, wait for it to be released.
-	if !rueidis.IsRedisNil(err) && strings.HasPrefix(val, pca.lockPrefix) {
-		select {
-		case <-waitChan:
-			goto retry
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	if !rueidis.IsRedisNil(rerr) && strings.HasPrefix(val, pca.lockPrefix) {
+		pca.metrics.LockContended(key)
+		return "", true, waitOrCancel(ctx, waitChan)
 	}
 
 	// Try to acquire write lock, capturing the previous value for rollback.
 	acquired, savedValue, err := pca.tryAcquireWriteLock(ctx, key, lockVal, lockTTLMs)
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	if !acquired {
 		// Another lock appeared between DoCache and Exec.
-		select {
-		case <-waitChan:
-			goto retry
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		pca.metrics.LockContended(key)
+		return "", true, waitOrCancel(ctx, waitChan)
 	}
+	return savedValue, false, nil
+}
 
-	// Lock acquired — execute callback.
-	newVal, err := fn(ctx, key)
-	if err != nil {
-		pca.restoreValue(ctx, key, lockVal, savedValue)
-		return err
+// waitOrCancel blocks until the wait channel closes or ctx is done. Returns
+// nil on wait channel close (caller should retry) and ctx.Err() on cancellation.
+func waitOrCancel(ctx context.Context, waitChan <-chan struct{}) error {
+	select {
+	case <-waitChan:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-
-	// CAS set the value.
-	casResult, err := setWithWriteLockScript.Exec(ctx, pca.client, []string{key}, []string{newVal, strconv.FormatInt(ttl.Milliseconds(), 10), lockVal}).AsInt64()
-	if err != nil {
-		return fmt.Errorf("set key %q: %w", key, err)
-	}
-	if casResult == 0 {
-		return fmt.Errorf("key %q: %w", key, ErrLockLost)
-	}
-	return nil
 }
 
 // SetMulti acquires write locks on all keys, calls fn once with all keys,

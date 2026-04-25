@@ -333,6 +333,7 @@ func (pca *PrimeableCacheAside) collectCASResults(
 		val, _ := resp.AsInt64()
 		if val == 0 {
 			failed[key] = ErrLockLost
+			pca.metrics.LockLost(key)
 			continue
 		}
 		*succeeded = append(*succeeded, key)
