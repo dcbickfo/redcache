@@ -342,8 +342,7 @@ func (pca *PrimeableCacheAside) collectCASResults(
 
 // restoreMultiValues restores saved values or deletes keys for all held locks.
 func (pca *PrimeableCacheAside) restoreMultiValues(ctx context.Context, lockValues, savedValues map[string]string) {
-	cleanupCtx := context.WithoutCancel(ctx)
-	toCtx, cancel := context.WithTimeout(cleanupCtx, pca.lockTTL)
+	toCtx, cancel := pca.cleanupCtx(ctx)
 	defer cancel()
 
 	for key, lockVal := range lockValues {
@@ -362,8 +361,7 @@ func (pca *PrimeableCacheAside) restoreValue(ctx context.Context, key, lockVal, 
 
 // bestEffortUnlock releases a lock using delKeyLua.
 func (pca *PrimeableCacheAside) bestEffortUnlock(ctx context.Context, key, lockVal string) {
-	cleanupCtx := context.WithoutCancel(ctx)
-	toCtx, cancel := context.WithTimeout(cleanupCtx, pca.lockTTL)
+	toCtx, cancel := pca.cleanupCtx(ctx)
 	defer cancel()
 	if err := pca.unlock(toCtx, key, lockVal); err != nil {
 		pca.logger.Error("failed to unlock key", "key", key, "error", err)
@@ -372,8 +370,7 @@ func (pca *PrimeableCacheAside) bestEffortUnlock(ctx context.Context, key, lockV
 
 // unlockMultiKeys releases multiple locks.
 func (pca *PrimeableCacheAside) unlockMultiKeys(ctx context.Context, lockVals map[string]string) {
-	cleanupCtx := context.WithoutCancel(ctx)
-	toCtx, cancel := context.WithTimeout(cleanupCtx, pca.lockTTL)
+	toCtx, cancel := pca.cleanupCtx(ctx)
 	defer cancel()
 	pca.unlockMulti(toCtx, lockVals)
 }

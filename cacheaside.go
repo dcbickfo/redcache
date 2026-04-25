@@ -266,6 +266,13 @@ func (rca *CacheAside) Close() {
 	}
 }
 
+// cleanupCtx returns a context derived from ctx that strips cancellation/deadline
+// (so cleanup can run even after the original request completes) but bounds the
+// total wait at lockTTL. Callers MUST defer the returned cancel.
+func (rca *CacheAside) cleanupCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), rca.lockTTL)
+}
+
 func (rca *CacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 	for _, m := range messages {
 		key, err := m.ToString()
@@ -447,9 +454,7 @@ func (rca *CacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key
 	}
 	defer func() {
 		if !setVal {
-			// Use context.WithoutCancel to preserve tracing/request context while allowing cleanup
-			cleanupCtx := context.WithoutCancel(ctx)
-			toCtx, cancel := context.WithTimeout(cleanupCtx, rca.lockTTL)
+			toCtx, cancel := rca.cleanupCtx(ctx)
 			defer cancel()
 			// Best effort unlock - errors are non-fatal as lock will expire
 			if err := rca.unlock(toCtx, key, lockVal); err != nil {
@@ -641,9 +646,7 @@ func (rca *CacheAside) trySetMultiKeyFn(
 			}
 		}
 		if len(toUnlock) > 0 {
-			// Use context.WithoutCancel to preserve tracing/request context while allowing cleanup
-			cleanupCtx := context.WithoutCancel(ctx)
-			toCtx, cancel := context.WithTimeout(cleanupCtx, rca.lockTTL)
+			toCtx, cancel := rca.cleanupCtx(ctx)
 			defer cancel()
 			rca.unlockMulti(toCtx, toUnlock)
 		}

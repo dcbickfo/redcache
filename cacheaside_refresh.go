@@ -103,7 +103,7 @@ func (rca *CacheAside) doSingleRefresh(
 		return
 	}
 	defer func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), rca.lockTTL)
+		cleanupCtx, cleanupCancel := rca.cleanupCtx(ctx)
 		defer cleanupCancel()
 		rca.client.Do(cleanupCtx, rca.client.B().Del().Key(refreshKey).Build())
 	}()
@@ -210,7 +210,7 @@ func (rca *CacheAside) acquireRefreshLocks(ctx context.Context, keys []string) [
 
 // deleteRefreshLocks removes distributed refresh lock keys (best effort).
 func (rca *CacheAside) deleteRefreshLocks(ctx context.Context, keys []string) {
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), rca.lockTTL)
+	cleanupCtx, cleanupCancel := rca.cleanupCtx(ctx)
 	defer cleanupCancel()
 	delCmds := make(rueidis.Commands, len(keys))
 	for i, key := range keys {
