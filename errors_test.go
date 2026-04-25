@@ -11,6 +11,7 @@ import (
 )
 
 func TestBatchError_Error(t *testing.T) {
+	t.Parallel()
 	be := &redcache.BatchError{
 		Failed:    map[string]error{"key1": errors.New("timeout"), "key2": errors.New("lock lost")},
 		Succeeded: []string{"key3"},
@@ -23,6 +24,7 @@ func TestBatchError_Error(t *testing.T) {
 }
 
 func TestBatchError_HasFailures(t *testing.T) {
+	t.Parallel()
 	be := &redcache.BatchError{
 		Failed:    map[string]error{"key1": errors.New("err")},
 		Succeeded: []string{"key2"},
@@ -37,11 +39,13 @@ func TestBatchError_HasFailures(t *testing.T) {
 }
 
 func TestNewBatchError_NilWhenNoFailures(t *testing.T) {
+	t.Parallel()
 	be := redcache.NewBatchError(map[string]error{}, []string{"key1"})
 	assert.Nil(t, be)
 }
 
 func TestNewBatchError_ReturnsErrorWhenFailures(t *testing.T) {
+	t.Parallel()
 	failed := map[string]error{"key1": errors.New("oops")}
 	succeeded := []string{"key2"}
 	err := redcache.NewBatchError(failed, succeeded)
@@ -53,6 +57,7 @@ func TestNewBatchError_ReturnsErrorWhenFailures(t *testing.T) {
 }
 
 func TestBatchError_ErrorForAndHasError(t *testing.T) {
+	t.Parallel()
 	keyErr := errors.New("oops")
 	be := &redcache.BatchError{
 		Failed:    map[string]error{"key1": keyErr},
@@ -69,6 +74,7 @@ func TestBatchError_ErrorForAndHasError(t *testing.T) {
 }
 
 func TestBatchError_NilReceiverSafe(t *testing.T) {
+	t.Parallel()
 	var be *redcache.BatchError
 	assert.False(t, be.HasError("anything"))
 	assert.NoError(t, be.ErrorFor("anything"))

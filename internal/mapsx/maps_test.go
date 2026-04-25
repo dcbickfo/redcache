@@ -9,6 +9,7 @@ import (
 )
 
 func TestKeys(t *testing.T) {
+	t.Parallel()
 	// Test with an empty map
 	emptyMap := map[string]int{}
 	keys := mapsx.Keys(emptyMap)
@@ -30,6 +31,7 @@ func TestKeys(t *testing.T) {
 }
 
 func TestValues(t *testing.T) {
+	t.Parallel()
 	// Test with an empty map
 	emptyMap := map[string]int{}
 	values := mapsx.Values(emptyMap)

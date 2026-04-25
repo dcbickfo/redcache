@@ -32,6 +32,7 @@ func makePrimeableClient(t *testing.T, addr []string) *redcache.PrimeableCacheAs
 }
 
 func TestPrimeableCacheAside_Set_Basic(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -57,6 +58,7 @@ func TestPrimeableCacheAside_Set_Basic(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_Set_Overwrites(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -88,6 +90,7 @@ func TestPrimeableCacheAside_Set_Overwrites(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_Set_WaitsForExistingReadLock(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -132,6 +135,7 @@ func TestPrimeableCacheAside_Set_WaitsForExistingReadLock(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_Set_Concurrent(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -161,6 +165,7 @@ func TestPrimeableCacheAside_Set_Concurrent(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_SetMulti_Basic(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -196,6 +201,7 @@ func TestPrimeableCacheAside_SetMulti_Basic(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_SetMulti_NoDeadlock(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -247,6 +253,7 @@ func TestPrimeableCacheAside_SetMulti_NoDeadlock(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_ForceSet_Basic(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -267,6 +274,7 @@ func TestPrimeableCacheAside_ForceSet_Basic(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_ForceSet_StealsLock(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -305,6 +313,7 @@ func TestPrimeableCacheAside_ForceSet_StealsLock(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_ForceSetMulti_Basic(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -329,6 +338,7 @@ func TestPrimeableCacheAside_ForceSetMulti_Basic(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_Set_ContextCancellation(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 
@@ -351,6 +361,7 @@ func TestPrimeableCacheAside_Set_ContextCancellation(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_Close_CancelsPendingLocks(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -392,6 +403,7 @@ func TestPrimeableCacheAside_Close_CancelsPendingLocks(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_SetMulti_ContextCancellation(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 
@@ -420,6 +432,7 @@ func TestPrimeableCacheAside_SetMulti_ContextCancellation(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_Set_CallbackError(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -450,6 +463,7 @@ func TestPrimeableCacheAside_Set_CallbackError(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_Set_CallbackError_RestoresValue(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -484,6 +498,7 @@ func TestPrimeableCacheAside_Set_CallbackError_RestoresValue(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_SetMulti_CallbackError_RestoresValues(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -536,6 +551,7 @@ func TestPrimeableCacheAside_SetMulti_CallbackError_RestoresValues(t *testing.T)
 }
 
 func TestPrimeableCacheAside_SetMulti_PartialCASFailure_BatchError(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -579,6 +595,7 @@ func TestPrimeableCacheAside_SetMulti_PartialCASFailure_BatchError(t *testing.T)
 }
 
 func TestPrimeableCacheAside_ForceSet_OverwritesExistingValue(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -611,7 +628,9 @@ func TestPrimeableCacheAside_ForceSet_OverwritesExistingValue(t *testing.T) {
 }
 
 func TestNewPrimeableCacheAside_Validation(t *testing.T) {
+	t.Parallel()
 	t.Run("empty InitAddress", func(t *testing.T) {
+		t.Parallel()
 		_, err := redcache.NewPrimeableCacheAside(
 			rueidis.ClientOption{},
 			redcache.CacheAsideOption{},
@@ -621,6 +640,7 @@ func TestNewPrimeableCacheAside_Validation(t *testing.T) {
 	})
 
 	t.Run("negative LockTTL", func(t *testing.T) {
+		t.Parallel()
 		_, err := redcache.NewPrimeableCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.CacheAsideOption{LockTTL: -1 * time.Second},
@@ -630,6 +650,7 @@ func TestNewPrimeableCacheAside_Validation(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_MultiClient_SetGet(t *testing.T) {
+	t.Parallel()
 	client1 := makePrimeableClient(t, addr)
 	defer client1.Client().Close()
 	client2 := makePrimeableClient(t, addr)
@@ -657,6 +678,7 @@ func TestPrimeableCacheAside_MultiClient_SetGet(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_ConcurrentSetAndGet(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -692,6 +714,7 @@ func TestPrimeableCacheAside_ConcurrentSetAndGet(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_SetMulti_EmptyKeys(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -704,6 +727,7 @@ func TestPrimeableCacheAside_SetMulti_EmptyKeys(t *testing.T) {
 }
 
 func TestPrimeableCacheAside_ForceSetMulti_EmptyMap(t *testing.T) {
+	t.Parallel()
 	client := makePrimeableClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()

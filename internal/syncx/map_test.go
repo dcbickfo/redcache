@@ -9,6 +9,7 @@ import (
 )
 
 func TestMap_CompareAndDelete(t *testing.T) {
+	t.Parallel()
 	var sm syncx.Map[string, int]
 	key := "key"
 	value := 1
@@ -22,6 +23,7 @@ func TestMap_CompareAndDelete(t *testing.T) {
 }
 
 func TestMap_CompareAndSwap(t *testing.T) {
+	t.Parallel()
 	var sm syncx.Map[string, int]
 	key := "key"
 	oldValue := 1
@@ -36,6 +38,7 @@ func TestMap_CompareAndSwap(t *testing.T) {
 }
 
 func TestMap_Delete(t *testing.T) {
+	t.Parallel()
 	var sm syncx.Map[string, int]
 	key := "key"
 	value := 1
@@ -48,6 +51,7 @@ func TestMap_Delete(t *testing.T) {
 }
 
 func TestMap_Load(t *testing.T) {
+	t.Parallel()
 	var sm syncx.Map[string, int]
 	key := "key"
 	value := 1
@@ -59,6 +63,7 @@ func TestMap_Load(t *testing.T) {
 }
 
 func TestMap_LoadAndDelete(t *testing.T) {
+	t.Parallel()
 	var sm syncx.Map[string, int]
 	key := "key"
 	value := 1
@@ -73,6 +78,7 @@ func TestMap_LoadAndDelete(t *testing.T) {
 }
 
 func TestMap_LoadOrStore(t *testing.T) {
+	t.Parallel()
 	var sm syncx.Map[string, int]
 	key := "key"
 	initialValue := 1
@@ -88,6 +94,7 @@ func TestMap_LoadOrStore(t *testing.T) {
 }
 
 func TestMap_Range(t *testing.T) {
+	t.Parallel()
 	var sm syncx.Map[string, int]
 	key1 := "key1"
 	value1 := 1
@@ -109,6 +116,7 @@ func TestMap_Range(t *testing.T) {
 }
 
 func TestMap_Store(t *testing.T) {
+	t.Parallel()
 	var sm syncx.Map[string, int]
 	key := "key"
 	value := 1
@@ -120,6 +128,7 @@ func TestMap_Store(t *testing.T) {
 }
 
 func TestMap_Swap(t *testing.T) {
+	t.Parallel()
 	var sm syncx.Map[string, int]
 	key := "key"
 	initialValue := 1

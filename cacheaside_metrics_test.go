@@ -37,6 +37,7 @@ func (m *capturingMetrics) RefreshPanicked(key string) {
 }
 
 func TestMetrics_HitAndMiss(t *testing.T) {
+	t.Parallel()
 	metrics := &capturingMetrics{}
 	client, err := redcache.NewRedCacheAside(
 		rueidis.ClientOption{InitAddress: addr},
@@ -68,6 +69,7 @@ func TestMetrics_HitAndMiss(t *testing.T) {
 }
 
 func TestMetrics_RefreshTriggered(t *testing.T) {
+	t.Parallel()
 	metrics := &capturingMetrics{}
 	client, err := redcache.NewRedCacheAside(
 		rueidis.ClientOption{InitAddress: addr},
@@ -108,6 +110,7 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 }
 
 func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
+	t.Parallel()
 	metrics := &capturingMetrics{}
 	client, err := redcache.NewRedCacheAside(
 		rueidis.ClientOption{InitAddress: addr},

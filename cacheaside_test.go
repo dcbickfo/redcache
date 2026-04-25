@@ -38,6 +38,7 @@ func makeClient(t *testing.T, addr []string) *redcache.CacheAside {
 }
 
 func TestCacheAside_Get(t *testing.T) {
+	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -68,6 +69,7 @@ func TestCacheAside_Get(t *testing.T) {
 }
 
 func TestCacheAside_GetMulti(t *testing.T) {
+	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -107,6 +109,7 @@ func TestCacheAside_GetMulti(t *testing.T) {
 }
 
 func TestCacheAside_GetMulti_Partial(t *testing.T) {
+	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -169,6 +172,7 @@ func TestCacheAside_GetMulti_Partial(t *testing.T) {
 }
 
 func TestCacheAside_GetMulti_PartLock(t *testing.T) {
+	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -213,6 +217,7 @@ func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 }
 
 func TestCacheAside_Del(t *testing.T) {
+	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -221,7 +226,7 @@ func TestCacheAside_Del(t *testing.T) {
 	val := "val:" + uuid.New().String()
 
 	innerClient := client.Client()
-	err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(val).Nx().Get().Px(time.Millisecond*100).Build()).Error()
+	err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(val).Nx().Get().Px(time.Second*30).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
 	err = innerClient.Do(ctx, innerClient.B().Get().Key(key).Build()).Error()
@@ -235,6 +240,7 @@ func TestCacheAside_Del(t *testing.T) {
 }
 
 func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
+	t.Parallel()
 
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -330,6 +336,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 }
 
 func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) {
+	t.Parallel()
 
 	client1 := makeClient(t, addr)
 	defer client1.Client().Close()
@@ -465,6 +472,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 }
 
 func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
+	t.Parallel()
 
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -594,6 +602,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 }
 
 func TestCacheAside_DelMulti(t *testing.T) {
+	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -605,7 +614,7 @@ func TestCacheAside_DelMulti(t *testing.T) {
 
 	innerClient := client.Client()
 	for key, val := range keyAndVals {
-		err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(val).Nx().Get().Px(time.Millisecond*100).Build()).Error()
+		err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(val).Nx().Get().Px(time.Second*30).Build()).Error()
 		require.True(t, rueidis.IsRedisNil(err))
 	}
 
@@ -624,6 +633,7 @@ func TestCacheAside_DelMulti(t *testing.T) {
 }
 
 func TestCacheAside_GetParentContextCancellation(t *testing.T) {
+	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 
@@ -656,6 +666,7 @@ func TestCacheAside_GetParentContextCancellation(t *testing.T) {
 // TestConcurrentRegisterRace tests the register() method under high contention
 // to ensure the CompareAndDelete race condition fix works correctly
 func TestConcurrentRegisterRace(t *testing.T) {
+	t.Parallel()
 	// Use minimum allowed lock TTL to force lock expirations during concurrent access
 	client, err := redcache.NewRedCacheAside(
 		rueidis.ClientOption{
@@ -723,6 +734,7 @@ func TestConcurrentRegisterRace(t *testing.T) {
 // TestConcurrentGetSameKeySingleClient tests that multiple goroutines getting
 // the same key from a single client instance only triggers one callback when locks don't expire
 func TestConcurrentGetSameKeySingleClient(t *testing.T) {
+	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 
@@ -781,6 +793,7 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 // TestConcurrentInvalidation tests that cache invalidation works correctly
 // when multiple goroutines are accessing the same keys
 func TestConcurrentInvalidation(t *testing.T) {
+	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 
@@ -842,6 +855,7 @@ func TestConcurrentInvalidation(t *testing.T) {
 }
 
 func TestCacheAside_Get_CallbackError(t *testing.T) {
+	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -865,6 +879,7 @@ func TestCacheAside_Get_CallbackError(t *testing.T) {
 }
 
 func TestCacheAside_GetMulti_CallbackError(t *testing.T) {
+	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -900,6 +915,7 @@ func TestCacheAside_GetMulti_CallbackError(t *testing.T) {
 }
 
 func TestCacheAside_Close(t *testing.T) {
+	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -958,6 +974,7 @@ func makeRefreshClient(t *testing.T, addr []string, fraction float64) *redcache.
 }
 
 func TestRefreshAhead_TriggersBackgroundRefresh(t *testing.T) {
+	t.Parallel()
 	// fraction=0.5 means refresh when >50% of TTL elapsed (i.e. <50% remaining).
 	client := makeRefreshClient(t, addr, 0.5)
 	ctx := context.Background()
@@ -1001,6 +1018,7 @@ func TestRefreshAhead_TriggersBackgroundRefresh(t *testing.T) {
 }
 
 func TestRefreshAhead_Dedup(t *testing.T) {
+	t.Parallel()
 	client := makeRefreshClient(t, addr, 0.5)
 	ctx := context.Background()
 
@@ -1056,6 +1074,7 @@ func TestRefreshAhead_Dedup(t *testing.T) {
 }
 
 func TestRefreshAhead_Disabled(t *testing.T) {
+	t.Parallel()
 	// Default (fraction=0) — no refresh-ahead.
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -1089,6 +1108,7 @@ func TestRefreshAhead_Disabled(t *testing.T) {
 }
 
 func TestRefreshAhead_ErrorLogged(t *testing.T) {
+	t.Parallel()
 	client := makeRefreshClient(t, addr, 0.5)
 	ctx := context.Background()
 
@@ -1131,6 +1151,7 @@ func TestRefreshAhead_ErrorLogged(t *testing.T) {
 }
 
 func TestRefreshAhead_PanicRecovered(t *testing.T) {
+	t.Parallel()
 	client := makeRefreshClient(t, addr, 0.5)
 	ctx := context.Background()
 
@@ -1186,6 +1207,7 @@ func TestRefreshAhead_PanicRecovered(t *testing.T) {
 }
 
 func TestRefreshAhead_DoesNotStompLockValue(t *testing.T) {
+	t.Parallel()
 	client := makeRefreshClient(t, addr, 0.5)
 	ctx := context.Background()
 
@@ -1237,6 +1259,7 @@ func TestRefreshAhead_DoesNotStompLockValue(t *testing.T) {
 }
 
 func TestRefreshAhead_GetMulti(t *testing.T) {
+	t.Parallel()
 	client := makeRefreshClient(t, addr, 0.5)
 	ctx := context.Background()
 
@@ -1373,7 +1396,9 @@ func TestRefreshAhead_Backpressure(t *testing.T) {
 }
 
 func TestRefreshAhead_FractionValidation(t *testing.T) {
+	t.Parallel()
 	t.Run("negative fraction", func(t *testing.T) {
+		t.Parallel()
 		_, err := redcache.NewRedCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.CacheAsideOption{RefreshAfterFraction: -0.1},
@@ -1382,6 +1407,7 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 		assert.Contains(t, err.Error(), "RefreshAfterFraction")
 	})
 	t.Run("fraction equals 1", func(t *testing.T) {
+		t.Parallel()
 		_, err := redcache.NewRedCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.CacheAsideOption{RefreshAfterFraction: 1.0},
@@ -1390,6 +1416,7 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 		assert.Contains(t, err.Error(), "RefreshAfterFraction")
 	})
 	t.Run("fraction greater than 1", func(t *testing.T) {
+		t.Parallel()
 		_, err := redcache.NewRedCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.CacheAsideOption{RefreshAfterFraction: 1.5},
@@ -1398,6 +1425,7 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 		assert.Contains(t, err.Error(), "RefreshAfterFraction")
 	})
 	t.Run("valid fraction", func(t *testing.T) {
+		t.Parallel()
 		client, err := redcache.NewRedCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.CacheAsideOption{RefreshAfterFraction: 0.8},
@@ -1407,6 +1435,7 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 		client.Client().Close()
 	})
 	t.Run("negative RefreshWorkers", func(t *testing.T) {
+		t.Parallel()
 		_, err := redcache.NewRedCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.CacheAsideOption{RefreshAfterFraction: 0.8, RefreshWorkers: -1},
@@ -1415,6 +1444,7 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 		assert.Contains(t, err.Error(), "RefreshWorkers")
 	})
 	t.Run("negative RefreshQueueSize", func(t *testing.T) {
+		t.Parallel()
 		_, err := redcache.NewRedCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.CacheAsideOption{RefreshAfterFraction: 0.8, RefreshQueueSize: -1},
@@ -1423,6 +1453,7 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 		assert.Contains(t, err.Error(), "RefreshQueueSize")
 	})
 	t.Run("custom workers and queue", func(t *testing.T) {
+		t.Parallel()
 		client, err := redcache.NewRedCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.CacheAsideOption{RefreshAfterFraction: 0.8, RefreshWorkers: 2, RefreshQueueSize: 16},
@@ -1434,7 +1465,9 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 }
 
 func TestNewRedCacheAside_Validation(t *testing.T) {
+	t.Parallel()
 	t.Run("empty InitAddress", func(t *testing.T) {
+		t.Parallel()
 		_, err := redcache.NewRedCacheAside(
 			rueidis.ClientOption{},
 			redcache.CacheAsideOption{},
@@ -1444,6 +1477,7 @@ func TestNewRedCacheAside_Validation(t *testing.T) {
 	})
 
 	t.Run("negative LockTTL", func(t *testing.T) {
+		t.Parallel()
 		_, err := redcache.NewRedCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.CacheAsideOption{LockTTL: -1 * time.Second},
@@ -1453,6 +1487,7 @@ func TestNewRedCacheAside_Validation(t *testing.T) {
 	})
 
 	t.Run("too small LockTTL", func(t *testing.T) {
+		t.Parallel()
 		_, err := redcache.NewRedCacheAside(
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.CacheAsideOption{LockTTL: 10 * time.Millisecond},
@@ -1465,6 +1500,7 @@ func TestNewRedCacheAside_Validation(t *testing.T) {
 // TestCacheAside_Get_ErrLockLostRetry verifies that when a ForceSet steals the lock
 // during a Get callback, Get retries and eventually sees the ForceSet value.
 func TestCacheAside_Get_ErrLockLostRetry(t *testing.T) {
+	t.Parallel()
 	client, err := redcache.NewPrimeableCacheAside(
 		rueidis.ClientOption{InitAddress: addr},
 		redcache.CacheAsideOption{LockTTL: time.Second * 2},

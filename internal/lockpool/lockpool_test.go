@@ -12,6 +12,7 @@ import (
 )
 
 func TestPool_Generate_Prefix(t *testing.T) {
+	t.Parallel()
 	prefix := "__redcache:lock:"
 	pool, err := lockpool.New(prefix)
 	require.NoError(t, err)
@@ -21,6 +22,7 @@ func TestPool_Generate_Prefix(t *testing.T) {
 }
 
 func TestPool_Generate_Uniqueness(t *testing.T) {
+	t.Parallel()
 	pool, err := lockpool.New("lock:")
 	require.NoError(t, err)
 
@@ -34,6 +36,7 @@ func TestPool_Generate_Uniqueness(t *testing.T) {
 }
 
 func TestPool_Generate_ConcurrentSafety(t *testing.T) {
+	t.Parallel()
 	pool, err := lockpool.New("lock:")
 	require.NoError(t, err)
 

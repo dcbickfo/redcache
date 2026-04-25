@@ -9,6 +9,7 @@ import (
 )
 
 func TestSlot(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		key      string
@@ -97,6 +98,7 @@ func TestSlot(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			result := cmdx.Slot(tt.key)
 			assert.Equalf(t, tt.expected, result, "Slot(%q) = %d, want %d", tt.key, result, tt.expected)
 		})
@@ -104,6 +106,7 @@ func TestSlot(t *testing.T) {
 }
 
 func TestSlot_Consistency(t *testing.T) {
+	t.Parallel()
 	// Test that the same key always produces the same slot
 	key := "test:key:123"
 	slot1 := cmdx.Slot(key)
@@ -112,6 +115,7 @@ func TestSlot_Consistency(t *testing.T) {
 }
 
 func TestSlot_Distribution(t *testing.T) {
+	t.Parallel()
 	// Test that slots are distributed across the valid range
 	keys := []string{
 		"key1", "key2", "key3", "key4", "key5",
@@ -131,6 +135,7 @@ func TestSlot_Distribution(t *testing.T) {
 }
 
 func TestSlot_HashTagCollision(t *testing.T) {
+	t.Parallel()
 	// Keys with the same hash tag should go to the same slot
 	keys := []string{
 		"{user:1000}:profile",
@@ -146,6 +151,7 @@ func TestSlot_HashTagCollision(t *testing.T) {
 }
 
 func TestSlot_BoundaryValues(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		key  string
@@ -158,6 +164,7 @@ func TestSlot_BoundaryValues(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			slot := cmdx.Slot(tt.key)
 			assert.LessOrEqualf(t, slot, uint16(16383), "Slot should be within valid range")
 		})
@@ -165,6 +172,7 @@ func TestSlot_BoundaryValues(t *testing.T) {
 }
 
 func TestGroupBySlot(t *testing.T) {
+	t.Parallel()
 	type item struct {
 		key   string
 		value int
@@ -197,6 +205,7 @@ func TestGroupBySlot(t *testing.T) {
 }
 
 func TestGroupBySlot_Empty(t *testing.T) {
+	t.Parallel()
 	groups := cmdx.GroupBySlot([]string{}, func(s string) string { return s })
 	assert.Empty(t, groups)
 }

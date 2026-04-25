@@ -6,6 +6,7 @@ import (
 )
 
 func TestShouldRefresh(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		refreshAfter float64
@@ -28,6 +29,7 @@ func TestShouldRefresh(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			rca := &CacheAside{refreshAfter: tt.refreshAfter}
 			got := rca.shouldRefresh(tt.cachePTTL, tt.ttl)
 			if got != tt.want {
@@ -39,6 +41,7 @@ func TestShouldRefresh(t *testing.T) {
 }
 
 func TestValidateRefreshDefaults(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		opt         CacheAsideOption
@@ -101,6 +104,7 @@ func TestValidateRefreshDefaults(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			opt := tt.opt
 			err := validateRefreshDefaults(&opt)
 			if (err != nil) != tt.wantErr {
@@ -120,6 +124,7 @@ func TestValidateRefreshDefaults(t *testing.T) {
 }
 
 func TestRefreshKeyFor(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		prefix string
@@ -134,6 +139,7 @@ func TestRefreshKeyFor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			rca := &CacheAside{refreshPrefix: tt.prefix}
 			got := rca.refreshKeyFor(tt.key)
 			if got != tt.want {

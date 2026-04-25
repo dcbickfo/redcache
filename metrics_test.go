@@ -10,6 +10,7 @@ import (
 var _ Metrics = NoopMetrics{}
 
 func TestNoopMetrics_AllMethodsSafe(t *testing.T) {
+	t.Parallel()
 	// All methods must be safe to call and never panic.
 	m := NoopMetrics{}
 	m.CacheHit("x")
@@ -23,6 +24,7 @@ func TestNoopMetrics_AllMethodsSafe(t *testing.T) {
 }
 
 func TestValidateAndApplyDefaults_DefaultsToNoopMetrics(t *testing.T) {
+	t.Parallel()
 	opt := CacheAsideOption{}
 	clientOpt := rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}
 	if err := validateAndApplyDefaults(clientOpt, &opt); err != nil {
@@ -54,5 +56,6 @@ func (c *countingMetrics) RefreshDropped(string)   { c.Dropped++ }
 func (c *countingMetrics) RefreshPanicked(string)  { c.Panics++ }
 
 func TestCountingMetrics_ImplementsInterface(t *testing.T) {
+	t.Parallel()
 	var _ Metrics = &countingMetrics{}
 }
