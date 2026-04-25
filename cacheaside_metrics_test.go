@@ -2,6 +2,7 @@ package redcache_test
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,8 @@ type capturingMetrics struct {
 	redcache.NoopMetrics
 	hits, misses, contended, lost      atomic.Int64
 	triggered, skipped, dropped, panic atomic.Int64
+	mu                                 sync.Mutex
+	panicKeys                          []string
 }
 
 func (m *capturingMetrics) CacheHit(string)         { m.hits.Add(1) }
@@ -26,7 +29,12 @@ func (m *capturingMetrics) LockLost(string)         { m.lost.Add(1) }
 func (m *capturingMetrics) RefreshTriggered(string) { m.triggered.Add(1) }
 func (m *capturingMetrics) RefreshSkipped(string)   { m.skipped.Add(1) }
 func (m *capturingMetrics) RefreshDropped(string)   { m.dropped.Add(1) }
-func (m *capturingMetrics) RefreshPanicked(any)     { m.panic.Add(1) }
+func (m *capturingMetrics) RefreshPanicked(key string) {
+	m.panic.Add(1)
+	m.mu.Lock()
+	m.panicKeys = append(m.panicKeys, key)
+	m.mu.Unlock()
+}
 
 func TestMetrics_HitAndMiss(t *testing.T) {
 	metrics := &capturingMetrics{}
@@ -97,4 +105,49 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return metrics.triggered.Load() >= 1
 	}, 2*time.Second, 5*time.Millisecond, "expected RefreshTriggered to fire")
+}
+
+func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
+	metrics := &capturingMetrics{}
+	client, err := redcache.NewRedCacheAside(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.CacheAsideOption{
+			LockTTL:              time.Second * 2,
+			RefreshAfterFraction: 0.01,
+			Metrics:              metrics,
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		client.Close()
+		client.Client().Close()
+	})
+
+	ctx := context.Background()
+	key := "panic-metrics:" + uuid.New().String()
+	var calls atomic.Int32
+
+	cb := func(_ context.Context, _ string) (string, error) {
+		n := calls.Add(1)
+		if n == 1 {
+			return "initial", nil
+		}
+		panic("simulated panic")
+	}
+
+	_, err = client.Get(ctx, time.Second, key, cb)
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+
+	_, err = client.Get(ctx, time.Second, key, cb)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return metrics.panic.Load() >= 1
+	}, 2*time.Second, 5*time.Millisecond, "expected RefreshPanicked to fire")
+
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	require.Contains(t, metrics.panicKeys, key, "RefreshPanicked should be tagged with the offending key")
 }

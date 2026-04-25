@@ -9,6 +9,13 @@ import (
 	"github.com/redis/rueidis"
 )
 
+// refreshJob is a unit of work for the refresh worker pool. It carries the
+// keys it operates on so panic-recovery can attribute failures to specific keys.
+type refreshJob struct {
+	keys []string
+	fn   func()
+}
+
 // startRefreshWorkers launches n background workers that drain refreshQueue.
 // Each worker exits when the queue is closed (during Close).
 func (rca *CacheAside) startRefreshWorkers(n int) {
@@ -33,14 +40,17 @@ func (rca *CacheAside) refreshKeyFor(key string) string {
 
 // runRefreshJob runs a refresh-ahead job, recovering from any panic so a
 // misbehaving callback cannot kill the worker goroutine and degrade the pool.
-func (rca *CacheAside) runRefreshJob(job func()) {
+// On panic, RefreshPanicked fires once per key the job was operating on.
+func (rca *CacheAside) runRefreshJob(job refreshJob) {
 	defer func() {
 		if r := recover(); r != nil {
-			rca.logger.Error("refresh worker panic recovered", "panic", fmt.Sprintf("%v", r))
-			rca.metrics.RefreshPanicked(r)
+			rca.logger.Error("refresh worker panic recovered", "keys", job.keys, "panic", fmt.Sprintf("%v", r))
+			for _, k := range job.keys {
+				rca.metrics.RefreshPanicked(k)
+			}
 		}
 	}()
-	job()
+	job.fn()
 }
 
 // shouldRefresh reports whether the remaining client-side TTL has fallen below
@@ -69,9 +79,12 @@ func (rca *CacheAside) triggerRefresh(
 		return
 	}
 
-	job := func() {
-		defer rca.refreshing.Delete(key)
-		rca.doSingleRefresh(ctx, ttl, key, fn)
+	job := refreshJob{
+		keys: []string{key},
+		fn: func() {
+			defer rca.refreshing.Delete(key)
+			rca.doSingleRefresh(ctx, ttl, key, fn)
+		},
 	}
 
 	select {
@@ -142,13 +155,16 @@ func (rca *CacheAside) triggerMultiRefresh(
 		return
 	}
 
-	job := func() {
-		defer func() {
-			for _, key := range toRefresh {
-				rca.refreshing.Delete(key)
-			}
-		}()
-		rca.doMultiRefresh(ctx, ttl, toRefresh, fn)
+	job := refreshJob{
+		keys: toRefresh,
+		fn: func() {
+			defer func() {
+				for _, key := range toRefresh {
+					rca.refreshing.Delete(key)
+				}
+			}()
+			rca.doMultiRefresh(ctx, ttl, toRefresh, fn)
+		},
 	}
 
 	select {

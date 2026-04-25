@@ -112,7 +112,7 @@ type CacheAside struct {
 	refreshAfter  float64                     // 0 = disabled
 	refreshing    syncx.Map[string, struct{}] // dedup in-flight refreshes (local)
 	refreshPrefix string                      // prefix for distributed refresh lock keys
-	refreshQueue  chan func()                 // worker pool job queue (nil when disabled)
+	refreshQueue  chan refreshJob             // worker pool job queue (nil when disabled)
 	refreshWg     sync.WaitGroup              // tracks active refresh workers
 }
 
@@ -237,7 +237,7 @@ func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOpti
 	}
 
 	if rca.refreshAfter > 0 {
-		rca.refreshQueue = make(chan func(), caOption.RefreshQueueSize)
+		rca.refreshQueue = make(chan refreshJob, caOption.RefreshQueueSize)
 		rca.startRefreshWorkers(caOption.RefreshWorkers)
 	}
 

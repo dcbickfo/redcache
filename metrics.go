@@ -24,8 +24,10 @@ type Metrics interface {
 	RefreshSkipped(key string)
 	// RefreshDropped fires when a refresh was dropped because the worker queue was full.
 	RefreshDropped(key string)
-	// RefreshPanicked fires when a refresh worker recovered from a panic in the callback.
-	RefreshPanicked(panicValue any)
+	// RefreshPanicked fires once per affected key when a refresh worker
+	// recovered from a panic in the callback. The panic value itself is logged
+	// via the configured logger; the metric carries only the key for tagging.
+	RefreshPanicked(key string)
 }
 
 // NoopMetrics is a Metrics implementation that does nothing. Embed it to opt
@@ -60,4 +62,4 @@ func (NoopMetrics) RefreshSkipped(string) {}
 func (NoopMetrics) RefreshDropped(string) {}
 
 // RefreshPanicked implements Metrics.
-func (NoopMetrics) RefreshPanicked(any) {}
+func (NoopMetrics) RefreshPanicked(string) {}

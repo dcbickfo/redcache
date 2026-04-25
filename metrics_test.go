@@ -51,7 +51,7 @@ func (c *countingMetrics) LockLost(string)         { c.Lost++ }
 func (c *countingMetrics) RefreshTriggered(string) { c.Triggered++ }
 func (c *countingMetrics) RefreshSkipped(string)   { c.Skipped++ }
 func (c *countingMetrics) RefreshDropped(string)   { c.Dropped++ }
-func (c *countingMetrics) RefreshPanicked(any)     { c.Panics++ }
+func (c *countingMetrics) RefreshPanicked(string)  { c.Panics++ }
 
 func TestCountingMetrics_ImplementsInterface(t *testing.T) {
 	var _ Metrics = &countingMetrics{}
