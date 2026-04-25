@@ -16,7 +16,6 @@ output:
       colors: true
       print-issued-lines: true
       print-linter-name: true
-  sort-results: true
 
 linters:
   default: none
@@ -147,7 +146,8 @@ formatters:
     gofmt:
       simplify: true
     goimports:
-      local-prefixes: github.com/dcbickfo/redcache
+      local-prefixes:
+        - github.com/dcbickfo/redcache
     gci:
       sections:
         - standard
@@ -158,7 +158,7 @@ formatters:
       - vendor/
 
 issues:
-  max-per-linter: 50
+  max-issues-per-linter: 50
   max-same-issues: 3
   new: false
   fix: false
