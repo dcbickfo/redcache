@@ -201,11 +201,22 @@ func (pca *PrimeableCacheAside) SetMulti(
 
 // ForceSet unconditionally writes a value to Redis, bypassing all locks.
 // Any in-progress Get or Set on this key will see ErrLockLost and retry.
+//
+// ttl must be > 0 (Redis rejects PX 0). Use Del to remove a key.
+//
+// Prefer Set when you need rollback semantics on callback failure.
 func (pca *PrimeableCacheAside) ForceSet(ctx context.Context, ttl time.Duration, key, value string) error {
 	return pca.client.Do(ctx, pca.client.B().Set().Key(key).Value(value).Px(ttl).Build()).Error()
 }
 
 // ForceSetMulti unconditionally writes multiple values to Redis, bypassing all locks.
+// Any in-progress Get or Set on these keys will see ErrLockLost and retry.
+//
+// ttl must be > 0 (Redis rejects PX 0).
+//
+// On partial failure, ForceSetMulti returns the first error encountered and stops
+// reporting; some writes may have already succeeded. Callers that need per-key
+// status should use SetMulti, which returns a BatchError with per-key results.
 func (pca *PrimeableCacheAside) ForceSetMulti(ctx context.Context, ttl time.Duration, values map[string]string) error {
 	if len(values) == 0 {
 		return nil
