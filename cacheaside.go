@@ -66,11 +66,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/dcbickfo/redcache/internal/cmdx"
 	"github.com/dcbickfo/redcache/internal/mapsx"
@@ -114,6 +114,8 @@ type CacheAside struct {
 	refreshPrefix string                      // prefix for distributed refresh lock keys
 	refreshQueue  chan refreshJob             // worker pool job queue (nil when disabled)
 	refreshWg     sync.WaitGroup              // tracks active refresh workers
+	closing       atomic.Bool                 // set true at the start of Close to gate refresh sends
+	closeOnce     sync.Once                   // guards Close() against double invocation
 }
 
 // CacheAsideOption configures a CacheAside instance.
@@ -254,16 +256,19 @@ func (rca *CacheAside) Client() rueidis.Client {
 // Close cancels all pending lock entries and shuts down refresh workers.
 // It does NOT close the underlying Redis client — that is the caller's responsibility.
 // If refresh-ahead is enabled, Close waits for in-flight refresh jobs to complete
-// (bounded by LockTTL).
+// (bounded by LockTTL). Safe to call multiple times.
 func (rca *CacheAside) Close() {
-	rca.locks.Range(func(_ string, entry *lockEntry) bool {
-		entry.cancel()
-		return true
+	rca.closeOnce.Do(func() {
+		rca.closing.Store(true)
+		rca.locks.Range(func(_ string, entry *lockEntry) bool {
+			entry.cancel()
+			return true
+		})
+		if rca.refreshQueue != nil {
+			close(rca.refreshQueue)
+			rca.refreshWg.Wait()
+		}
 	})
-	if rca.refreshQueue != nil {
-		close(rca.refreshQueue)
-		rca.refreshWg.Wait()
-	}
 }
 
 // cleanupCtx returns a context derived from ctx that strips cancellation/deadline
@@ -278,6 +283,7 @@ func (rca *CacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 		key, err := m.ToString()
 		if err != nil {
 			rca.logger.Error("failed to parse invalidation message", "error", err)
+			rca.metrics.InvalidationError()
 			continue
 		}
 		entry, loaded := rca.locks.LoadAndDelete(key)
@@ -338,6 +344,9 @@ retry:
 // Get returns the cached value for key, populating the cache by calling fn on a miss.
 // Only one goroutine across all instances executes fn for a given key at a time;
 // other callers wait for the result via Redis invalidation messages.
+//
+// Empty-string values are valid: an empty value present in Redis is returned as
+// a cache hit, not treated as a miss.
 func (rca *CacheAside) Get(
 	ctx context.Context,
 	ttl time.Duration,
@@ -348,42 +357,38 @@ retry:
 	wait := rca.register(key)
 	res, err := rca.tryGet(ctx, ttl, key)
 
-	if err != nil && !errors.Is(err, errNotFound) {
-		return "", err
-	}
-
-	if err == nil && res.val != "" {
+	if err == nil {
+		// Cache hit. Empty values are valid hits; tryGet returns errNotFound
+		// for actually-missing or lock-prefixed entries.
 		rca.metrics.CacheHit(key)
 		if rca.shouldRefresh(res.pttl, ttl) {
 			rca.triggerRefresh(ctx, ttl, key, fn)
 		}
 		return res.val, nil
 	}
-
-	val := res.val
-	if val == "" {
-		rca.metrics.CacheMiss(key)
-		val, err = rca.trySetKeyFunc(ctx, ttl, key, fn)
-	}
-
-	if err != nil && !errors.Is(err, errLockFailed) && !errors.Is(err, ErrLockLost) {
+	if !errors.Is(err, errNotFound) {
 		return "", err
 	}
 
-	if val == "" || errors.Is(err, ErrLockLost) {
-		// Wait for lock release (channel auto-closes after lockTTL or on invalidation).
-		// ErrLockLost means another operation (e.g., ForceSet) stole our lock — retry.
+	rca.metrics.CacheMiss(key)
+	val, err := rca.trySetKeyFunc(ctx, ttl, key, fn)
+	if err == nil {
+		return val, nil
+	}
+
+	if errors.Is(err, errLockFailed) || errors.Is(err, ErrLockLost) {
+		// errLockFailed: another caller holds the lock — wait then retry.
+		// ErrLockLost: a ForceSet (or similar) stole our lock — retry to read it.
 		rca.metrics.LockContended(key)
 		select {
 		case <-wait:
 			goto retry
 		case <-ctx.Done():
-			// Parent context cancelled.
 			return "", ctx.Err()
 		}
 	}
 
-	return val, err
+	return "", err
 }
 
 // Del removes a key from Redis, triggering invalidation on all clients.
@@ -479,12 +484,20 @@ func (rca *CacheAside) tryLock(ctx context.Context, key string) (string, error) 
 	}
 	lockVal := rca.lockPrefix + uuidv7.String()
 	err = rca.client.Do(ctx, rca.client.B().Set().Key(key).Value(lockVal).Nx().Get().Px(rca.lockTTL).Build()).Error()
-	if !rueidis.IsRedisNil(err) {
+	// SET NX GET reply semantics:
+	//   IsRedisNil: NX fired, lock acquired (no prior value).
+	//   nil error:  key existed; NX rejected. Lock not acquired.
+	//   other err:  real Redis error — propagate so the caller can fail fast
+	//               instead of waiting on a contention channel that will never close.
+	if rueidis.IsRedisNil(err) {
+		rca.logger.Debug("lock acquired", "key", key, "lockVal", lockVal)
+		return lockVal, nil
+	}
+	if err == nil {
 		rca.logger.Debug("lock contention - failed to acquire lock", "key", key)
 		return "", fmt.Errorf("lock key %q: %w", key, errLockFailed)
 	}
-	rca.logger.Debug("lock acquired", "key", key, "lockVal", lockVal)
-	return lockVal, nil
+	return "", fmt.Errorf("lock key %q: %w", key, err)
 }
 
 func (rca *CacheAside) setWithLock(ctx context.Context, ttl time.Duration, key string, valLock valAndLock) (string, error) {
@@ -732,40 +745,67 @@ func groupBySlot(keyValLock map[string]valAndLock, ttl time.Duration) map[uint16
 	return stmts
 }
 
-// executeSetStatements executes Lua set statements in parallel, grouped by slot.
-func (rca *CacheAside) executeSetStatements(ctx context.Context, stmts map[uint16]keyOrderAndSet) ([]string, error) {
-	keyByStmt := make([][]string, len(stmts))
-	i := 0
-	eg, ctx := errgroup.WithContext(ctx)
+type slotSetResult struct {
+	keys []string
+	err  error
+}
 
-	for _, kos := range stmts {
-		ii := i
-		eg.Go(func() error {
-			setResps := setKeyLua.ExecMulti(ctx, rca.client, kos.setStmts...)
-			for j, resp := range setResps {
-				err := resp.Error()
-				if err != nil {
-					if !rueidis.IsRedisNil(err) {
-						return fmt.Errorf("set key %q: %w", kos.keyOrder[j], err)
-					}
-					continue
-				}
-				keyByStmt[ii] = append(keyByStmt[ii], kos.keyOrder[j])
+// runSlotSet executes the Lua statements for one slot and reports its result.
+// All responses are inspected even if one is a non-Redis-nil error, so successes
+// in the same batch are not lost when reporting an error.
+func (rca *CacheAside) runSlotSet(ctx context.Context, kos keyOrderAndSet) slotSetResult {
+	var keys []string
+	var firstErr error
+	setResps := setKeyLua.ExecMulti(ctx, rca.client, kos.setStmts...)
+	for j, resp := range setResps {
+		err := resp.Error()
+		if err != nil {
+			if !rueidis.IsRedisNil(err) && firstErr == nil {
+				firstErr = fmt.Errorf("set key %q: %w", kos.keyOrder[j], err)
 			}
-			return nil
-		})
-		i++
+			continue
+		}
+		keys = append(keys, kos.keyOrder[j])
+	}
+	return slotSetResult{keys: keys, err: firstErr}
+}
+
+// executeSetStatements executes Lua set statements in parallel, grouped by slot.
+//
+// All slot goroutines run to completion (no errgroup-style mid-batch cancel),
+// so a real Redis error in one slot cannot mask successful writes in another.
+// On error, the function returns the first non-redis-nil error encountered and
+// logs the keys that were successfully written so operators can reconcile
+// partial state.
+func (rca *CacheAside) executeSetStatements(ctx context.Context, stmts map[uint16]keyOrderAndSet) ([]string, error) {
+	results := make(chan slotSetResult, len(stmts))
+	var wg sync.WaitGroup
+	for _, kos := range stmts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- rca.runSlotSet(ctx, kos)
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	var succeeded []string
+	var firstErr error
+	for sr := range results {
+		succeeded = append(succeeded, sr.keys...)
+		if sr.err != nil && firstErr == nil {
+			firstErr = sr.err
+		}
 	}
 
-	if err := eg.Wait(); err != nil {
-		return nil, err
+	if firstErr != nil {
+		if len(succeeded) > 0 {
+			rca.logger.Error("setMulti partial completion before error", "completedKeys", succeeded, "error", firstErr)
+		}
+		return nil, firstErr
 	}
-
-	var out []string
-	for _, keys := range keyByStmt {
-		out = append(out, keys...)
-	}
-	return out, nil
+	return succeeded, nil
 }
 
 func (rca *CacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, keyValLock map[string]valAndLock) ([]string, error) {
@@ -777,24 +817,35 @@ func (rca *CacheAside) unlockMulti(ctx context.Context, lockVals map[string]stri
 	if len(lockVals) == 0 {
 		return
 	}
-	delStmts := make(map[uint16][]rueidis.LuaExec)
+	type keyedExec struct {
+		key  string
+		exec rueidis.LuaExec
+	}
+	delStmts := make(map[uint16][]keyedExec)
 	for key, lockVal := range lockVals {
 		slot := cmdx.Slot(key)
-		delStmts[slot] = append(delStmts[slot], rueidis.LuaExec{
-			Keys: []string{key},
-			Args: []string{lockVal},
+		delStmts[slot] = append(delStmts[slot], keyedExec{
+			key: key,
+			exec: rueidis.LuaExec{
+				Keys: []string{key},
+				Args: []string{lockVal},
+			},
 		})
 	}
 	var wg sync.WaitGroup
-	for _, stmts := range delStmts {
+	for slot, stmts := range delStmts {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Best effort unlock - errors are non-fatal as locks will expire
-			resps := delKeyLua.ExecMulti(ctx, rca.client, stmts...)
-			for _, resp := range resps {
+			execs := make([]rueidis.LuaExec, len(stmts))
+			for i, s := range stmts {
+				execs[i] = s.exec
+			}
+			// Best effort unlock - errors are non-fatal as locks will expire.
+			resps := delKeyLua.ExecMulti(ctx, rca.client, execs...)
+			for i, resp := range resps {
 				if err := resp.Error(); err != nil {
-					rca.logger.Error("failed to unlock key in batch", "error", err)
+					rca.logger.Error("failed to unlock key in batch", "key", stmts[i].key, "slot", slot, "error", err)
 				}
 			}
 		}()
