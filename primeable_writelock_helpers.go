@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,23 +14,40 @@ import (
 	"github.com/dcbickfo/redcache/internal/cmdx"
 )
 
+// savedValue captures the previous value of a key for rollback after a Set
+// callback failure. The pttl is preserved so a restored value retains its
+// original TTL rather than becoming persistent.
+type savedValue struct {
+	val     string
+	pttl    int64 // -1 = persistent, positive = ms remaining
+	present bool  // distinguishes "no prior value" from "prior value was empty"
+}
+
 // tryAcquireWriteLock attempts to acquire a write lock on a single key, returning the
-// previous value for rollback. Returns (acquired, savedValue, error).
-func (pca *PrimeableCacheAside) tryAcquireWriteLock(ctx context.Context, key, lockVal, lockTTLMs string) (bool, string, error) {
+// previous value (with its PTTL) for rollback. Returns (acquired, saved, error).
+func (pca *PrimeableCacheAside) tryAcquireWriteLock(ctx context.Context, key, lockVal, lockTTLMs string) (bool, savedValue, error) {
 	resp := acquireWriteLockWithBackupScript.Exec(ctx, pca.client, []string{key}, []string{lockVal, lockTTLMs, pca.lockPrefix})
 	arr, err := resp.ToArray()
 	if err != nil {
-		return false, "", fmt.Errorf("write lock for key %q: %w", key, err)
+		return false, savedValue{}, fmt.Errorf("write lock for key %q: %w", key, err)
 	}
-	success, _ := arr[0].AsInt64()
+	success, ierr := arr[0].AsInt64()
+	if ierr != nil {
+		pca.logger.Error("unexpected non-integer in lock-acquire response", "key", key, "error", ierr)
+		return false, savedValue{}, nil
+	}
 	if success == 0 {
-		return false, "", nil
+		return false, savedValue{}, nil
 	}
-	var savedValue string
+	saved := savedValue{}
 	if backupVal, bErr := arr[1].ToString(); bErr == nil {
-		savedValue = backupVal
+		saved.val = backupVal
+		saved.present = true
+		if pttl, pErr := arr[2].AsInt64(); pErr == nil {
+			saved.pttl = pttl
+		}
 	}
-	return true, savedValue, nil
+	return true, saved, nil
 }
 
 // acquireMultiWriteLocks acquires write locks on all keys in sorted order with rollback.
@@ -37,13 +55,13 @@ func (pca *PrimeableCacheAside) tryAcquireWriteLock(ctx context.Context, key, lo
 func (pca *PrimeableCacheAside) acquireMultiWriteLocks(
 	ctx context.Context,
 	keys []string,
-) (lockValues map[string]string, savedValues map[string]string, err error) {
+) (lockValues map[string]string, savedValues map[string]savedValue, err error) {
 	sorted := make([]string, len(keys))
 	copy(sorted, keys)
 	sort.Strings(sorted)
 
 	lockValues = make(map[string]string, len(sorted))
-	savedValues = make(map[string]string, len(sorted))
+	savedValues = make(map[string]savedValue, len(sorted))
 	remaining := sorted
 
 	for len(remaining) > 0 {
@@ -73,7 +91,7 @@ func (pca *PrimeableCacheAside) tryAcquireRemaining(
 	ctx context.Context,
 	remaining []string,
 	lockValues map[string]string,
-	savedValues map[string]string,
+	savedValues map[string]savedValue,
 ) (firstFailed string, err error) {
 	lockTTLMs := strconv.FormatInt(pca.lockTTL.Milliseconds(), 10)
 	batchLocks := make(map[string]string, len(remaining))
@@ -104,14 +122,22 @@ func (pca *PrimeableCacheAside) tryAcquireRemaining(
 }
 
 // waitForFailedKey registers, subscribes, and waits for a failed key's lock to release.
+//
+// The DoCache response is inspected: if the key already shows a non-lock value
+// (or is absent), the lock is gone and the caller can retry immediately rather
+// than blocking on a wait channel for a missed invalidation that already fired.
 func (pca *PrimeableCacheAside) waitForFailedKey(
 	ctx context.Context,
 	firstFailed string,
 	lockValues map[string]string,
-	savedValues map[string]string,
+	savedValues map[string]savedValue,
 ) error {
 	waitChan := pca.register(firstFailed)
-	pca.client.DoCache(ctx, pca.client.B().Get().Key(firstFailed).Cache(), pca.lockTTL)
+	resp := pca.client.DoCache(ctx, pca.client.B().Get().Key(firstFailed).Cache(), pca.lockTTL)
+	val, rerr := resp.ToString()
+	if rueidis.IsRedisNil(rerr) || (rerr == nil && !strings.HasPrefix(val, pca.lockPrefix)) {
+		return nil
+	}
 
 	select {
 	case <-waitChan:
@@ -145,9 +171,9 @@ func (pca *PrimeableCacheAside) batchAcquireWithBackup(
 	keys []string,
 	batchLocks map[string]string,
 	lockTTLMs string,
-) (acquired map[string]string, backups map[string]string, firstFailed string, err error) {
+) (acquired map[string]string, backups map[string]savedValue, firstFailed string, err error) {
 	acquired = make(map[string]string, len(keys))
-	backups = make(map[string]string)
+	backups = make(map[string]savedValue)
 
 	entries := make([]lockAcquireEntry, 0, len(keys))
 	for _, key := range keys {
@@ -177,7 +203,7 @@ func (pca *PrimeableCacheAside) execSlotAcquire(
 	group []lockAcquireEntry,
 	lockTTLMs string,
 	acquired map[string]string,
-	backups map[string]string,
+	backups map[string]savedValue,
 ) error {
 	stmts := make([]rueidis.LuaExec, len(group))
 	for i, entry := range group {
@@ -196,16 +222,36 @@ func (pca *PrimeableCacheAside) execSlotAcquire(
 			}
 			return fmt.Errorf("lock key %q: %w", group[i].key, err)
 		}
-		success, _ := arr[0].AsInt64()
-		if success != 1 {
-			continue
-		}
-		acquired[group[i].key] = group[i].lockVal
-		if backupVal, bErr := arr[1].ToString(); bErr == nil && backupVal != "" {
-			backups[group[i].key] = backupVal
-		}
+		pca.recordSlotAcquireResult(group[i], arr, acquired, backups)
 	}
 	return nil
+}
+
+// recordSlotAcquireResult parses one acquire response and updates acquired/backups.
+func (pca *PrimeableCacheAside) recordSlotAcquireResult(
+	entry lockAcquireEntry,
+	arr []rueidis.RedisMessage,
+	acquired map[string]string,
+	backups map[string]savedValue,
+) {
+	success, ierr := arr[0].AsInt64()
+	if ierr != nil {
+		pca.logger.Error("unexpected non-integer in lock-acquire response", "key", entry.key, "error", ierr)
+		return
+	}
+	if success != 1 {
+		return
+	}
+	acquired[entry.key] = entry.lockVal
+	backupVal, bErr := arr[1].ToString()
+	if bErr != nil {
+		return
+	}
+	saved := savedValue{val: backupVal, present: true}
+	if pttl, pErr := arr[2].AsInt64(); pErr == nil {
+		saved.pttl = pttl
+	}
+	backups[entry.key] = saved
 }
 
 // rollbackAfterFirstFailure releases locks acquired AFTER the first failed key
@@ -215,7 +261,7 @@ func (pca *PrimeableCacheAside) rollbackAfterFirstFailure(
 	sorted []string,
 	firstFailed string,
 	lockValues map[string]string,
-	savedValues map[string]string,
+	savedValues map[string]savedValue,
 	justAcquired map[string]string,
 ) {
 	pastFailure := false
@@ -241,15 +287,25 @@ func (pca *PrimeableCacheAside) rollbackAfterFirstFailure(
 }
 
 // touchMultiLocks refreshes TTL on held locks using CAS PEXPIRE.
-// Removes any locks that were lost (stolen by another operation).
+//
+// When a lock is lost (CAS returned 0), the entry is left in lockValues so the
+// eventual CAS-set returns ErrLockLost for that key — preserving the stealer's
+// value rather than letting a re-acquire overwrite it. Lost-lock keys still
+// emit metrics.LockLost so operators see the contention.
+//
+// Real Redis errors (network/timeout) are logged but the entry is also retained
+// so the eventual CAS-set surfaces the failure to the caller via BatchError.
 func (pca *PrimeableCacheAside) touchMultiLocks(ctx context.Context, lockValues map[string]string) {
 	lockTTLMs := strconv.FormatInt(pca.lockTTL.Milliseconds(), 10)
 	for key, lockVal := range lockValues {
 		result, err := refreshLockScript.Exec(ctx, pca.client, []string{key}, []string{lockVal, lockTTLMs}).AsInt64()
-		if err != nil || result == 0 {
-			// Lock was lost — remove from our set.
-			pca.logger.Debug("lock refresh failed, removing from held locks", "key", key)
-			delete(lockValues, key)
+		if err != nil {
+			pca.logger.Error("lock refresh script error", "key", key, "error", err)
+			continue
+		}
+		if result == 0 {
+			pca.logger.Debug("lock lost during refresh", "key", key)
+			pca.metrics.LockLost(key)
 		}
 	}
 }
@@ -330,7 +386,12 @@ func (pca *PrimeableCacheAside) collectCASResults(
 			failed[key] = fmt.Errorf("CAS set key %q: %w", key, err)
 			continue
 		}
-		val, _ := resp.AsInt64()
+		val, ierr := resp.AsInt64()
+		if ierr != nil {
+			pca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
+			failed[key] = fmt.Errorf("CAS set key %q: %w", key, ierr)
+			continue
+		}
 		if val == 0 {
 			failed[key] = ErrLockLost
 			pca.metrics.LockLost(key)
@@ -341,19 +402,25 @@ func (pca *PrimeableCacheAside) collectCASResults(
 }
 
 // restoreMultiValues restores saved values or deletes keys for all held locks.
-func (pca *PrimeableCacheAside) restoreMultiValues(ctx context.Context, lockValues, savedValues map[string]string) {
+func (pca *PrimeableCacheAside) restoreMultiValues(ctx context.Context, lockValues map[string]string, savedValues map[string]savedValue) {
 	toCtx, cancel := pca.cleanupCtx(ctx)
 	defer cancel()
 
 	for key, lockVal := range lockValues {
-		saved := savedValues[key]
-		pca.restoreValue(toCtx, key, lockVal, saved)
+		pca.restoreValue(toCtx, key, lockVal, savedValues[key])
 	}
 }
 
-// restoreValue restores a single key's previous value or deletes it.
-func (pca *PrimeableCacheAside) restoreValue(ctx context.Context, key, lockVal, savedValue string) {
-	err := restoreValueOrDeleteScript.Exec(ctx, pca.client, []string{key}, []string{lockVal, savedValue}).Error()
+// restoreValue restores a single key's previous value (with original TTL) or
+// deletes the key if no prior value was saved. Empty saved values are preserved
+// when saved.present is true; "absent" is signaled by saved.present == false.
+func (pca *PrimeableCacheAside) restoreValue(ctx context.Context, key, lockVal string, saved savedValue) {
+	hadSaved := "0"
+	if saved.present {
+		hadSaved = "1"
+	}
+	pttlStr := strconv.FormatInt(saved.pttl, 10)
+	err := restoreValueOrDeleteScript.Exec(ctx, pca.client, []string{key}, []string{lockVal, hadSaved, saved.val, pttlStr}).Error()
 	if err != nil {
 		pca.logger.Error("failed to restore value", "key", key, "error", err)
 	}

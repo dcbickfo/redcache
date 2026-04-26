@@ -26,9 +26,10 @@ func newHelperPCA(t *testing.T) *PrimeableCacheAside {
 	return pca
 }
 
-// touchMultiLocks should delete entries from lockValues when the script reports
-// the lock is no longer held (returns 0).
-func TestTouchMultiLocks_RemovesLostLocks(t *testing.T) {
+// touchMultiLocks must NOT remove lost-lock entries from lockValues. The
+// stale entry stays so the eventual CAS-set surfaces ErrLockLost — preserving
+// the stealer's value rather than letting a re-acquire overwrite it.
+func TestTouchMultiLocks_RetainsLostLocksForCASFailure(t *testing.T) {
 	t.Parallel()
 	pca := newHelperPCA(t)
 
@@ -51,7 +52,7 @@ func TestTouchMultiLocks_RemovesLostLocks(t *testing.T) {
 	pca.touchMultiLocks(ctx, lockValues)
 
 	require.Contains(t, lockValues, heldKey, "real lock should be retained")
-	require.NotContains(t, lockValues, lostKey, "lost lock should be removed")
+	require.Contains(t, lockValues, lostKey, "lost lock retained so CAS-set surfaces ErrLockLost")
 }
 
 // restoreValue logs (but does not propagate) an error when the underlying script
@@ -63,7 +64,7 @@ func TestRestoreValue_LogsErrorOnClientFailure(t *testing.T) {
 	pca.Client().Close() // force subsequent Lua exec to fail
 
 	// Should return without panicking even though the script call errors.
-	pca.restoreValue(context.Background(), "restore:"+uuid.New().String(), "lock", "saved")
+	pca.restoreValue(context.Background(), "restore:"+uuid.New().String(), "lock", savedValue{val: "saved", present: true})
 }
 
 // bestEffortUnlock should swallow errors from the unlock script.
@@ -94,6 +95,6 @@ func TestWaitForFailedKey_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err = waiter.waitForFailedKey(ctx, key, map[string]string{}, map[string]string{})
+	err = waiter.waitForFailedKey(ctx, key, map[string]string{}, map[string]savedValue{})
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
