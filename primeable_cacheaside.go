@@ -68,7 +68,7 @@ func (pca *PrimeableCacheAside) Set(
 	lockTTLMs := strconv.FormatInt(pca.lockTTL.Milliseconds(), 10)
 
 	for {
-		savedValue, retry, err := pca.acquireSingleWriteLock(ctx, key, lockVal, lockTTLMs)
+		saved, retry, err := pca.acquireSingleWriteLock(ctx, key, lockVal, lockTTLMs)
 		if err != nil {
 			return err
 		}
@@ -79,7 +79,11 @@ func (pca *PrimeableCacheAside) Set(
 		// Lock acquired — execute callback.
 		newVal, err := fn(ctx, key)
 		if err != nil {
-			pca.restoreValue(ctx, key, lockVal, savedValue)
+			// Use cleanupCtx so a cancelled request still rolls back the lock,
+			// rather than letting it linger until the lockTTL expires.
+			cleanupCtx, cancel := pca.cleanupCtx(ctx)
+			pca.restoreValue(cleanupCtx, key, lockVal, saved)
+			cancel()
 			return err
 		}
 
@@ -98,39 +102,39 @@ func (pca *PrimeableCacheAside) Set(
 
 // acquireSingleWriteLock subscribes to the key, waits for any existing lock
 // holder, and tries to acquire a write lock. Returns:
-//   - savedValue: previous real value (for callback-error rollback), if any
+//   - saved: previous real value with TTL (for callback-error rollback), if any
 //   - retry: true when the caller should loop and try again
 //   - err: terminal error (context cancellation or Redis failure)
 func (pca *PrimeableCacheAside) acquireSingleWriteLock(
 	ctx context.Context,
 	key, lockVal, lockTTLMs string,
-) (savedValue string, retry bool, err error) {
+) (saved savedValue, retry bool, err error) {
 	waitChan := pca.register(key)
 
 	// Subscribe + read current value.
 	resp := pca.client.DoCache(ctx, pca.client.B().Get().Key(key).Cache(), pca.lockTTL)
 	val, rerr := resp.ToString()
 	if rerr != nil && !rueidis.IsRedisNil(rerr) {
-		return "", false, fmt.Errorf("read key %q: %w", key, rerr)
+		return savedValue{}, false, fmt.Errorf("read key %q: %w", key, rerr)
 	}
 
 	// If current value is a lock, wait for it to be released.
 	if !rueidis.IsRedisNil(rerr) && strings.HasPrefix(val, pca.lockPrefix) {
 		pca.metrics.LockContended(key)
-		return "", true, waitOrCancel(ctx, waitChan)
+		return savedValue{}, true, waitOrCancel(ctx, waitChan)
 	}
 
 	// Try to acquire write lock, capturing the previous value for rollback.
-	acquired, savedValue, err := pca.tryAcquireWriteLock(ctx, key, lockVal, lockTTLMs)
+	acquired, saved, err := pca.tryAcquireWriteLock(ctx, key, lockVal, lockTTLMs)
 	if err != nil {
-		return "", false, err
+		return savedValue{}, false, err
 	}
 	if !acquired {
 		// Another lock appeared between DoCache and Exec.
 		pca.metrics.LockContended(key)
-		return "", true, waitOrCancel(ctx, waitChan)
+		return savedValue{}, true, waitOrCancel(ctx, waitChan)
 	}
-	return savedValue, false, nil
+	return saved, false, nil
 }
 
 // waitOrCancel blocks until the wait channel closes or ctx is done. Returns
@@ -214,24 +218,31 @@ func (pca *PrimeableCacheAside) ForceSet(ctx context.Context, ttl time.Duration,
 //
 // ttl must be > 0 (Redis rejects PX 0).
 //
-// On partial failure, ForceSetMulti returns the first error encountered and stops
-// reporting; some writes may have already succeeded. Callers that need per-key
-// status should use SetMulti, which returns a BatchError with per-key results.
+// All commands are issued; on partial failure each per-key error is logged and
+// the first error encountered is returned. Some writes may have succeeded.
+// Callers that need structured per-key status should use SetMulti, which returns
+// a BatchError with per-key results.
 func (pca *PrimeableCacheAside) ForceSetMulti(ctx context.Context, ttl time.Duration, values map[string]string) error {
 	if len(values) == 0 {
 		return nil
 	}
 	cmds := make(rueidis.Commands, 0, len(values))
+	keyOrder := make([]string, 0, len(values))
 	for key, val := range values {
+		keyOrder = append(keyOrder, key)
 		cmds = append(cmds, pca.client.B().Set().Key(key).Value(val).Px(ttl).Build())
 	}
 	resps := pca.client.DoMulti(ctx, cmds...)
-	for _, resp := range resps {
+	var firstErr error
+	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
-			return err
+			pca.logger.Error("ForceSetMulti key failed", "key", keyOrder[i], "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
-	return nil
+	return firstErr
 }
 
 // waitForReadLocks registers all keys, batch-reads them, and waits for any that
