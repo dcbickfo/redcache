@@ -28,6 +28,13 @@ type Metrics interface {
 	// recovered from a panic in the callback. The panic value itself is logged
 	// via the configured logger; the metric carries only the key for tagging.
 	RefreshPanicked(key string)
+	// RefreshError fires when a refresh-ahead operation failed due to a Redis
+	// error (network, timeout, command failure) rather than expected dedup
+	// contention. Distinct from RefreshSkipped, which signals healthy contention.
+	RefreshError(key string)
+	// InvalidationError fires when a Redis invalidation message could not be
+	// parsed. The key is unknown in this case, so no key is reported.
+	InvalidationError()
 }
 
 // NoopMetrics is a Metrics implementation that does nothing. Embed it to opt
@@ -63,3 +70,9 @@ func (NoopMetrics) RefreshDropped(string) {}
 
 // RefreshPanicked implements Metrics.
 func (NoopMetrics) RefreshPanicked(string) {}
+
+// RefreshError implements Metrics.
+func (NoopMetrics) RefreshError(string) {}
+
+// InvalidationError implements Metrics.
+func (NoopMetrics) InvalidationError() {}

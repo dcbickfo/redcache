@@ -21,6 +21,8 @@ func TestNoopMetrics_AllMethodsSafe(t *testing.T) {
 	m.RefreshSkipped("x")
 	m.RefreshDropped("x")
 	m.RefreshPanicked("x")
+	m.RefreshError("x")
+	m.InvalidationError()
 }
 
 func TestValidateAndApplyDefaults_DefaultsToNoopMetrics(t *testing.T) {
@@ -44,6 +46,8 @@ type countingMetrics struct {
 	Hits, Misses, Contended, Lost int
 	Triggered, Skipped, Dropped   int
 	Panics                        int
+	RefreshErrors                 int
+	InvalidationErrors            int
 }
 
 func (c *countingMetrics) CacheHit(string)         { c.Hits++ }
@@ -54,6 +58,8 @@ func (c *countingMetrics) RefreshTriggered(string) { c.Triggered++ }
 func (c *countingMetrics) RefreshSkipped(string)   { c.Skipped++ }
 func (c *countingMetrics) RefreshDropped(string)   { c.Dropped++ }
 func (c *countingMetrics) RefreshPanicked(string)  { c.Panics++ }
+func (c *countingMetrics) RefreshError(string)     { c.RefreshErrors++ }
+func (c *countingMetrics) InvalidationError()      { c.InvalidationErrors++ }
 
 func TestCountingMetrics_ImplementsInterface(t *testing.T) {
 	t.Parallel()
