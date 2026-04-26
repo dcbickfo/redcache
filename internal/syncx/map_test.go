@@ -142,3 +142,34 @@ func TestMap_Swap(t *testing.T) {
 	loadedValue, _ := sm.Load(key)
 	assert.Equalf(t, newValue, loadedValue, "expected key %s value to be %d, got %d", key, newValue, loadedValue)
 }
+
+// Cover the nil-value branches in LoadAndDelete, LoadOrStore, and Swap.
+// sync.Map returns (nil, false) for absent keys; the wrappers must convert that
+// to the typed zero value rather than panic on a nil type assertion.
+
+func TestMap_LoadAndDelete_AbsentKey(t *testing.T) {
+	t.Parallel()
+	var sm syncx.Map[string, int]
+	val, loaded := sm.LoadAndDelete("missing")
+	assert.False(t, loaded, "expected loaded=false for absent key")
+	assert.Equal(t, 0, val, "expected zero value for absent key")
+}
+
+func TestMap_LoadOrStore_AbsentKey(t *testing.T) {
+	t.Parallel()
+	// Use V=any and store an untyped nil so LoadOrStore reads it back as a true
+	// nil interface, exercising the val==nil branch.
+	var sm syncx.Map[string, any]
+	sm.Store("k", nil)
+	val, loaded := sm.LoadOrStore("k", "fallback")
+	assert.True(t, loaded, "expected loaded=true (key was stored)")
+	assert.Nil(t, val, "expected nil for stored untyped nil")
+}
+
+func TestMap_Swap_AbsentKey(t *testing.T) {
+	t.Parallel()
+	var sm syncx.Map[string, int]
+	prev, loaded := sm.Swap("missing", 7)
+	assert.False(t, loaded, "expected loaded=false for absent key")
+	assert.Equal(t, 0, prev, "expected zero previous for absent key")
+}
