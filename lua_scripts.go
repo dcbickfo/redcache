@@ -13,10 +13,14 @@ var (
 // Lua scripts for PrimeableCacheAside write-lock operations.
 var (
 	// acquireWriteLockWithBackupScript atomically acquires a write lock and
-	// returns the previous value for rollback. Unlike SET NX (used by Get),
-	// this allows overwriting real values but refuses to overwrite an existing
-	// lock, preventing Set from stomping on an active Get operation's lock.
-	// Returns: [success (0 or 1), previous_value or false].
+	// returns the previous value plus its PTTL for rollback. Unlike SET NX
+	// (used by Get), this allows overwriting real values but refuses to
+	// overwrite an existing lock, preventing Set from stomping on an active
+	// Get operation's lock.
+	//
+	// Returns: [success (0 or 1), previous_value or false, previous_pttl].
+	// previous_pttl is -1 (persistent), positive (ms remaining), or 0 when
+	// previous_value is false.
 	acquireWriteLockWithBackupScript = rueidis.NewLuaScript(`
 		local key = KEYS[1]
 		local lock_value = ARGV[1]
@@ -27,34 +31,46 @@ var (
 
 		if current == false then
 			redis.call("SET", key, lock_value, "PX", ttl)
-			return {1, false}
+			return {1, false, 0}
 		end
 
 		if string.sub(current, 1, string.len(lock_prefix)) == lock_prefix then
-			return {0, current}
+			return {0, current, 0}
 		end
 
+		local pttl = redis.call("PTTL", key)
 		redis.call("SET", key, lock_value, "PX", ttl)
-		return {1, current}
+		return {1, current, pttl}
 	`)
 
 	// restoreValueOrDeleteScript CAS-restores a saved value or deletes the key.
-	// Used during SetMulti rollback. Only acts if we still hold our lock.
+	// Used during Set/SetMulti rollback. Only acts if we still hold our lock.
+	//
+	// ARGV: lock, had_saved ("0" or "1"), restore_value, restore_pttl.
+	// had_saved distinguishes "no prior value" (DEL) from "prior value was
+	// empty string" (SET with empty). restore_pttl preserves the original TTL:
+	// "0" or negative means persistent (SET without PX); positive means
+	// SET PX <ms>.
 	restoreValueOrDeleteScript = rueidis.NewLuaScript(`
 		local key = KEYS[1]
 		local expected_lock = ARGV[1]
-		local restore_value = ARGV[2]
+		local had_saved = ARGV[2]
+		local restore_value = ARGV[3]
+		local restore_pttl = tonumber(ARGV[4]) or 0
 
-		if redis.call("GET", key) == expected_lock then
-			if restore_value and restore_value ~= "" then
-				redis.call("SET", key, restore_value)
-			else
-				redis.call("DEL", key)
-			end
-			return 1
-		else
+		if redis.call("GET", key) ~= expected_lock then
 			return 0
 		end
+		if had_saved == "1" then
+			if restore_pttl > 0 then
+				redis.call("SET", key, restore_value, "PX", restore_pttl)
+			else
+				redis.call("SET", key, restore_value)
+			end
+		else
+			redis.call("DEL", key)
+		end
+		return 1
 	`)
 
 	// setWithWriteLockScript is a strict CAS: SET value only if we hold the exact lock.
