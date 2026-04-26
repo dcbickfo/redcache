@@ -1,15 +1,32 @@
 package lockpool_test
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dcbickfo/redcache/internal/lockpool"
 )
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("forced rand failure") }
+
+// Verifies New propagates uuid.NewV7 errors. Serial (no t.Parallel) because
+// uuid.SetRand is process-global.
+func TestNew_PropagatesUUIDError(t *testing.T) {
+	uuid.SetRand(errReader{})
+	defer uuid.SetRand(nil)
+
+	pool, err := lockpool.New("lock:")
+	assert.Error(t, err, "expected New to surface uuid generation error")
+	assert.Nil(t, pool, "expected nil pool on error")
+}
 
 func TestPool_Generate_Prefix(t *testing.T) {
 	t.Parallel()
