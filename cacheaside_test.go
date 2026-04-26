@@ -1321,6 +1321,7 @@ func TestRefreshAhead_GetMulti(t *testing.T) {
 }
 
 func TestRefreshAhead_Backpressure(t *testing.T) {
+	t.Parallel()
 	// Tiny pool: 1 worker, queue size 1.
 	// The worker sleeps during refresh, so the queue fills fast.
 	client, err := redcache.NewRedCacheAside(
