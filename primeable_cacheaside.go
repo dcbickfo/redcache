@@ -90,6 +90,12 @@ func (pca *PrimeableCacheAside) Set(
 		// CAS set the value.
 		casResult, err := setWithWriteLockScript.Exec(ctx, pca.client, []string{key}, []string{newVal, strconv.FormatInt(ttl.Milliseconds(), 10), lockVal}).AsInt64()
 		if err != nil {
+			// CAS Lua errored mid-call; we may still hold the lock. Try to
+			// release it so it doesn't linger for the full lockTTL blocking
+			// other writers.
+			cleanupCtx, cancel := pca.cleanupCtx(ctx)
+			pca.bestEffortUnlock(cleanupCtx, key, lockVal)
+			cancel()
 			return fmt.Errorf("set key %q: %w", key, err)
 		}
 		if casResult == 0 {
