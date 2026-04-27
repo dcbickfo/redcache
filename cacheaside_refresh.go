@@ -108,6 +108,7 @@ func (rca *CacheAside) enqueueRefresh(job refreshJob, keys []string) {
 			// because this is expected during shutdown.
 			for _, key := range keys {
 				rca.refreshing.Delete(key)
+				rca.metrics.RefreshDropped(key)
 			}
 		}
 	}()
@@ -161,12 +162,14 @@ func (rca *CacheAside) doSingleRefresh(
 	val, err := fn(refreshCtx, key)
 	if err != nil {
 		rca.logger.Error("refresh-ahead callback failed", "key", key, "error", err)
+		rca.metrics.RefreshError(key)
 		return
 	}
 
 	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
 	if err := refreshAheadSetScript.Exec(refreshCtx, rca.client, []string{key}, []string{val, ttlMs, rca.lockPrefix}).Error(); err != nil {
 		rca.logger.Error("refresh-ahead set failed", "key", key, "error", err)
+		rca.metrics.RefreshError(key)
 	}
 }
 
@@ -231,6 +234,9 @@ func (rca *CacheAside) doMultiRefresh(
 	vals, err := fn(refreshCtx, lockedKeys)
 	if err != nil {
 		rca.logger.Error("refresh-ahead multi callback failed", "error", err)
+		for _, key := range lockedKeys {
+			rca.metrics.RefreshError(key)
+		}
 		return
 	}
 
