@@ -271,9 +271,12 @@ func (pca *PrimeableCacheAside) waitForReadLocks(ctx context.Context, keys []str
 	resps := pca.client.DoMultiCache(ctx, multi...)
 
 	// 3. Collect channels for keys that have locks. Distinguish redis-nil
-	// (key absent — no lock) from real Redis errors so the latter aren't
-	// silently treated as "no lock" against a broken cluster.
+	// (key absent — no lock) from real Redis errors so the latter surface
+	// to the caller instead of silently advancing SetMulti against a
+	// broken cluster.
 	var lockedChans []<-chan struct{}
+	var firstErr error
+	var firstErrKey string
 	for i, resp := range resps {
 		val, err := resp.ToString()
 		if rueidis.IsRedisNil(err) {
@@ -281,11 +284,18 @@ func (pca *PrimeableCacheAside) waitForReadLocks(ctx context.Context, keys []str
 		}
 		if err != nil {
 			pca.logger.Error("waitForReadLocks read failed", "key", keys[i], "error", err)
+			if firstErr == nil {
+				firstErr = err
+				firstErrKey = keys[i]
+			}
 			continue
 		}
 		if strings.HasPrefix(val, pca.lockPrefix) {
 			lockedChans = append(lockedChans, waitChans[keys[i]])
 		}
+	}
+	if firstErr != nil {
+		return fmt.Errorf("read key %q: %w", firstErrKey, firstErr)
 	}
 
 	if len(lockedChans) == 0 {
