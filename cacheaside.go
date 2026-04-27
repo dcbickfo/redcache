@@ -397,16 +397,32 @@ func (rca *CacheAside) Del(ctx context.Context, key string) error {
 }
 
 // DelMulti removes multiple keys from Redis, triggering invalidation on all clients.
+//
+// All commands are issued; on partial failure each per-key error is logged and
+// the first error encountered is returned wrapped with key context. Some deletes
+// may have succeeded.
 func (rca *CacheAside) DelMulti(ctx context.Context, keys ...string) error {
+	if len(keys) == 0 {
+		return nil
+	}
 	cmds := make(rueidis.Commands, 0, len(keys))
 	for _, key := range keys {
 		cmds = append(cmds, rca.client.B().Del().Key(key).Build())
 	}
 	resps := rca.client.DoMulti(ctx, cmds...)
-	for _, resp := range resps {
+	var firstErr error
+	var firstErrKey string
+	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
-			return err
+			rca.logger.Error("DelMulti key failed", "key", keys[i], "error", err)
+			if firstErr == nil {
+				firstErr = err
+				firstErrKey = keys[i]
+			}
 		}
+	}
+	if firstErr != nil {
+		return fmt.Errorf("del key %q: %w", firstErrKey, firstErr)
 	}
 	return nil
 }
@@ -708,8 +724,14 @@ func (rca *CacheAside) tryLockMulti(ctx context.Context, keys []string) (map[str
 	// SET NX GET reply semantics (per-key, mirroring tryLock):
 	//   IsRedisNil:  NX fired, lock acquired (no prior value).
 	//   nil error:   key existed; NX rejected. Drop so caller waits for release.
-	//   other err:   real Redis error — propagate so the caller fails fast
-	//                rather than spinning against a broken cluster for lockTTL.
+	//   other err:   real Redis error — propagate so the caller fails fast.
+	//
+	// DoMulti is a pipeline: by the time we read resps, every SET NX has
+	// already executed in Redis. Drain ALL responses before returning so
+	// successfully-acquired locks from earlier indices can be released; an
+	// early return would leak them for the full lockTTL.
+	var firstErr error
+	var firstErrKey string
 	for i, r := range resps {
 		err := r.Error()
 		if rueidis.IsRedisNil(err) {
@@ -719,7 +741,21 @@ func (rca *CacheAside) tryLockMulti(ctx context.Context, keys []string) (map[str
 			delete(lockVals, keys[i])
 			continue
 		}
-		return nil, fmt.Errorf("lock key %q: %w", keys[i], err)
+		delete(lockVals, keys[i])
+		if firstErr == nil {
+			firstErr = err
+			firstErrKey = keys[i]
+		} else {
+			rca.logger.Error("additional tryLockMulti error", "key", keys[i], "error", err)
+		}
+	}
+	if firstErr != nil {
+		if len(lockVals) > 0 {
+			cleanupCtx, cancel := rca.cleanupCtx(ctx)
+			rca.unlockMulti(cleanupCtx, lockVals)
+			cancel()
+		}
+		return nil, fmt.Errorf("lock key %q: %w", firstErrKey, firstErr)
 	}
 	return lockVals, nil
 }
