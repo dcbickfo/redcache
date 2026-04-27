@@ -87,9 +87,10 @@ func (pca *PrimeableCacheAside) Set(
 			return err
 		}
 
-		// CAS set the value.
-		casResult, err := setWithWriteLockScript.Exec(ctx, pca.client, []string{key}, []string{newVal, strconv.FormatInt(ttl.Milliseconds(), 10), lockVal}).AsInt64()
-		if err != nil {
+		// CAS set the value. Split transport error from parse error so a script
+		// drift (non-integer response) is logged distinctly from a Redis failure.
+		resp := setWithWriteLockScript.Exec(ctx, pca.client, []string{key}, []string{newVal, strconv.FormatInt(ttl.Milliseconds(), 10), lockVal})
+		if err := resp.Error(); err != nil {
 			// CAS Lua errored mid-call; we may still hold the lock. Try to
 			// release it so it doesn't linger for the full lockTTL blocking
 			// other writers.
@@ -97,6 +98,14 @@ func (pca *PrimeableCacheAside) Set(
 			pca.bestEffortUnlock(cleanupCtx, key, lockVal)
 			cancel()
 			return fmt.Errorf("set key %q: %w", key, err)
+		}
+		casResult, ierr := resp.AsInt64()
+		if ierr != nil {
+			pca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
+			cleanupCtx, cancel := pca.cleanupCtx(ctx)
+			pca.bestEffortUnlock(cleanupCtx, key, lockVal)
+			cancel()
+			return fmt.Errorf("set key %q: parse response: %w", key, ierr)
 		}
 		if casResult == 0 {
 			pca.metrics.LockLost(key)
