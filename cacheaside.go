@@ -526,9 +526,14 @@ func (rca *CacheAside) setWithLock(ctx context.Context, ttl time.Duration, key s
 		rca.metrics.LockLost(key)
 		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
 	}
-	// The Lua script returns 0 when the lock was lost (CAS mismatch).
-	// .Error() returns nil for integer responses, so we must check the value.
-	if val, _ := resp.AsInt64(); val == 0 {
+	// The Lua script returns 0 when the lock was lost (CAS mismatch), 1 on success.
+	// A non-integer response means the script drifted (regression bait per setKeyLua).
+	val, ierr := resp.AsInt64()
+	if ierr != nil {
+		rca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
+		return "", fmt.Errorf("set key %q: parse response: %w", key, ierr)
+	}
+	if val == 0 {
 		rca.logger.Debug("lock lost during set operation", "key", key)
 		rca.metrics.LockLost(key)
 		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
