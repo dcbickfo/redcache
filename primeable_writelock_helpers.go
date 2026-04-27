@@ -232,24 +232,53 @@ func (pca *PrimeableCacheAside) execSlotAcquire(
 		}
 	}
 	resps := acquireWriteLockWithBackupScript.ExecMulti(ctx, pca.client, stmts...)
+	// ExecMulti is a pipeline: every script has already executed in Redis
+	// regardless of how we handle responses. Drain all responses to record
+	// successes into `acquired` before bailing on any error — otherwise
+	// later-index acquires that ran in Redis would leak for the full lockTTL.
+	firstErrKey, firstErr := pca.drainSlotAcquireResponses(group, resps, acquired, backups)
+	if firstErr != nil {
+		for k, v := range acquired {
+			pca.bestEffortUnlock(ctx, k, v)
+			delete(acquired, k)
+		}
+		return fmt.Errorf("lock key %q: %w", firstErrKey, firstErr)
+	}
+	return nil
+}
+
+// drainSlotAcquireResponses parses all responses from a pipelined slot acquire,
+// recording successes into acquired/backups and returning the first error
+// encountered. Subsequent errors are logged but do not stop the drain — every
+// response must be inspected so the script's already-applied side-effects can
+// be reconciled.
+func (pca *PrimeableCacheAside) drainSlotAcquireResponses(
+	group []lockAcquireEntry,
+	resps []rueidis.RedisResult,
+	acquired map[string]string,
+	backups map[string]savedValue,
+) (firstErrKey string, firstErr error) {
 	for i, resp := range resps {
 		arr, err := resp.ToArray()
 		if err != nil {
-			// Release any locks we've already acquired in previous slots.
-			for k, v := range acquired {
-				pca.bestEffortUnlock(ctx, k, v)
+			if firstErr == nil {
+				firstErr = err
+				firstErrKey = group[i].key
+			} else {
+				pca.logger.Error("additional execSlotAcquire error", "key", group[i].key, "error", err)
 			}
-			return fmt.Errorf("lock key %q: %w", group[i].key, err)
+			continue
 		}
 		if len(arr) != 3 {
-			for k, v := range acquired {
-				pca.bestEffortUnlock(ctx, k, v)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("malformed response (len=%d)", len(arr))
+				firstErrKey = group[i].key
 			}
-			return fmt.Errorf("lock key %q: malformed response (len=%d)", group[i].key, len(arr))
+			continue
 		}
 		pca.recordSlotAcquireResult(group[i], arr, acquired, backups)
 	}
-	return nil
+	return firstErrKey, firstErr
 }
 
 // recordSlotAcquireResult parses one acquire response and updates acquired/backups.
