@@ -277,14 +277,13 @@ func (pca *PrimeableCacheAside) waitForReadLocks(ctx context.Context, keys []str
 	// (key absent — no lock) from real Redis errors so the latter surface
 	// to the caller instead of silently advancing SetMulti against a
 	// broken cluster.
+	if len(resps) != len(keys) {
+		return fmt.Errorf("waitForReadLocks: response/key length mismatch: %d resps vs %d keys", len(resps), len(keys))
+	}
 	var lockedChans []<-chan struct{}
 	var firstErr error
 	var firstErrKey string
-	n := len(resps)
-	if n > len(keys) {
-		n = len(keys)
-	}
-	for i := range n {
+	for i := range keys {
 		key := keys[i]
 		val, err := resps[i].ToString()
 		if rueidis.IsRedisNil(err) {
