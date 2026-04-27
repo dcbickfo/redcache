@@ -248,8 +248,16 @@ func (pca *PrimeableCacheAside) execSlotAcquire(
 	// later-index acquires that ran in Redis would leak for the full lockTTL.
 	firstErrKey, firstErr := pca.drainSlotAcquireResponses(group, resps, acquired, backups)
 	if firstErr != nil {
+		// Restore prior values where the acquire script captured one. Plain
+		// unlock would DEL the lock and silently drop a real cached entry that
+		// the acquire just overwrote. Mirrors rollbackAfterFirstFailure.
 		for k, v := range acquired {
-			pca.bestEffortUnlock(ctx, k, v)
+			if saved, ok := backups[k]; ok {
+				pca.bestEffortRestore(ctx, k, v, saved)
+				delete(backups, k)
+			} else {
+				pca.bestEffortUnlock(ctx, k, v)
+			}
 			delete(acquired, k)
 		}
 		return fmt.Errorf("lock key %q: %w", firstErrKey, firstErr)
