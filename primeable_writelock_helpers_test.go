@@ -77,6 +77,23 @@ func TestBestEffortUnlock_LogsErrorOnClientFailure(t *testing.T) {
 	pca.bestEffortUnlock(context.Background(), "unlock:"+uuid.New().String(), "lock")
 }
 
+// waitForReadLocks must surface a real Redis error (with key context) instead
+// of silently advancing SetMulti against a broken cluster. Regression guard for
+// the silent-failure fix that distinguishes redis-nil ("key absent") from real
+// errors. Closing the client is the simplest way to make DoMultiCache fail.
+func TestWaitForReadLocks_SurfacesRedisError(t *testing.T) {
+	t.Parallel()
+	pca := newHelperPCA(t)
+
+	pca.Client().Close()
+
+	key := "wait-readlock-err:" + uuid.New().String()
+	err := pca.waitForReadLocks(context.Background(), []string{key})
+	require.Error(t, err, "broken client should surface error from waitForReadLocks")
+	require.Contains(t, err.Error(), "read key", "error should be wrapped with read key context")
+	require.Contains(t, err.Error(), key, "error should be tagged with the offending key")
+}
+
 // waitForFailedKey returns ctx.Err() and triggers restoreMultiValues when the
 // caller's context expires before the holder releases.
 func TestWaitForFailedKey_ContextCancelled(t *testing.T) {
