@@ -3,6 +3,7 @@ package redcache_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,75 @@ import (
 
 	"github.com/dcbickfo/redcache"
 )
+
+// TestCacheAside_Close_SafeUnderConcurrentRefresh hammers Get from many
+// goroutines (each potentially triggering a refresh) while Close runs
+// concurrently — and calls Close twice. The closing-flag + recover guard in
+// enqueueRefresh, plus closeOnce in Close, is the only thing preventing a
+// "send on closed channel" panic from killing user goroutines on shutdown.
+// A regression that drops either guard would surface here as a panic.
+func TestCacheAside_Close_SafeUnderConcurrentRefresh(t *testing.T) {
+	t.Parallel()
+	client, err := redcache.NewRedCacheAside(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.CacheAsideOption{
+			LockTTL:              2 * time.Second,
+			RefreshAfterFraction: 0.01, // refresh on virtually every Get
+			RefreshWorkers:       2,
+			RefreshQueueSize:     4, // small queue to maximize the close-during-send window
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Client().Close() })
+
+	ctx := context.Background()
+	key := "close-stress:" + uuid.New().String()
+
+	// Populate so subsequent Gets are hits and may trigger refresh.
+	_, err = client.Get(ctx, time.Second, key, func(_ context.Context, _ string) (string, error) {
+		return "v", nil
+	})
+	require.NoError(t, err)
+	time.Sleep(50 * time.Millisecond) // let PTTL drop below the 1% threshold
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = client.Get(ctx, time.Second, key, func(_ context.Context, _ string) (string, error) {
+					return "v", nil
+				})
+			}
+		}()
+	}
+
+	// Let the workers run, then close concurrently AND double-close.
+	time.Sleep(50 * time.Millisecond)
+	var closeWg sync.WaitGroup
+	closeWg.Add(2)
+	go func() {
+		defer closeWg.Done()
+		client.Close()
+	}()
+	go func() {
+		defer closeWg.Done()
+		client.Close() // double-close must be a no-op (closeOnce)
+	}()
+	closeWg.Wait()
+
+	close(stop)
+	wg.Wait()
+	// Reaching here without a panic is the assertion. The deferred t.Cleanup
+	// will fail the test if any goroutine panicked via recover-then-nil-deref.
+}
 
 // TestCacheAside_Get_CleanMissEmitsNoFalseLockLost verifies that a vanilla
 // cache-miss-then-populate Get does NOT emit a LockLost metric. Regression
