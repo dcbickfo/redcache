@@ -829,8 +829,9 @@ func (rca *CacheAside) runSlotSet(ctx context.Context, kos keyOrderAndSet) slotS
 }
 
 // inspectSlotSetResponse classifies one ExecMulti response into success / silent
-// failure (LockLost) / surfaceable error. Returns (success, errToReport) where
-// errToReport is non-nil only for real Redis transport errors worth surfacing.
+// failure (LockLost) / surfaceable error. Parse errors are surfaced so a script
+// drift fails fast instead of triggering an infinite retry loop in the caller's
+// wait-and-retry path — matching setWithLock's contract.
 func (rca *CacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResult) (bool, error) {
 	if err := resp.Error(); err != nil {
 		if rueidis.IsRedisNil(err) {
@@ -843,7 +844,7 @@ func (rca *CacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResu
 	val, ierr := resp.AsInt64()
 	if ierr != nil {
 		rca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
-		return false, nil
+		return false, fmt.Errorf("set key %q: parse response: %w", key, ierr)
 	}
 	if val == 0 {
 		rca.logger.Debug("lock lost during multi set", "key", key)
