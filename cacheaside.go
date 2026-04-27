@@ -705,14 +705,21 @@ func (rca *CacheAside) tryLockMulti(ctx context.Context, keys []string) (map[str
 		cmds = append(cmds, rca.client.B().Set().Key(k).Value(lockVals[k]).Nx().Get().Px(rca.lockTTL).Build())
 	}
 	resps := rca.client.DoMulti(ctx, cmds...)
+	// SET NX GET reply semantics (per-key, mirroring tryLock):
+	//   IsRedisNil:  NX fired, lock acquired (no prior value).
+	//   nil error:   key existed; NX rejected. Drop so caller waits for release.
+	//   other err:   real Redis error — propagate so the caller fails fast
+	//                rather than spinning against a broken cluster for lockTTL.
 	for i, r := range resps {
 		err := r.Error()
-		if !rueidis.IsRedisNil(err) {
-			if err != nil {
-				rca.logger.Error("failed to acquire lock", "key", keys[i], "error", err)
-			}
-			delete(lockVals, keys[i])
+		if rueidis.IsRedisNil(err) {
+			continue
 		}
+		if err == nil {
+			delete(lockVals, keys[i])
+			continue
+		}
+		return nil, fmt.Errorf("lock key %q: %w", keys[i], err)
 	}
 	return lockVals, nil
 }
@@ -752,7 +759,9 @@ type slotSetResult struct {
 
 // runSlotSet executes the Lua statements for one slot and reports its result.
 // All responses are inspected even if one is a non-Redis-nil error, so successes
-// in the same batch are not lost when reporting an error.
+// in the same batch are not lost when reporting an error. Lua returning 0
+// indicates a CAS-mismatch (lock lost via TTL expiry or ForceSet) — the key is
+// dropped from successes and a LockLost metric is emitted, matching setWithLock.
 func (rca *CacheAside) runSlotSet(ctx context.Context, kos keyOrderAndSet) slotSetResult {
 	var keys []string
 	var firstErr error
@@ -762,6 +771,15 @@ func (rca *CacheAside) runSlotSet(ctx context.Context, kos keyOrderAndSet) slotS
 		if err != nil {
 			if !rueidis.IsRedisNil(err) && firstErr == nil {
 				firstErr = fmt.Errorf("set key %q: %w", kos.keyOrder[j], err)
+			}
+			continue
+		}
+		if val, ierr := resp.AsInt64(); ierr != nil || val == 0 {
+			if ierr != nil {
+				rca.logger.Error("unexpected non-integer in CAS-set response", "key", kos.keyOrder[j], "error", ierr)
+			} else {
+				rca.logger.Debug("lock lost during multi set", "key", kos.keyOrder[j])
+				rca.metrics.LockLost(kos.keyOrder[j])
 			}
 			continue
 		}
