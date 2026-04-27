@@ -280,21 +280,26 @@ func (pca *PrimeableCacheAside) waitForReadLocks(ctx context.Context, keys []str
 	var lockedChans []<-chan struct{}
 	var firstErr error
 	var firstErrKey string
-	for i, resp := range resps {
-		val, err := resp.ToString()
+	n := len(resps)
+	if n > len(keys) {
+		n = len(keys)
+	}
+	for i := range n {
+		key := keys[i]
+		val, err := resps[i].ToString()
 		if rueidis.IsRedisNil(err) {
 			continue
 		}
 		if err != nil {
-			pca.logger.Error("waitForReadLocks read failed", "key", keys[i], "error", err)
+			pca.logger.Error("waitForReadLocks read failed", "key", key, "error", err)
 			if firstErr == nil {
 				firstErr = err
-				firstErrKey = keys[i]
+				firstErrKey = key
 			}
 			continue
 		}
 		if strings.HasPrefix(val, pca.lockPrefix) {
-			lockedChans = append(lockedChans, waitChans[keys[i]])
+			lockedChans = append(lockedChans, waitChans[key])
 		}
 	}
 	if firstErr != nil {
