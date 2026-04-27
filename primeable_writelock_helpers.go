@@ -59,14 +59,15 @@ func parseBackup(logger Logger, key string, valMsg, pttlMsg rueidis.RedisMessage
 		}
 		return savedValue{}
 	}
-	saved := savedValue{val: backupVal, present: true}
 	pttl, pErr := pttlMsg.AsInt64()
 	if pErr != nil {
+		// PTTL is unparseable — we'd otherwise restore the value as persistent
+		// (pttl=0 → SET without PX in restore script). Better to drop the
+		// backup so rollback DELs the key than risk a permanent stale entry.
 		logger.Error("unexpected non-integer pttl in lock-acquire response", "key", key, "error", pErr)
-		return saved
+		return savedValue{}
 	}
-	saved.pttl = pttl
-	return saved
+	return savedValue{val: backupVal, pttl: pttl, present: true}
 }
 
 // acquireMultiWriteLocks acquires write locks on all keys in sorted order with rollback.
@@ -154,7 +155,16 @@ func (pca *PrimeableCacheAside) waitForFailedKey(
 	waitChan := pca.register(firstFailed)
 	resp := pca.client.DoCache(ctx, pca.client.B().Get().Key(firstFailed).Cache(), pca.lockTTL)
 	val, rerr := resp.ToString()
-	if rueidis.IsRedisNil(rerr) || (rerr == nil && !strings.HasPrefix(val, pca.lockPrefix)) {
+	if rueidis.IsRedisNil(rerr) {
+		return nil
+	}
+	if rerr != nil {
+		// Real Redis error — fail fast rather than blocking on a wait channel
+		// for the full lockTTL while the cluster is unhealthy.
+		pca.restoreMultiValues(ctx, lockValues, savedValues)
+		return fmt.Errorf("read key %q: %w", firstFailed, rerr)
+	}
+	if !strings.HasPrefix(val, pca.lockPrefix) {
 		return nil
 	}
 
