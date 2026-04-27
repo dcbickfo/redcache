@@ -504,6 +504,15 @@ func (pca *PrimeableCacheAside) bestEffortUnlock(ctx context.Context, key, lockV
 	}
 }
 
+// bestEffortRestore wraps restoreValue with cleanupCtx + deferred cancel so a
+// panic in the restore script cannot leak the rollback context. Mirrors the
+// shape of bestEffortUnlock for consistency.
+func (pca *PrimeableCacheAside) bestEffortRestore(ctx context.Context, key, lockVal string, saved savedValue) {
+	toCtx, cancel := pca.cleanupCtx(ctx)
+	defer cancel()
+	pca.restoreValue(toCtx, key, lockVal, saved)
+}
+
 // unlockMultiKeys releases multiple locks.
 func (pca *PrimeableCacheAside) unlockMultiKeys(ctx context.Context, lockVals map[string]string) {
 	toCtx, cancel := pca.cleanupCtx(ctx)

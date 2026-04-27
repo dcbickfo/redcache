@@ -79,11 +79,9 @@ func (pca *PrimeableCacheAside) Set(
 		// Lock acquired — execute callback.
 		newVal, err := fn(ctx, key)
 		if err != nil {
-			// Use cleanupCtx so a cancelled request still rolls back the lock,
-			// rather than letting it linger until the lockTTL expires.
-			cleanupCtx, cancel := pca.cleanupCtx(ctx)
-			pca.restoreValue(cleanupCtx, key, lockVal, saved)
-			cancel()
+			// Use bestEffortRestore so a cancelled request still rolls back
+			// the lock, rather than letting it linger until lockTTL expires.
+			pca.bestEffortRestore(ctx, key, lockVal, saved)
 			return err
 		}
 
@@ -94,17 +92,13 @@ func (pca *PrimeableCacheAside) Set(
 			// CAS Lua errored mid-call; we may still hold the lock. Try to
 			// release it so it doesn't linger for the full lockTTL blocking
 			// other writers.
-			cleanupCtx, cancel := pca.cleanupCtx(ctx)
-			pca.bestEffortUnlock(cleanupCtx, key, lockVal)
-			cancel()
+			pca.bestEffortUnlock(ctx, key, lockVal)
 			return fmt.Errorf("set key %q: %w", key, err)
 		}
 		casResult, ierr := resp.AsInt64()
 		if ierr != nil {
 			pca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
-			cleanupCtx, cancel := pca.cleanupCtx(ctx)
-			pca.bestEffortUnlock(cleanupCtx, key, lockVal)
-			cancel()
+			pca.bestEffortUnlock(ctx, key, lockVal)
 			return fmt.Errorf("set key %q: parse response: %w", key, ierr)
 		}
 		if casResult == 0 {
