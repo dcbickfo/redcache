@@ -3,6 +3,7 @@ package redcache
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"strconv"
 	"time"
 
@@ -44,7 +45,7 @@ func (rca *CacheAside) refreshKeyFor(key string) string {
 func (rca *CacheAside) runRefreshJob(job refreshJob) {
 	defer func() {
 		if r := recover(); r != nil {
-			rca.logger.Error("refresh worker panic recovered", "keys", job.keys, "panic", fmt.Sprintf("%v", r))
+			rca.logger.Error("refresh worker panic recovered", "keys", job.keys, "panic", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
 			for _, k := range job.keys {
 				rca.metrics.RefreshPanicked(k)
 			}
@@ -301,6 +302,7 @@ func (rca *CacheAside) setRefreshedValues(ctx context.Context, ttl time.Duration
 	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
 			rca.logger.Error("refresh-ahead multi set failed", "key", keyOrder[i], "error", err)
+			rca.metrics.RefreshError(keyOrder[i])
 		}
 	}
 }
