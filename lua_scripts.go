@@ -7,7 +7,11 @@ var (
 	// delKeyLua atomically deletes a key only if the current value matches the lock.
 	delKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("DEL",KEYS[1]) else return 0 end`)
 	// setKeyLua atomically sets a value only if the current value matches the lock (CAS).
-	setKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("SET",KEYS[1],ARGV[2],"PX",ARGV[3]) else return 0 end`)
+	// Returns 1 on success, 0 if the lock was lost. The explicit `return 1` matters:
+	// Redis's SET reply is the status string "OK", which AsInt64 cannot parse — letting
+	// it bubble up as the script's return would make every successful CAS look like
+	// a lock-lost (bogus LockLost metric + retry).
+	setKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then redis.call("SET",KEYS[1],ARGV[2],"PX",ARGV[3]) return 1 else return 0 end`)
 )
 
 // Lua scripts for PrimeableCacheAside write-lock operations.
