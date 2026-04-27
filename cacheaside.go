@@ -807,33 +807,50 @@ type slotSetResult struct {
 
 // runSlotSet executes the Lua statements for one slot and reports its result.
 // All responses are inspected even if one is a non-Redis-nil error, so successes
-// in the same batch are not lost when reporting an error. Lua returning 0
-// indicates a CAS-mismatch (lock lost via TTL expiry or ForceSet) — the key is
-// dropped from successes and a LockLost metric is emitted, matching setWithLock.
+// in the same batch are not lost when reporting an error. Lua returning 0 (or a
+// nil response, which the script never produces but we treat defensively the
+// same way as setWithLock) indicates a CAS-mismatch (lock lost via TTL expiry
+// or ForceSet) — the key is dropped from successes and a LockLost metric is
+// emitted, matching setWithLock.
 func (rca *CacheAside) runSlotSet(ctx context.Context, kos keyOrderAndSet) slotSetResult {
 	var keys []string
 	var firstErr error
 	setResps := setKeyLua.ExecMulti(ctx, rca.client, kos.setStmts...)
 	for j, resp := range setResps {
-		err := resp.Error()
-		if err != nil {
-			if !rueidis.IsRedisNil(err) && firstErr == nil {
-				firstErr = fmt.Errorf("set key %q: %w", kos.keyOrder[j], err)
-			}
-			continue
+		ok, err := rca.inspectSlotSetResponse(kos.keyOrder[j], resp)
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
-		if val, ierr := resp.AsInt64(); ierr != nil || val == 0 {
-			if ierr != nil {
-				rca.logger.Error("unexpected non-integer in CAS-set response", "key", kos.keyOrder[j], "error", ierr)
-			} else {
-				rca.logger.Debug("lock lost during multi set", "key", kos.keyOrder[j])
-				rca.metrics.LockLost(kos.keyOrder[j])
-			}
-			continue
+		if ok {
+			keys = append(keys, kos.keyOrder[j])
 		}
-		keys = append(keys, kos.keyOrder[j])
 	}
 	return slotSetResult{keys: keys, err: firstErr}
+}
+
+// inspectSlotSetResponse classifies one ExecMulti response into success / silent
+// failure (LockLost) / surfaceable error. Returns (success, errToReport) where
+// errToReport is non-nil only for real Redis transport errors worth surfacing.
+func (rca *CacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResult) (bool, error) {
+	if err := resp.Error(); err != nil {
+		if rueidis.IsRedisNil(err) {
+			rca.logger.Debug("lock lost during multi set", "key", key)
+			rca.metrics.LockLost(key)
+			return false, nil
+		}
+		return false, fmt.Errorf("set key %q: %w", key, err)
+	}
+	val, ierr := resp.AsInt64()
+	if ierr != nil {
+		rca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
+		return false, nil
+	}
+	if val == 0 {
+		rca.logger.Debug("lock lost during multi set", "key", key)
+		rca.metrics.LockLost(key)
+		return false, nil
+	}
+	return true, nil
 }
 
 // executeSetStatements executes Lua set statements in parallel, grouped by slot.
