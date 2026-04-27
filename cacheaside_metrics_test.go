@@ -3,6 +3,7 @@ package redcache_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -213,4 +214,67 @@ func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 	metrics.mu.Lock()
 	defer metrics.mu.Unlock()
 	require.Contains(t, metrics.errKeys, key, "RefreshError should be tagged with the offending key")
+}
+
+// TestMetrics_RefreshDroppedUnderBackpressure verifies that RefreshDropped fires
+// when the refresh queue saturates. Without this signal, an operator running a
+// queue too small for traffic sees only slowly-drifting cache freshness — they
+// can't distinguish healthy contention (RefreshSkipped) from queue exhaustion
+// (RefreshDropped) without the metric.
+func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
+	t.Parallel()
+	metrics := &capturingMetrics{}
+	client, err := redcache.NewRedCacheAside(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.CacheAsideOption{
+			LockTTL:              time.Second * 3,
+			RefreshAfterFraction: 0.5,
+			RefreshWorkers:       1,
+			RefreshQueueSize:     1,
+			Metrics:              metrics,
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		client.Close()
+		client.Client().Close()
+	})
+	ctx := context.Background()
+
+	const numKeys = 20
+	keys := make([]string, numKeys)
+	for i := range numKeys {
+		keys[i] = fmt.Sprintf("key:%d:%s", i, uuid.New().String())
+	}
+
+	ttl := 3 * time.Second
+	populateCb := func(_ context.Context, _ string) (string, error) {
+		return "initial", nil
+	}
+	for _, key := range keys {
+		_, err := client.Get(ctx, ttl, key, populateCb)
+		require.NoError(t, err)
+	}
+
+	time.Sleep(1700 * time.Millisecond)
+
+	refreshCb := func(_ context.Context, _ string) (string, error) {
+		time.Sleep(500 * time.Millisecond) // keep the single worker busy
+		return "refreshed", nil
+	}
+
+	var wg sync.WaitGroup
+	for _, key := range keys {
+		k := key
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = client.Get(ctx, ttl, k, refreshCb)
+		}()
+	}
+	wg.Wait()
+
+	require.Eventually(t, func() bool {
+		return metrics.dropped.Load() > 0
+	}, 2*time.Second, 5*time.Millisecond, "expected RefreshDropped to fire under queue saturation")
 }
