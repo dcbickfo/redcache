@@ -89,16 +89,17 @@ func (pca *PrimeableCacheAside) Set(
 		// drift (non-integer response) is logged distinctly from a Redis failure.
 		resp := setWithWriteLockScript.Exec(ctx, pca.client, []string{key}, []string{newVal, strconv.FormatInt(ttl.Milliseconds(), 10), lockVal})
 		if err := resp.Error(); err != nil {
-			// CAS Lua errored mid-call; we may still hold the lock. Try to
-			// release it so it doesn't linger for the full lockTTL blocking
-			// other writers.
-			pca.bestEffortUnlock(ctx, key, lockVal)
+			// CAS Lua errored mid-call; we may still hold the lock. Restore
+			// the prior value (DEL if none) so the cache serves the previous
+			// entry rather than a miss — bestEffortUnlock would wipe a real
+			// prior value captured during acquire.
+			pca.bestEffortRestore(ctx, key, lockVal, saved)
 			return fmt.Errorf("set key %q: %w", key, err)
 		}
 		casResult, ierr := resp.AsInt64()
 		if ierr != nil {
 			pca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
-			pca.bestEffortUnlock(ctx, key, lockVal)
+			pca.bestEffortRestore(ctx, key, lockVal, saved)
 			return fmt.Errorf("set key %q: parse response: %w", key, ierr)
 		}
 		if casResult == 0 {
@@ -194,19 +195,22 @@ func (pca *PrimeableCacheAside) SetMulti(
 	// CAS batch set.
 	succeeded, failed := pca.setMultiValuesWithCAS(ctx, ttl, vals, lockValues)
 
-	// Unlock any keys that weren't successfully written.
+	// Roll back any keys that weren't successfully written. Restore (rather
+	// than unlock) so a CAS transport/parse error preserves the prior real
+	// value captured during acquire. For lock-lost keys the restore Lua's
+	// CAS-check fails harmlessly (stealer's value stays).
 	succeededSet := make(map[string]struct{}, len(succeeded))
 	for _, s := range succeeded {
 		succeededSet[s] = struct{}{}
 	}
-	toUnlock := make(map[string]string)
+	toRestore := make(map[string]string)
 	for key, lockVal := range lockValues {
 		if _, ok := succeededSet[key]; !ok {
-			toUnlock[key] = lockVal
+			toRestore[key] = lockVal
 		}
 	}
-	if len(toUnlock) > 0 {
-		pca.unlockMultiKeys(ctx, toUnlock)
+	if len(toRestore) > 0 {
+		pca.restoreMultiValues(ctx, toRestore, savedValues)
 	}
 
 	return NewBatchError(failed, succeeded)

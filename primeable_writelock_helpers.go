@@ -512,10 +512,3 @@ func (pca *PrimeableCacheAside) bestEffortRestore(ctx context.Context, key, lock
 	defer cancel()
 	pca.restoreValue(toCtx, key, lockVal, saved)
 }
-
-// unlockMultiKeys releases multiple locks.
-func (pca *PrimeableCacheAside) unlockMultiKeys(ctx context.Context, lockVals map[string]string) {
-	toCtx, cancel := pca.cleanupCtx(ctx)
-	defer cancel()
-	pca.unlockMulti(toCtx, lockVals)
-}
