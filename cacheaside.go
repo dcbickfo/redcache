@@ -113,6 +113,7 @@ type CacheAside struct {
 	refreshing    syncx.Map[string, struct{}] // dedup in-flight refreshes (local)
 	refreshPrefix string                      // prefix for distributed refresh lock keys
 	refreshQueue  chan refreshJob             // worker pool job queue (nil when disabled)
+	refreshDone   chan struct{}               // closed by Close to signal workers/senders; never the data channel
 	refreshWg     sync.WaitGroup              // tracks active refresh workers
 	closing       atomic.Bool                 // set true at the start of Close to gate refresh sends
 	closeOnce     sync.Once                   // guards Close() against double invocation
@@ -240,6 +241,7 @@ func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOpti
 
 	if rca.refreshAfter > 0 {
 		rca.refreshQueue = make(chan refreshJob, caOption.RefreshQueueSize)
+		rca.refreshDone = make(chan struct{})
 		rca.startRefreshWorkers(caOption.RefreshWorkers)
 	}
 
@@ -257,6 +259,11 @@ func (rca *CacheAside) Client() rueidis.Client {
 // It does NOT close the underlying Redis client — that is the caller's responsibility.
 // If refresh-ahead is enabled, Close waits for in-flight refresh jobs to complete
 // (bounded by LockTTL). Safe to call multiple times.
+//
+// Shutdown signals workers via the refreshDone channel rather than closing the
+// data channel. Concurrent send + close on the same channel is a data race even
+// when the panic is recovered; closing only the signal channel keeps refreshQueue
+// senders race-free since closed channels are read-safe but write-unsafe.
 func (rca *CacheAside) Close() {
 	rca.closeOnce.Do(func() {
 		rca.closing.Store(true)
@@ -265,7 +272,7 @@ func (rca *CacheAside) Close() {
 			return true
 		})
 		if rca.refreshQueue != nil {
-			close(rca.refreshQueue)
+			close(rca.refreshDone)
 			rca.refreshWg.Wait()
 		}
 	})

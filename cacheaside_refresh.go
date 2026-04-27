@@ -18,14 +18,20 @@ type refreshJob struct {
 }
 
 // startRefreshWorkers launches n background workers that drain refreshQueue.
-// Each worker exits when the queue is closed (during Close).
+// Each worker exits when refreshDone is closed (during Close). The data channel
+// is never closed because concurrent send + close races even with recover.
 func (rca *CacheAside) startRefreshWorkers(n int) {
 	for range n {
 		rca.refreshWg.Add(1)
 		go func() {
 			defer rca.refreshWg.Done()
-			for job := range rca.refreshQueue {
-				rca.runRefreshJob(job)
+			for {
+				select {
+				case <-rca.refreshDone:
+					return
+				case job := <-rca.refreshQueue:
+					rca.runRefreshJob(job)
+				}
 			}
 		}()
 	}
@@ -98,25 +104,20 @@ func (rca *CacheAside) triggerRefresh(
 	rca.enqueueRefresh(job, []string{key})
 }
 
-// enqueueRefresh sends a job to the refresh queue, recovering from the
-// send-on-closed-channel panic that can occur if Close runs concurrently.
+// enqueueRefresh sends a job to the refresh queue. The select includes a
+// refreshDone case so a concurrent Close unblocks senders without a data race —
+// reads on a closed channel are safe, sends on a closed channel are not, so we
+// only ever close refreshDone (the signal) and never refreshQueue (the data).
 func (rca *CacheAside) enqueueRefresh(job refreshJob, keys []string) {
-	defer func() {
-		if r := recover(); r != nil {
-			// Channel was closed mid-send. Treat the same as a queue-full drop:
-			// release local dedup and emit the dropped metric. Don't log loudly
-			// because this is expected during shutdown.
-			for _, key := range keys {
-				rca.refreshing.Delete(key)
-				rca.metrics.RefreshDropped(key)
-			}
-		}
-	}()
-
 	select {
 	case rca.refreshQueue <- job:
 		for _, key := range keys {
 			rca.metrics.RefreshTriggered(key)
+		}
+	case <-rca.refreshDone:
+		for _, key := range keys {
+			rca.refreshing.Delete(key)
+			rca.metrics.RefreshDropped(key)
 		}
 	default:
 		for _, key := range keys {
