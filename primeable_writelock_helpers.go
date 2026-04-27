@@ -31,6 +31,9 @@ func (pca *PrimeableCacheAside) tryAcquireWriteLock(ctx context.Context, key, lo
 	if err != nil {
 		return false, savedValue{}, fmt.Errorf("write lock for key %q: %w", key, err)
 	}
+	if len(arr) != 3 {
+		return false, savedValue{}, fmt.Errorf("write lock for key %q: malformed response (len=%d)", key, len(arr))
+	}
 	success, ierr := arr[0].AsInt64()
 	if ierr != nil {
 		pca.logger.Error("unexpected non-integer in lock-acquire response", "key", key, "error", ierr)
@@ -39,15 +42,31 @@ func (pca *PrimeableCacheAside) tryAcquireWriteLock(ctx context.Context, key, lo
 	if success == 0 {
 		return false, savedValue{}, nil
 	}
-	saved := savedValue{}
-	if backupVal, bErr := arr[1].ToString(); bErr == nil {
-		saved.val = backupVal
-		saved.present = true
-		if pttl, pErr := arr[2].AsInt64(); pErr == nil {
-			saved.pttl = pttl
-		}
-	}
+	saved := parseBackup(pca.logger, key, arr[1], arr[2])
 	return true, saved, nil
+}
+
+// parseBackup converts the (value, pttl) pair from the acquire script into a
+// savedValue. A redis-nil value means "no prior value" (present=false). A real
+// parse error is logged and surfaces as present=false — Set will then DEL on
+// rollback rather than restoring an indeterminate value, matching the Lua's
+// "could not capture backup" intent.
+func parseBackup(logger Logger, key string, valMsg, pttlMsg rueidis.RedisMessage) savedValue {
+	backupVal, bErr := valMsg.ToString()
+	if bErr != nil {
+		if !rueidis.IsRedisNil(bErr) {
+			logger.Error("unexpected backup value in lock-acquire response", "key", key, "error", bErr)
+		}
+		return savedValue{}
+	}
+	saved := savedValue{val: backupVal, present: true}
+	pttl, pErr := pttlMsg.AsInt64()
+	if pErr != nil {
+		logger.Error("unexpected non-integer pttl in lock-acquire response", "key", key, "error", pErr)
+		return saved
+	}
+	saved.pttl = pttl
+	return saved
 }
 
 // acquireMultiWriteLocks acquires write locks on all keys in sorted order with rollback.
@@ -222,6 +241,12 @@ func (pca *PrimeableCacheAside) execSlotAcquire(
 			}
 			return fmt.Errorf("lock key %q: %w", group[i].key, err)
 		}
+		if len(arr) != 3 {
+			for k, v := range acquired {
+				pca.bestEffortUnlock(ctx, k, v)
+			}
+			return fmt.Errorf("lock key %q: malformed response (len=%d)", group[i].key, len(arr))
+		}
 		pca.recordSlotAcquireResult(group[i], arr, acquired, backups)
 	}
 	return nil
@@ -243,19 +268,15 @@ func (pca *PrimeableCacheAside) recordSlotAcquireResult(
 		return
 	}
 	acquired[entry.key] = entry.lockVal
-	backupVal, bErr := arr[1].ToString()
-	if bErr != nil {
-		return
+	saved := parseBackup(pca.logger, entry.key, arr[1], arr[2])
+	if saved.present {
+		backups[entry.key] = saved
 	}
-	saved := savedValue{val: backupVal, present: true}
-	if pttl, pErr := arr[2].AsInt64(); pErr == nil {
-		saved.pttl = pttl
-	}
-	backups[entry.key] = saved
 }
 
 // rollbackAfterFirstFailure releases locks acquired AFTER the first failed key
-// (in sorted order), keeping locks before it.
+// (in sorted order), keeping locks before it. Uses cleanupCtx so a cancelled
+// caller still rolls back rather than leaving locks live for the full TTL.
 func (pca *PrimeableCacheAside) rollbackAfterFirstFailure(
 	ctx context.Context,
 	sorted []string,
@@ -264,6 +285,8 @@ func (pca *PrimeableCacheAside) rollbackAfterFirstFailure(
 	savedValues map[string]savedValue,
 	justAcquired map[string]string,
 ) {
+	cleanupCtx, cancel := pca.cleanupCtx(ctx)
+	defer cancel()
 	pastFailure := false
 	for _, key := range sorted {
 		if key == firstFailed {
@@ -276,10 +299,10 @@ func (pca *PrimeableCacheAside) rollbackAfterFirstFailure(
 		// Release locks acquired in this batch that are after the first failure.
 		if lockVal, ok := justAcquired[key]; ok {
 			if saved, hasSaved := savedValues[key]; hasSaved {
-				pca.restoreValue(ctx, key, lockVal, saved)
+				pca.restoreValue(cleanupCtx, key, lockVal, saved)
 				delete(savedValues, key)
 			} else {
-				pca.bestEffortUnlock(ctx, key, lockVal)
+				pca.bestEffortUnlock(cleanupCtx, key, lockVal)
 			}
 			delete(lockValues, key)
 		}
