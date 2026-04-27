@@ -287,3 +287,53 @@ func TestCacheAside_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	assert.NotEqual(t, val2, res[key2], "callback's value must not be returned after CAS mismatch")
 	assert.GreaterOrEqual(t, metrics.lost.Load(), int64(1), "expected LockLost metric for the stolen key")
 }
+
+// TestPrimeableCacheAside_Set_RollbackSurvivesContextCancel verifies that Set's
+// rollback runs to completion even when the caller's context is cancelled.
+// bestEffortRestore exists specifically to handle this: cleanupCtx strips
+// cancellation so a cancelled request still rolls back the lock rather than
+// letting it linger until lockTTL expires. A regression that switched
+// bestEffortRestore back to using the caller's ctx would let the lock value
+// persist and block subsequent writers for the full lockTTL window.
+func TestPrimeableCacheAside_Set_RollbackSurvivesContextCancel(t *testing.T) {
+	t.Parallel()
+	client, err := redcache.NewPrimeableCacheAside(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.CacheAsideOption{LockTTL: 5 * time.Second},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		client.Close()
+		client.Client().Close()
+	})
+
+	bg := context.Background()
+	key := "rollback-cancel:" + uuid.New().String()
+	originalVal := "original:" + uuid.New().String()
+
+	// Pre-populate.
+	_, err = client.Get(bg, 10*time.Second, key, func(_ context.Context, _ string) (string, error) {
+		return originalVal, nil
+	})
+	require.NoError(t, err)
+
+	// Set with a context that gets cancelled after the callback returns its
+	// error. The rollback must still run.
+	cbErr := errors.New("callback failed under cancelled context")
+	cancelCtx, cancel := context.WithCancel(bg)
+	err = client.Set(cancelCtx, 10*time.Second, key, func(_ context.Context, _ string) (string, error) {
+		cancel() // cancel BEFORE returning so rollback path sees a dead ctx
+		return "", cbErr
+	})
+	require.ErrorIs(t, err, cbErr)
+
+	// Give invalidation a moment to propagate.
+	time.Sleep(100 * time.Millisecond)
+
+	// Original value must still be present despite the cancelled ctx.
+	res, err := client.Get(bg, 10*time.Second, key, func(_ context.Context, _ string) (string, error) {
+		return "callback-fired-restore-failed", nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, originalVal, res, "rollback must succeed under cancelled ctx so key is restored, not held by lock")
+}
