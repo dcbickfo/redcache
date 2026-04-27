@@ -37,7 +37,7 @@ func (pca *PrimeableCacheAside) tryAcquireWriteLock(ctx context.Context, key, lo
 	success, ierr := arr[0].AsInt64()
 	if ierr != nil {
 		pca.logger.Error("unexpected non-integer in lock-acquire response", "key", key, "error", ierr)
-		return false, savedValue{}, nil
+		return false, savedValue{}, fmt.Errorf("write lock for key %q: parse success: %w", key, ierr)
 	}
 	if success == 0 {
 		return false, savedValue{}, nil
@@ -268,49 +268,56 @@ func (pca *PrimeableCacheAside) drainSlotAcquireResponses(
 	acquired map[string]string,
 	backups map[string]savedValue,
 ) (firstErrKey string, firstErr error) {
+	capture := func(key string, err error) {
+		if firstErr == nil {
+			firstErr = err
+			firstErrKey = key
+			return
+		}
+		pca.logger.Error("additional execSlotAcquire error", "key", key, "error", err)
+	}
 	for i, resp := range resps {
 		arr, err := resp.ToArray()
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-				firstErrKey = group[i].key
-			} else {
-				pca.logger.Error("additional execSlotAcquire error", "key", group[i].key, "error", err)
-			}
+			capture(group[i].key, err)
 			continue
 		}
 		if len(arr) != 3 {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("malformed response (len=%d)", len(arr))
-				firstErrKey = group[i].key
-			}
+			capture(group[i].key, fmt.Errorf("malformed response (len=%d)", len(arr)))
 			continue
 		}
-		pca.recordSlotAcquireResult(group[i], arr, acquired, backups)
+		if err := pca.recordSlotAcquireResult(group[i], arr, acquired, backups); err != nil {
+			capture(group[i].key, err)
+		}
 	}
 	return firstErrKey, firstErr
 }
 
 // recordSlotAcquireResult parses one acquire response and updates acquired/backups.
+// Returns an error on script-drift parse failure so the caller can surface it via
+// drainSlotAcquireResponses' firstErr channel — without this, an unparseable
+// success-int gets silently treated as "not acquired" and acquireMultiWriteLocks
+// loops forever recomputing remaining against the same broken response.
 func (pca *PrimeableCacheAside) recordSlotAcquireResult(
 	entry lockAcquireEntry,
 	arr []rueidis.RedisMessage,
 	acquired map[string]string,
 	backups map[string]savedValue,
-) {
+) error {
 	success, ierr := arr[0].AsInt64()
 	if ierr != nil {
 		pca.logger.Error("unexpected non-integer in lock-acquire response", "key", entry.key, "error", ierr)
-		return
+		return fmt.Errorf("parse success: %w", ierr)
 	}
 	if success != 1 {
-		return
+		return nil
 	}
 	acquired[entry.key] = entry.lockVal
 	saved := parseBackup(pca.logger, entry.key, arr[1], arr[2])
 	if saved.present {
 		backups[entry.key] = saved
 	}
+	return nil
 }
 
 // rollbackAfterFirstFailure releases locks acquired AFTER the first failed key
