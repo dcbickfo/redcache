@@ -76,8 +76,9 @@ func (rca *CacheAside) shouldRefresh(cachePTTL int64, ttl time.Duration) bool {
 // If the queue is full, the refresh is silently dropped (stale value is still served).
 //
 // Safe against concurrent Close: the closing flag short-circuits the common case,
-// and a recover guards the unavoidable race where Close runs between the check
-// and the send (Go has no atomic "send-if-not-closed" primitive).
+// and enqueueRefresh selects on refreshDone so a Close racing the send unblocks
+// the sender without a closed-channel send (we only ever close the signal channel,
+// never the data channel).
 func (rca *CacheAside) triggerRefresh(
 	ctx context.Context,
 	ttl time.Duration,
@@ -178,7 +179,7 @@ func (rca *CacheAside) doSingleRefresh(
 // Two-level dedup: local syncx.Map + distributed SET NX on separate refresh keys.
 // If the queue is full, the refresh is silently dropped (stale values are still served).
 //
-// Safe against concurrent Close: see triggerRefresh for the closing+recover pattern.
+// Safe against concurrent Close: see triggerRefresh for the closing+refreshDone pattern.
 func (rca *CacheAside) triggerMultiRefresh(
 	ctx context.Context,
 	ttl time.Duration,
