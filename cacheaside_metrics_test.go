@@ -228,7 +228,7 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 		rueidis.ClientOption{InitAddress: addr},
 		redcache.CacheAsideOption{
 			LockTTL:              time.Second * 3,
-			RefreshAfterFraction: 0.5,
+			RefreshAfterFraction: 0.01, // refresh almost immediately, removes timing-margin flake
 			RefreshWorkers:       1,
 			RefreshQueueSize:     1,
 			Metrics:              metrics,
@@ -247,7 +247,7 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 		keys[i] = fmt.Sprintf("key:%d:%s", i, uuid.New().String())
 	}
 
-	ttl := 3 * time.Second
+	ttl := time.Second
 	populateCb := func(_ context.Context, _ string) (string, error) {
 		return "initial", nil
 	}
@@ -256,7 +256,7 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	time.Sleep(1700 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // cross the very-low refresh threshold
 
 	refreshCb := func(_ context.Context, _ string) (string, error) {
 		time.Sleep(500 * time.Millisecond) // keep the single worker busy
