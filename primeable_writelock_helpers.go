@@ -382,7 +382,7 @@ func (pca *PrimeableCacheAside) touchMultiLocks(ctx context.Context, lockValues 
 		}
 		if result == 0 {
 			pca.logger.Debug("lock lost during refresh", "key", key)
-			pca.metrics.LockLost(key)
+			pca.emitLockLost(key)
 		}
 	}
 }
@@ -471,7 +471,7 @@ func (pca *PrimeableCacheAside) collectCASResults(
 		}
 		if val == 0 {
 			failed[key] = ErrLockLost
-			pca.metrics.LockLost(key)
+			pca.emitLockLost(key)
 			continue
 		}
 		*succeeded = append(*succeeded, key)

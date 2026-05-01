@@ -6,34 +6,45 @@ package redcache
 // background workers and request goroutines simultaneously. Implementations
 // should be cheap — they run on the hot path.
 //
+// High-volume events (CacheHits, CacheMisses, LockContended, RefreshTriggered,
+// RefreshSkipped, RefreshDropped) are aggregated per operation and emitted
+// once with a count, rather than once per key. Use logs for per-key diagnosis.
+//
+// Low-volume diagnostic events (LockLost, RefreshError, RefreshPanicked) carry
+// the affected key for tagging.
+//
 // Implementations that only care about a subset of events can embed
 // NoopMetrics and override the methods of interest.
 type Metrics interface {
-	// CacheHit fires when a Get/GetMulti served a value from the client-side cache.
-	CacheHit(key string)
-	// CacheMiss fires when a Get/GetMulti had to populate via the user callback.
-	CacheMiss(key string)
-	// LockContended fires when an operation observed an existing lock and waited.
-	LockContended(key string)
+	// CacheHits fires once per Get/GetMulti with the number of values served
+	// from the client-side cache.
+	CacheHits(n int64)
+	// CacheMisses fires once per Get/GetMulti with the number of keys that
+	// had to be populated via the user callback.
+	CacheMisses(n int64)
+	// LockContended fires once per Get/GetMulti with the number of keys that
+	// observed an existing lock and waited.
+	LockContended(n int64)
+	// RefreshTriggered fires once per refresh enqueue with the number of keys
+	// the job covers.
+	RefreshTriggered(n int64)
+	// RefreshSkipped fires with the number of keys skipped due to local or
+	// distributed dedup.
+	RefreshSkipped(n int64)
+	// RefreshDropped fires with the number of keys whose refresh was dropped
+	// because the worker queue was full.
+	RefreshDropped(n int64)
 	// LockLost fires when a CAS detected the operation's lock was no longer held
-	// (typically because a ForceSet or similar overwrote it).
+	// (typically because a ForceSet or similar overwrote it). Per-key for diagnosis.
 	LockLost(key string)
-	// RefreshTriggered fires when a refresh-ahead job was enqueued.
-	RefreshTriggered(key string)
-	// RefreshSkipped fires when a refresh was skipped due to local or distributed dedup.
-	RefreshSkipped(key string)
-	// RefreshDropped fires when a refresh was dropped because the worker queue was full.
-	RefreshDropped(key string)
-	// RefreshPanicked fires once per affected key when a refresh worker
-	// recovered from a panic in the callback. The panic value itself is logged
-	// via the configured logger; the metric carries only the key for tagging.
-	RefreshPanicked(key string)
 	// RefreshError fires when a refresh-ahead operation failed due to a Redis
-	// error (network, timeout, command failure) rather than expected dedup
-	// contention. Distinct from RefreshSkipped, which signals healthy contention.
+	// error or callback error. Per-key for diagnosis.
 	RefreshError(key string)
+	// RefreshPanicked fires once per affected key when a refresh worker
+	// recovered from a panic in the callback. Per-key for diagnosis.
+	RefreshPanicked(key string)
 	// InvalidationError fires when a Redis invalidation message could not be
-	// parsed. The key is unknown in this case, so no key is reported.
+	// parsed. The key is unknown in this case.
 	InvalidationError()
 }
 
@@ -44,35 +55,35 @@ type Metrics interface {
 //	    redcache.NoopMetrics
 //	}
 //
-//	func (myMetrics) CacheMiss(key string) { /* count miss */ }
+//	func (myMetrics) CacheMisses(n int64) { /* count miss */ }
 type NoopMetrics struct{}
 
-// CacheHit implements Metrics.
-func (NoopMetrics) CacheHit(string) {}
+// CacheHits implements Metrics.
+func (NoopMetrics) CacheHits(int64) {}
 
-// CacheMiss implements Metrics.
-func (NoopMetrics) CacheMiss(string) {}
+// CacheMisses implements Metrics.
+func (NoopMetrics) CacheMisses(int64) {}
 
 // LockContended implements Metrics.
-func (NoopMetrics) LockContended(string) {}
+func (NoopMetrics) LockContended(int64) {}
+
+// RefreshTriggered implements Metrics.
+func (NoopMetrics) RefreshTriggered(int64) {}
+
+// RefreshSkipped implements Metrics.
+func (NoopMetrics) RefreshSkipped(int64) {}
+
+// RefreshDropped implements Metrics.
+func (NoopMetrics) RefreshDropped(int64) {}
 
 // LockLost implements Metrics.
 func (NoopMetrics) LockLost(string) {}
 
-// RefreshTriggered implements Metrics.
-func (NoopMetrics) RefreshTriggered(string) {}
-
-// RefreshSkipped implements Metrics.
-func (NoopMetrics) RefreshSkipped(string) {}
-
-// RefreshDropped implements Metrics.
-func (NoopMetrics) RefreshDropped(string) {}
+// RefreshError implements Metrics.
+func (NoopMetrics) RefreshError(string) {}
 
 // RefreshPanicked implements Metrics.
 func (NoopMetrics) RefreshPanicked(string) {}
-
-// RefreshError implements Metrics.
-func (NoopMetrics) RefreshError(string) {}
 
 // InvalidationError implements Metrics.
 func (NoopMetrics) InvalidationError() {}

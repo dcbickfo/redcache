@@ -53,7 +53,7 @@ func (rca *CacheAside) runRefreshJob(job refreshJob) {
 		if r := recover(); r != nil {
 			rca.logger.Error("refresh worker panic recovered", "keys", job.keys, "panic", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
 			for _, k := range job.keys {
-				rca.metrics.RefreshPanicked(k)
+				rca.emitRefreshPanicked(k)
 			}
 		}
 	}()
@@ -90,7 +90,7 @@ func (rca *CacheAside) triggerRefresh(
 	}
 	// Local dedup: skip if this process is already refreshing this key.
 	if _, loaded := rca.refreshing.LoadOrStore(key, struct{}{}); loaded {
-		rca.metrics.RefreshSkipped(key)
+		rca.emitRefreshSkipped(1)
 		return
 	}
 
@@ -112,19 +112,17 @@ func (rca *CacheAside) triggerRefresh(
 func (rca *CacheAside) enqueueRefresh(job refreshJob, keys []string) {
 	select {
 	case rca.refreshQueue <- job:
-		for _, key := range keys {
-			rca.metrics.RefreshTriggered(key)
-		}
+		rca.emitRefreshTriggered(len(keys))
 	case <-rca.refreshDone:
 		for _, key := range keys {
 			rca.refreshing.Delete(key)
-			rca.metrics.RefreshDropped(key)
 		}
+		rca.emitRefreshDropped(len(keys))
 	default:
 		for _, key := range keys {
 			rca.refreshing.Delete(key)
-			rca.metrics.RefreshDropped(key)
 		}
+		rca.emitRefreshDropped(len(keys))
 	}
 }
 
@@ -146,11 +144,11 @@ func (rca *CacheAside) doSingleRefresh(
 	err := rca.client.Do(refreshCtx, rca.client.B().Set().Key(refreshKey).Value("1").Nx().Px(rca.lockTTL).Build()).Error()
 	if err != nil {
 		if rueidis.IsRedisNil(err) {
-			rca.metrics.RefreshSkipped(key)
+			rca.emitRefreshSkipped(1)
 			return
 		}
 		rca.logger.Error("refresh-ahead lock acquisition failed", "key", key, "error", err)
-		rca.metrics.RefreshError(key)
+		rca.emitRefreshError(key)
 		return
 	}
 	defer func() {
@@ -164,14 +162,14 @@ func (rca *CacheAside) doSingleRefresh(
 	val, err := fn(refreshCtx, key)
 	if err != nil {
 		rca.logger.Error("refresh-ahead callback failed", "key", key, "error", err)
-		rca.metrics.RefreshError(key)
+		rca.emitRefreshError(key)
 		return
 	}
 
 	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
 	if err := refreshAheadSetScript.Exec(refreshCtx, rca.client, []string{key}, []string{val, ttlMs, rca.lockPrefix}).Error(); err != nil {
 		rca.logger.Error("refresh-ahead set failed", "key", key, "error", err)
-		rca.metrics.RefreshError(key)
+		rca.emitRefreshError(key)
 	}
 }
 
@@ -191,13 +189,15 @@ func (rca *CacheAside) triggerMultiRefresh(
 	}
 	// Local dedup: filter to keys not already being refreshed.
 	var toRefresh []string
+	var skipped int
 	for _, key := range keys {
 		if _, loaded := rca.refreshing.LoadOrStore(key, struct{}{}); !loaded {
 			toRefresh = append(toRefresh, key)
 		} else {
-			rca.metrics.RefreshSkipped(key)
+			skipped++
 		}
 	}
+	rca.emitRefreshSkipped(skipped)
 	if len(toRefresh) == 0 {
 		return
 	}
@@ -237,7 +237,7 @@ func (rca *CacheAside) doMultiRefresh(
 	if err != nil {
 		rca.logger.Error("refresh-ahead multi callback failed", "error", err)
 		for _, key := range lockedKeys {
-			rca.metrics.RefreshError(key)
+			rca.emitRefreshError(key)
 		}
 		return
 	}
@@ -256,18 +256,20 @@ func (rca *CacheAside) acquireRefreshLocks(ctx context.Context, keys []string) [
 	resps := rca.client.DoMulti(ctx, cmds...)
 
 	var locked []string
+	var skipped int
 	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
 			if rueidis.IsRedisNil(err) {
-				rca.metrics.RefreshSkipped(keys[i])
+				skipped++
 			} else {
 				rca.logger.Error("refresh-ahead lock acquisition failed", "key", keys[i], "error", err)
-				rca.metrics.RefreshError(keys[i])
+				rca.emitRefreshError(keys[i])
 			}
 			continue
 		}
 		locked = append(locked, keys[i])
 	}
+	rca.emitRefreshSkipped(skipped)
 	return locked
 }
 
@@ -310,7 +312,7 @@ func (rca *CacheAside) setRefreshedValues(ctx context.Context, ttl time.Duration
 	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
 			rca.logger.Error("refresh-ahead multi set failed", "key", keyOrder[i], "error", err)
-			rca.metrics.RefreshError(keyOrder[i])
+			rca.emitRefreshError(keyOrder[i])
 		}
 	}
 }

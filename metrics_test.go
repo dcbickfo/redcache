@@ -13,13 +13,13 @@ func TestNoopMetrics_AllMethodsSafe(t *testing.T) {
 	t.Parallel()
 	// All methods must be safe to call and never panic.
 	m := NoopMetrics{}
-	m.CacheHit("x")
-	m.CacheMiss("x")
-	m.LockContended("x")
+	m.CacheHits(1)
+	m.CacheMisses(1)
+	m.LockContended(1)
 	m.LockLost("x")
-	m.RefreshTriggered("x")
-	m.RefreshSkipped("x")
-	m.RefreshDropped("x")
+	m.RefreshTriggered(1)
+	m.RefreshSkipped(1)
+	m.RefreshDropped(1)
 	m.RefreshPanicked("x")
 	m.RefreshError("x")
 	m.InvalidationError()
@@ -50,16 +50,16 @@ type countingMetrics struct {
 	InvalidationErrors            int
 }
 
-func (c *countingMetrics) CacheHit(string)         { c.Hits++ }
-func (c *countingMetrics) CacheMiss(string)        { c.Misses++ }
-func (c *countingMetrics) LockContended(string)    { c.Contended++ }
-func (c *countingMetrics) LockLost(string)         { c.Lost++ }
-func (c *countingMetrics) RefreshTriggered(string) { c.Triggered++ }
-func (c *countingMetrics) RefreshSkipped(string)   { c.Skipped++ }
-func (c *countingMetrics) RefreshDropped(string)   { c.Dropped++ }
-func (c *countingMetrics) RefreshPanicked(string)  { c.Panics++ }
-func (c *countingMetrics) RefreshError(string)     { c.RefreshErrors++ }
-func (c *countingMetrics) InvalidationError()      { c.InvalidationErrors++ }
+func (c *countingMetrics) CacheHits(n int64)        { c.Hits += int(n) }
+func (c *countingMetrics) CacheMisses(n int64)      { c.Misses += int(n) }
+func (c *countingMetrics) LockContended(n int64)    { c.Contended += int(n) }
+func (c *countingMetrics) LockLost(string)          { c.Lost++ }
+func (c *countingMetrics) RefreshTriggered(n int64) { c.Triggered += int(n) }
+func (c *countingMetrics) RefreshSkipped(n int64)   { c.Skipped += int(n) }
+func (c *countingMetrics) RefreshDropped(n int64)   { c.Dropped += int(n) }
+func (c *countingMetrics) RefreshPanicked(string)   { c.Panics++ }
+func (c *countingMetrics) RefreshError(string)      { c.RefreshErrors++ }
+func (c *countingMetrics) InvalidationError()       { c.InvalidationErrors++ }
 
 func TestCountingMetrics_ImplementsInterface(t *testing.T) {
 	t.Parallel()

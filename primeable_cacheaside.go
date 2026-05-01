@@ -103,7 +103,7 @@ func (pca *PrimeableCacheAside) Set(
 			return fmt.Errorf("set key %q: parse response: %w", key, ierr)
 		}
 		if casResult == 0 {
-			pca.metrics.LockLost(key)
+			pca.emitLockLost(key)
 			return fmt.Errorf("key %q: %w", key, ErrLockLost)
 		}
 		return nil
@@ -130,7 +130,7 @@ func (pca *PrimeableCacheAside) acquireSingleWriteLock(
 
 	// If current value is a lock, wait for it to be released.
 	if !rueidis.IsRedisNil(rerr) && strings.HasPrefix(val, pca.lockPrefix) {
-		pca.metrics.LockContended(key)
+		pca.emitLockContended(1)
 		return savedValue{}, true, waitOrCancel(ctx, waitChan)
 	}
 
@@ -141,7 +141,7 @@ func (pca *PrimeableCacheAside) acquireSingleWriteLock(
 	}
 	if !acquired {
 		// Another lock appeared between DoCache and Exec.
-		pca.metrics.LockContended(key)
+		pca.emitLockContended(1)
 		return savedValue{}, true, waitOrCancel(ctx, waitChan)
 	}
 	return saved, false, nil

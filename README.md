@@ -171,14 +171,16 @@ client, err := redcache.NewRedCacheAside(
 
 Implement `Metrics` (or embed `NoopMetrics` and override the methods you care about) to wire counters into Prometheus, OpenTelemetry, or any other backend. Methods are called on the hot path and must be concurrent-safe.
 
+High-volume events (`CacheHits`, `CacheMisses`, `LockContended`, `RefreshTriggered`, `RefreshSkipped`, `RefreshDropped`) are aggregated per operation and emitted once with a count rather than once per key. Diagnostic events (`LockLost`, `RefreshError`, `RefreshPanicked`) carry the affected key.
+
 ```go
 type myMetrics struct {
     redcache.NoopMetrics
     hits, misses atomic.Int64
 }
 
-func (m *myMetrics) CacheHit(string)  { m.hits.Add(1) }
-func (m *myMetrics) CacheMiss(string) { m.misses.Add(1) }
+func (m *myMetrics) CacheHits(n int64)   { m.hits.Add(n) }
+func (m *myMetrics) CacheMisses(n int64) { m.misses.Add(n) }
 
 client, err := redcache.NewRedCacheAside(
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},

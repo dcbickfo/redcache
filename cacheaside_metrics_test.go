@@ -27,13 +27,13 @@ type capturingMetrics struct {
 	errKeys                                  []string
 }
 
-func (m *capturingMetrics) CacheHit(string)         { m.hits.Add(1) }
-func (m *capturingMetrics) CacheMiss(string)        { m.misses.Add(1) }
-func (m *capturingMetrics) LockContended(string)    { m.contended.Add(1) }
-func (m *capturingMetrics) LockLost(string)         { m.lost.Add(1) }
-func (m *capturingMetrics) RefreshTriggered(string) { m.triggered.Add(1) }
-func (m *capturingMetrics) RefreshSkipped(string)   { m.skipped.Add(1) }
-func (m *capturingMetrics) RefreshDropped(string)   { m.dropped.Add(1) }
+func (m *capturingMetrics) CacheHits(n int64)        { m.hits.Add(n) }
+func (m *capturingMetrics) CacheMisses(n int64)      { m.misses.Add(n) }
+func (m *capturingMetrics) LockContended(n int64)    { m.contended.Add(n) }
+func (m *capturingMetrics) LockLost(string)          { m.lost.Add(1) }
+func (m *capturingMetrics) RefreshTriggered(n int64) { m.triggered.Add(n) }
+func (m *capturingMetrics) RefreshSkipped(n int64)   { m.skipped.Add(n) }
+func (m *capturingMetrics) RefreshDropped(n int64)   { m.dropped.Add(n) }
 func (m *capturingMetrics) RefreshPanicked(key string) {
 	m.panic.Add(1)
 	m.mu.Lock()

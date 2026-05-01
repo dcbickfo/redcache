@@ -103,20 +103,21 @@ type Logger interface {
 // CacheAside provides a cache-aside pattern backed by Redis with distributed locking
 // and client-side caching via rueidis invalidation messages.
 type CacheAside struct {
-	client        rueidis.Client
-	locks         syncx.Map[string, *lockEntry]
-	lockTTL       time.Duration
-	logger        Logger
-	metrics       Metrics
-	lockPrefix    string
-	refreshAfter  float64                     // 0 = disabled
-	refreshing    syncx.Map[string, struct{}] // dedup in-flight refreshes (local)
-	refreshPrefix string                      // prefix for distributed refresh lock keys
-	refreshQueue  chan refreshJob             // worker pool job queue (nil when disabled)
-	refreshDone   chan struct{}               // closed by Close to signal workers/senders; never the data channel
-	refreshWg     sync.WaitGroup              // tracks active refresh workers
-	closing       atomic.Bool                 // set true at the start of Close to gate refresh sends
-	closeOnce     sync.Once                   // guards Close() against double invocation
+	client         rueidis.Client
+	locks          syncx.Map[string, *lockEntry]
+	lockTTL        time.Duration
+	logger         Logger
+	metrics        Metrics
+	metricsEnabled bool // false when metrics is NoopMetrics{} — gates hot-path emits
+	lockPrefix     string
+	refreshAfter   float64                     // 0 = disabled
+	refreshing     syncx.Map[string, struct{}] // dedup in-flight refreshes (local)
+	refreshPrefix  string                      // prefix for distributed refresh lock keys
+	refreshQueue   chan refreshJob             // worker pool job queue (nil when disabled)
+	refreshDone    chan struct{}               // closed by Close to signal workers/senders; never the data channel
+	refreshWg      sync.WaitGroup              // tracks active refresh workers
+	closing        atomic.Bool                 // set true at the start of Close to gate refresh sends
+	closeOnce      sync.Once                   // guards Close() against double invocation
 }
 
 // CacheAsideOption configures a CacheAside instance.
@@ -219,13 +220,15 @@ func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOpti
 		return nil, err
 	}
 
+	_, isNoop := caOption.Metrics.(NoopMetrics)
 	rca := &CacheAside{
-		lockTTL:       caOption.LockTTL,
-		logger:        caOption.Logger,
-		metrics:       caOption.Metrics,
-		lockPrefix:    caOption.LockPrefix,
-		refreshAfter:  caOption.RefreshAfterFraction,
-		refreshPrefix: caOption.RefreshLockPrefix,
+		lockTTL:        caOption.LockTTL,
+		logger:         caOption.Logger,
+		metrics:        caOption.Metrics,
+		metricsEnabled: !isNoop,
+		lockPrefix:     caOption.LockPrefix,
+		refreshAfter:   caOption.RefreshAfterFraction,
+		refreshPrefix:  caOption.RefreshLockPrefix,
 	}
 	clientOption.OnInvalidations = rca.onInvalidate
 
@@ -285,12 +288,76 @@ func (rca *CacheAside) cleanupCtx(ctx context.Context) (context.Context, context
 	return context.WithTimeout(context.WithoutCancel(ctx), rca.lockTTL)
 }
 
+// Metric emit helpers. Each gates on rca.metricsEnabled so call sites stay
+// single-statement and the noop case compiles to a single bool check.
+// Count-based helpers also short-circuit on n <= 0 to avoid emitting zeros.
+
+func (rca *CacheAside) emitCacheHits(n int) {
+	if rca.metricsEnabled && n > 0 {
+		rca.metrics.CacheHits(int64(n))
+	}
+}
+
+func (rca *CacheAside) emitCacheMisses(n int) {
+	if rca.metricsEnabled && n > 0 {
+		rca.metrics.CacheMisses(int64(n))
+	}
+}
+
+func (rca *CacheAside) emitLockContended(n int) {
+	if rca.metricsEnabled && n > 0 {
+		rca.metrics.LockContended(int64(n))
+	}
+}
+
+func (rca *CacheAside) emitRefreshTriggered(n int) {
+	if rca.metricsEnabled && n > 0 {
+		rca.metrics.RefreshTriggered(int64(n))
+	}
+}
+
+func (rca *CacheAside) emitRefreshSkipped(n int) {
+	if rca.metricsEnabled && n > 0 {
+		rca.metrics.RefreshSkipped(int64(n))
+	}
+}
+
+func (rca *CacheAside) emitRefreshDropped(n int) {
+	if rca.metricsEnabled && n > 0 {
+		rca.metrics.RefreshDropped(int64(n))
+	}
+}
+
+func (rca *CacheAside) emitLockLost(key string) {
+	if rca.metricsEnabled {
+		rca.metrics.LockLost(key)
+	}
+}
+
+func (rca *CacheAside) emitRefreshError(key string) {
+	if rca.metricsEnabled {
+		rca.metrics.RefreshError(key)
+	}
+}
+
+func (rca *CacheAside) emitRefreshPanicked(key string) {
+	if rca.metricsEnabled {
+		rca.metrics.RefreshPanicked(key)
+	}
+}
+
+func (rca *CacheAside) emitInvalidationError() {
+	if rca.metricsEnabled {
+		rca.metrics.InvalidationError()
+	}
+}
+
 func (rca *CacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 	for _, m := range messages {
 		key, err := m.ToString()
 		if err != nil {
 			rca.logger.Error("failed to parse invalidation message", "error", err)
-			rca.metrics.InvalidationError()
+			rca.emitInvalidationError()
 			continue
 		}
 		entry, loaded := rca.locks.LoadAndDelete(key)
@@ -367,7 +434,7 @@ retry:
 	if err == nil {
 		// Cache hit. Empty values are valid hits; tryGet returns errNotFound
 		// for actually-missing or lock-prefixed entries.
-		rca.metrics.CacheHit(key)
+		rca.emitCacheHits(1)
 		if rca.shouldRefresh(res.pttl, ttl) {
 			rca.triggerRefresh(ctx, ttl, key, fn)
 		}
@@ -377,7 +444,7 @@ retry:
 		return "", err
 	}
 
-	rca.metrics.CacheMiss(key)
+	rca.emitCacheMisses(1)
 	val, err := rca.trySetKeyFunc(ctx, ttl, key, fn)
 	if err == nil {
 		return val, nil
@@ -386,7 +453,7 @@ retry:
 	if errors.Is(err, errLockFailed) || errors.Is(err, ErrLockLost) {
 		// errLockFailed: another caller holds the lock — wait then retry.
 		// ErrLockLost: a ForceSet (or similar) stole our lock — retry to read it.
-		rca.metrics.LockContended(key)
+		rca.emitLockContended(1)
 		select {
 		case <-wait:
 			goto retry
@@ -521,7 +588,7 @@ func (rca *CacheAside) setWithLock(ctx context.Context, ttl time.Duration, key s
 		if !rueidis.IsRedisNil(err) {
 			return "", fmt.Errorf("set key %q: %w", key, err)
 		}
-		rca.metrics.LockLost(key)
+		rca.emitLockLost(key)
 		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
 	}
 	// The Lua script returns 0 when the lock was lost (CAS mismatch), 1 on success.
@@ -532,7 +599,7 @@ func (rca *CacheAside) setWithLock(ctx context.Context, ttl time.Duration, key s
 		return "", fmt.Errorf("set key %q: parse response: %w", key, ierr)
 	}
 	if val == 0 {
-		rca.metrics.LockLost(key)
+		rca.emitLockLost(key)
 		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
 	}
 	return valLock.val, nil
@@ -569,14 +636,14 @@ retry:
 		res[k] = v
 		delete(waitLock, k)
 	}
-	rca.emitCacheHits(multiRes.vals)
+	rca.emitCacheHits(len(multiRes.vals))
 
 	if len(multiRes.needRefresh) > 0 {
 		rca.triggerMultiRefresh(ctx, ttl, multiRes.needRefresh, fn)
 	}
 
 	if len(waitLock) > 0 {
-		rca.emitCacheMisses(waitLock)
+		rca.emitCacheMisses(len(waitLock))
 		vals, err := rca.trySetMultiKeyFn(ctx, ttl, mapsx.Keys(waitLock), fn)
 		if err != nil {
 			return nil, err
@@ -589,7 +656,7 @@ retry:
 
 	if len(waitLock) > 0 {
 		// Wait for lock releases (channels auto-close after lockTTL or on invalidation)
-		rca.emitLockContended(waitLock)
+		rca.emitLockContended(len(waitLock))
 		if err = syncx.WaitForAll(ctx, mapsx.Values(waitLock)); err != nil {
 			// Parent context cancelled or deadline exceeded
 			return nil, ctx.Err()
@@ -597,24 +664,6 @@ retry:
 		goto retry
 	}
 	return res, err
-}
-
-func (rca *CacheAside) emitCacheHits(found map[string]string) {
-	for k := range found {
-		rca.metrics.CacheHit(k)
-	}
-}
-
-func (rca *CacheAside) emitCacheMisses(missed map[string]<-chan struct{}) {
-	for k := range missed {
-		rca.metrics.CacheMiss(k)
-	}
-}
-
-func (rca *CacheAside) emitLockContended(waiting map[string]<-chan struct{}) {
-	for k := range waiting {
-		rca.metrics.LockContended(k)
-	}
 }
 
 func (rca *CacheAside) registerAll(waitLock map[string]<-chan struct{}) {
@@ -822,7 +871,7 @@ func (rca *CacheAside) runSlotSet(ctx context.Context, kos keyOrderAndSet) slotS
 func (rca *CacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResult) (bool, error) {
 	if err := resp.Error(); err != nil {
 		if rueidis.IsRedisNil(err) {
-			rca.metrics.LockLost(key)
+			rca.emitLockLost(key)
 			return false, nil
 		}
 		return false, fmt.Errorf("set key %q: %w", key, err)
@@ -833,7 +882,7 @@ func (rca *CacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResu
 		return false, fmt.Errorf("set key %q: parse response: %w", key, ierr)
 	}
 	if val == 0 {
-		rca.metrics.LockLost(key)
+		rca.emitLockLost(key)
 		return false, nil
 	}
 	return true, nil
