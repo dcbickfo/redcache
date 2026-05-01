@@ -369,48 +369,45 @@ func (rca *CacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 
 func (rca *CacheAside) register(key string) <-chan struct{} {
 retry:
-	// Create new entry with context that auto-cancels after lockTTL
-	ctx, cancel := context.WithTimeout(context.Background(), rca.lockTTL)
+	// Fast path: entry already registered. Skip the context+timer allocation
+	// that would otherwise be created and immediately cancelled when LoadOrStore
+	// returns an existing entry — the dominant cost for cache-hit Gets.
+	if actual, ok := rca.locks.Load(key); ok {
+		select {
+		case <-actual.ctx.Done():
+			// Stale entry - try to atomically delete it and retry. On failure,
+			// another goroutine raced us; retry to pick up whatever they did.
+			rca.locks.CompareAndDelete(key, actual)
+			goto retry
+		default:
+			return actual.ctx.Done()
+		}
+	}
 
+	// Slow path: create new entry with context that auto-cancels after lockTTL.
+	ctx, cancel := context.WithTimeout(context.Background(), rca.lockTTL)
 	newEntry := &lockEntry{
 		ctx:    ctx,
 		cancel: cancel,
 	}
-
-	// Store or get existing entry atomically
 	actual, loaded := rca.locks.LoadOrStore(key, newEntry)
-
-	// If we successfully stored, schedule automatic cleanup on expiration
 	if !loaded {
-		// Use context.AfterFunc to clean up expired entry without blocking goroutine
+		// Stored — schedule cleanup on expiration without blocking a goroutine.
 		context.AfterFunc(ctx, func() {
 			rca.locks.CompareAndDelete(key, newEntry)
 		})
 		return ctx.Done()
 	}
 
-	// Another goroutine stored first, cancel our context to prevent leak
+	// Lost the race — cancel our just-created context to release the timer.
 	cancel()
 
-	// Check if their context is still active (not cancelled/timed out)
 	select {
 	case <-actual.ctx.Done():
-		// Context is done - try to atomically delete it and retry
-		if rca.locks.CompareAndDelete(key, actual) {
-			// We successfully deleted the expired entry, retry
-			goto retry
-		}
-		// CompareAndDelete failed - another goroutine modified it
-		// Load the new entry and use it
-		newEntry, loaded := rca.locks.Load(key)
-		if !loaded {
-			// Entry was deleted by another goroutine, retry registration
-			goto retry
-		}
-		// Use the new entry's context
-		return newEntry.ctx.Done()
+		// Their entry is stale; remove and retry.
+		rca.locks.CompareAndDelete(key, actual)
+		goto retry
 	default:
-		// Context is still active - use it
 		return actual.ctx.Done()
 	}
 }
@@ -515,14 +512,6 @@ type cacheReadResult struct {
 	pttl int64
 }
 
-// multiCacheReadResult is the return type of tryGetMulti: the cached values
-// found and the subset of keys whose remaining TTL has crossed the refresh
-// threshold.
-type multiCacheReadResult struct {
-	vals        map[string]string
-	needRefresh []string
-}
-
 func (rca *CacheAside) tryGet(ctx context.Context, ttl time.Duration, key string) (cacheReadResult, error) {
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), ttl)
 	val, err := resp.ToString()
@@ -617,102 +606,114 @@ func (rca *CacheAside) GetMulti(
 	keys []string,
 	fn func(ctx context.Context, key []string) (val map[string]string, err error),
 ) (map[string]string, error) {
+	if len(keys) == 0 {
+		return map[string]string{}, nil
+	}
 	res := make(map[string]string, len(keys))
 
-	waitLock := make(map[string]<-chan struct{}, len(keys))
-	for _, key := range keys {
-		waitLock[key] = nil
-	}
+	// Parallel slices: pending[i] is an unresolved key, chans[i] is its wait
+	// channel from register(). Backed by stack-friendly slices instead of a
+	// map+channel-of-channels — avoids hash inserts and mapsx.Keys/Values
+	// conversions on every iteration.
+	pending := append(make([]string, 0, len(keys)), keys...)
+	chans := make([]<-chan struct{}, len(keys))
 
 retry:
-	rca.registerAll(waitLock)
+	chans = chans[:len(pending)]
+	for i, key := range pending {
+		chans[i] = rca.register(key)
+	}
 
-	multiRes, err := rca.tryGetMulti(ctx, ttl, mapsx.Keys(waitLock))
+	hitsBefore := len(res)
+	needRefresh, err := rca.tryGetMulti(ctx, ttl, pending, res)
 	if err != nil && !rueidis.IsRedisNil(err) {
 		return nil, err
 	}
+	rca.emitCacheHits(len(res) - hitsBefore)
 
-	for k, v := range multiRes.vals {
-		res[k] = v
-		delete(waitLock, k)
-	}
-	rca.emitCacheHits(len(multiRes.vals))
-
-	if len(multiRes.needRefresh) > 0 {
-		rca.triggerMultiRefresh(ctx, ttl, multiRes.needRefresh, fn)
+	if len(needRefresh) > 0 {
+		rca.triggerMultiRefresh(ctx, ttl, needRefresh, fn)
 	}
 
-	if len(waitLock) > 0 {
-		rca.emitCacheMisses(len(waitLock))
-		vals, err := rca.trySetMultiKeyFn(ctx, ttl, mapsx.Keys(waitLock), fn)
-		if err != nil {
+	pending, chans = filterResolved(pending, chans, res)
+
+	if len(pending) > 0 {
+		rca.emitCacheMisses(len(pending))
+		if err := rca.trySetMultiKeyFn(ctx, ttl, pending, fn, res); err != nil {
 			return nil, err
 		}
-		for k, v := range vals {
-			res[k] = v
-			delete(waitLock, k)
-		}
+		pending, chans = filterResolved(pending, chans, res)
 	}
 
-	if len(waitLock) > 0 {
-		// Wait for lock releases (channels auto-close after lockTTL or on invalidation)
-		rca.emitLockContended(len(waitLock))
-		if err = syncx.WaitForAll(ctx, mapsx.Values(waitLock)); err != nil {
-			// Parent context cancelled or deadline exceeded
+	if len(pending) > 0 {
+		// Wait for lock releases (channels auto-close after lockTTL or on invalidation).
+		rca.emitLockContended(len(pending))
+		if err = syncx.WaitForAll(ctx, chans); err != nil {
 			return nil, ctx.Err()
 		}
 		goto retry
 	}
-	return res, err
+	return res, nil
 }
 
-func (rca *CacheAside) registerAll(waitLock map[string]<-chan struct{}) {
-	for key := range waitLock {
-		waitLock[key] = rca.register(key)
+// filterResolved drops keys present in resolved from pending+chans in-place via
+// swap-keep-shrink, returning the trimmed views over the same backing arrays.
+func filterResolved(pending []string, chans []<-chan struct{}, resolved map[string]string) ([]string, []<-chan struct{}) {
+	n := 0
+	for i, k := range pending {
+		if _, ok := resolved[k]; !ok {
+			pending[n] = pending[i]
+			chans[n] = chans[i]
+			n++
+		}
 	}
+	return pending[:n], chans[:n]
 }
 
-func (rca *CacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string) (multiCacheReadResult, error) {
+// tryGetMulti reads keys from the client-side cache, writing hit values
+// directly into res. Returns the subset of hit keys whose remaining TTL has
+// crossed the refresh threshold.
+func (rca *CacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string, res map[string]string) ([]string, error) {
 	multi := make([]rueidis.CacheableTTL, len(keys))
 	for i, key := range keys {
-		cmd := rca.client.B().Get().Key(key).Cache()
 		multi[i] = rueidis.CacheableTTL{
-			Cmd: cmd,
+			Cmd: rca.client.B().Get().Key(key).Cache(),
 			TTL: ttl,
 		}
 	}
 	resps := rca.client.DoMultiCache(ctx, multi...)
 
-	out := multiCacheReadResult{vals: make(map[string]string)}
+	var needRefresh []string
 	for i, resp := range resps {
 		val, err := resp.ToString()
 		if rueidis.IsRedisNil(err) {
 			continue
 		}
 		if err != nil {
-			return multiCacheReadResult{}, fmt.Errorf("key %q: %w", keys[i], err)
+			return needRefresh, fmt.Errorf("key %q: %w", keys[i], err)
 		}
 		if !strings.HasPrefix(val, rca.lockPrefix) {
-			out.vals[keys[i]] = val
+			res[keys[i]] = val
 			if rca.shouldRefresh(resp.CachePTTL(), ttl) {
-				out.needRefresh = append(out.needRefresh, keys[i])
+				needRefresh = append(needRefresh, keys[i])
 			}
 		}
 	}
-	return out, nil
+	return needRefresh, nil
 }
 
+// trySetMultiKeyFn locks each pending key, calls fn for the values, sets them
+// in Redis, and writes the successfully-set entries directly into res.
 func (rca *CacheAside) trySetMultiKeyFn(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []string,
 	fn func(ctx context.Context, key []string) (val map[string]string, err error),
-) (map[string]string, error) {
-	res := make(map[string]string)
-
+	res map[string]string,
+) error {
 	lockVals, err := rca.tryLockMulti(ctx, keys)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	defer func() {
@@ -729,32 +730,30 @@ func (rca *CacheAside) trySetMultiKeyFn(
 		}
 	}()
 
-	// Case where we were unable to get any locks
 	if len(lockVals) == 0 {
-		return res, nil
+		return nil
 	}
 
 	vals, err := fn(ctx, mapsx.Keys(lockVals))
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	vL := make(map[string]valAndLock, len(vals))
-
 	for k, v := range vals {
 		vL[k] = valAndLock{v, lockVals[k]}
 	}
 
 	keysSet, err := rca.setMultiWithLock(ctx, ttl, vL)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	for _, keySet := range keysSet {
 		res[keySet] = vals[keySet]
 	}
 
-	return res, err
+	return nil
 }
 
 func (rca *CacheAside) tryLockMulti(ctx context.Context, keys []string) (map[string]string, error) {
