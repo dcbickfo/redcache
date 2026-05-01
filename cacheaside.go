@@ -460,17 +460,11 @@ func (rca *CacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), ttl)
 	val, err := resp.ToString()
 	if rueidis.IsRedisNil(err) || strings.HasPrefix(val, rca.lockPrefix) { // no response or is a lock value
-		if rueidis.IsRedisNil(err) {
-			rca.logger.Debug("cache miss - key not found", "key", key)
-		} else {
-			rca.logger.Debug("cache miss - lock value found", "key", key)
-		}
 		return cacheReadResult{}, errNotFound
 	}
 	if err != nil {
 		return cacheReadResult{}, fmt.Errorf("read key %q: %w", key, err)
 	}
-	rca.logger.Debug("cache hit", "key", key)
 	return cacheReadResult{val: val, pttl: resp.CachePTTL()}, nil
 }
 
@@ -513,11 +507,9 @@ func (rca *CacheAside) tryLock(ctx context.Context, key string) (string, error) 
 	//   other err:  real Redis error — propagate so the caller can fail fast
 	//               instead of waiting on a contention channel that will never close.
 	if rueidis.IsRedisNil(err) {
-		rca.logger.Debug("lock acquired", "key", key, "lockVal", lockVal)
 		return lockVal, nil
 	}
 	if err == nil {
-		rca.logger.Debug("lock contention - failed to acquire lock", "key", key)
 		return "", fmt.Errorf("lock key %q: %w", key, errLockFailed)
 	}
 	return "", fmt.Errorf("lock key %q: %w", key, err)
@@ -529,7 +521,6 @@ func (rca *CacheAside) setWithLock(ctx context.Context, ttl time.Duration, key s
 		if !rueidis.IsRedisNil(err) {
 			return "", fmt.Errorf("set key %q: %w", key, err)
 		}
-		rca.logger.Debug("lock lost during set operation", "key", key)
 		rca.metrics.LockLost(key)
 		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
 	}
@@ -541,11 +532,9 @@ func (rca *CacheAside) setWithLock(ctx context.Context, ttl time.Duration, key s
 		return "", fmt.Errorf("set key %q: parse response: %w", key, ierr)
 	}
 	if val == 0 {
-		rca.logger.Debug("lock lost during set operation", "key", key)
 		rca.metrics.LockLost(key)
 		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
 	}
-	rca.logger.Debug("value set successfully", "key", key)
 	return valLock.val, nil
 }
 
@@ -569,7 +558,7 @@ func (rca *CacheAside) GetMulti(
 	}
 
 retry:
-	waitLock = rca.registerAll(mapsx.Keys(waitLock))
+	rca.registerAll(waitLock)
 
 	multiRes, err := rca.tryGetMulti(ctx, ttl, mapsx.Keys(waitLock))
 	if err != nil && !rueidis.IsRedisNil(err) {
@@ -628,12 +617,10 @@ func (rca *CacheAside) emitLockContended(waiting map[string]<-chan struct{}) {
 	}
 }
 
-func (rca *CacheAside) registerAll(keys []string) map[string]<-chan struct{} {
-	res := make(map[string]<-chan struct{}, len(keys))
-	for _, key := range keys {
-		res[key] = rca.register(key)
+func (rca *CacheAside) registerAll(waitLock map[string]<-chan struct{}) {
+	for key := range waitLock {
+		waitLock[key] = rca.register(key)
 	}
-	return res
 }
 
 func (rca *CacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string) (multiCacheReadResult, error) {
@@ -835,7 +822,6 @@ func (rca *CacheAside) runSlotSet(ctx context.Context, kos keyOrderAndSet) slotS
 func (rca *CacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResult) (bool, error) {
 	if err := resp.Error(); err != nil {
 		if rueidis.IsRedisNil(err) {
-			rca.logger.Debug("lock lost during multi set", "key", key)
 			rca.metrics.LockLost(key)
 			return false, nil
 		}
@@ -847,7 +833,6 @@ func (rca *CacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResu
 		return false, fmt.Errorf("set key %q: parse response: %w", key, ierr)
 	}
 	if val == 0 {
-		rca.logger.Debug("lock lost during multi set", "key", key)
 		rca.metrics.LockLost(key)
 		return false, nil
 	}
