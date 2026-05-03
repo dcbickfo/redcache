@@ -5,39 +5,103 @@ import (
 	"time"
 )
 
-func TestShouldRefresh(t *testing.T) {
+func TestShouldRefresh_Deterministic(t *testing.T) {
 	t.Parallel()
+	// These cases all resolve without invoking the XFetch sampler:
+	// either refresh is disabled, the value is above the floor, or the
+	// value is below the floor with no XFetch metadata (delta=0) so the
+	// fallback "always refresh below floor" kicks in.
 	tests := []struct {
 		name         string
 		refreshAfter float64
+		refreshBeta  float64
 		cachePTTL    int64
 		ttl          time.Duration
+		delta        time.Duration
 		want         bool
 	}{
-		{"disabled when refreshAfter is 0", 0, 500, time.Second, false},
-		{"disabled even with low pttl", 0, 1, time.Second, false},
-		{"false when cachePTTL is 0", 0.8, 0, time.Second, false},
-		{"false when cachePTTL is negative", 0.8, -1, time.Second, false},
-		{"false when cachePTTL above threshold (refreshAfter=0.8)", 0.8, 500, time.Second, false},
-		{"true when cachePTTL below threshold (refreshAfter=0.8)", 0.8, 100, time.Second, true},
-		{"false when cachePTTL equals threshold", 0.8, 200, time.Second, false},
-		{"true at 40% remaining with refreshAfter=0.5", 0.5, 400, time.Second, true},
-		{"false at 60% remaining with refreshAfter=0.5", 0.5, 600, time.Second, false},
-		{"true near expiration with refreshAfter=0.9", 0.9, 50, time.Second, true},
-		{"false just above 10% remaining with refreshAfter=0.9", 0.9, 150, time.Second, false},
+		{"disabled when refreshAfter is 0", 0, 1, 500, time.Second, time.Millisecond, false},
+		{"disabled even with low pttl", 0, 1, 1, time.Second, time.Millisecond, false},
+		{"false when cachePTTL is 0", 0.8, 1, 0, time.Second, time.Millisecond, false},
+		{"false when cachePTTL is negative", 0.8, 1, -1, time.Second, time.Millisecond, false},
+		{"above floor", 0.8, 1, 500, time.Second, time.Millisecond, false},
+		{"at exact floor counts as above", 0.8, 1, 200, time.Second, time.Millisecond, false},
+		{"above floor at 60% remaining (refreshAfter=0.5)", 0.5, 1, 600, time.Second, time.Millisecond, false},
+		{"below floor with delta=0 falls back to always-refresh", 0.8, 1, 100, time.Second, 0, true},
+		{"below floor with refreshBeta=0 falls back to always-refresh", 0.8, 0, 100, time.Second, time.Millisecond, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			rca := &CacheAside{refreshAfter: tt.refreshAfter}
-			got := rca.shouldRefresh(tt.cachePTTL, tt.ttl)
+			rca := &CacheAside{refreshAfter: tt.refreshAfter, refreshBeta: tt.refreshBeta}
+			got := rca.shouldRefresh(tt.cachePTTL, tt.ttl, tt.delta)
 			if got != tt.want {
-				t.Errorf("shouldRefresh(cachePTTL=%d, ttl=%v) = %v, want %v (refreshAfter=%v)",
-					tt.cachePTTL, tt.ttl, got, tt.want, tt.refreshAfter)
+				t.Errorf("shouldRefresh(pttl=%d ttl=%v delta=%v) = %v, want %v",
+					tt.cachePTTL, tt.ttl, tt.delta, got, tt.want)
 			}
 		})
 	}
+}
+
+// TestShouldRefresh_XFetch covers the probabilistic path: below floor, delta>0,
+// beta>0. Asserts rates fall in expected ranges over many trials rather than
+// exact thresholds.
+func TestShouldRefresh_XFetch(t *testing.T) {
+	t.Parallel()
+	const trials = 5000
+	rca := &CacheAside{refreshAfter: 0.8, refreshBeta: 1.0}
+	ttl := time.Second
+
+	t.Run("near expiry refreshes almost always", func(t *testing.T) {
+		t.Parallel()
+		// cachePTTL=1ms, delta=100ms → jitter ~ delta * Exp(1) (mean=100ms);
+		// P(jitter >= 1ms) ≈ 0.99.
+		hits := 0
+		for range trials {
+			if rca.shouldRefresh(1, ttl, 100*time.Millisecond) {
+				hits++
+			}
+		}
+		rate := float64(hits) / trials
+		if rate < 0.95 {
+			t.Errorf("near-expiry refresh rate = %.3f, want >= 0.95", rate)
+		}
+	})
+
+	t.Run("just below floor with tiny delta rarely refreshes", func(t *testing.T) {
+		t.Parallel()
+		// cachePTTL=199ms (just below floor=200ms), delta=1ms → jitter mean = 1ms;
+		// P(jitter >= 199ms) ≈ exp(-199) ≈ 0.
+		hits := 0
+		for range trials {
+			if rca.shouldRefresh(199, ttl, time.Millisecond) {
+				hits++
+			}
+		}
+		if hits > 5 {
+			t.Errorf("tiny-delta refresh count = %d/%d, want ~0", hits, trials)
+		}
+	})
+
+	t.Run("higher beta increases refresh rate", func(t *testing.T) {
+		t.Parallel()
+		// Same cachePTTL/delta, beta=10 should refresh substantially more than beta=1.
+		low := &CacheAside{refreshAfter: 0.8, refreshBeta: 1.0}
+		high := &CacheAside{refreshAfter: 0.8, refreshBeta: 10.0}
+		var lowHits, highHits int
+		for range trials {
+			if low.shouldRefresh(50, ttl, 10*time.Millisecond) {
+				lowHits++
+			}
+			if high.shouldRefresh(50, ttl, 10*time.Millisecond) {
+				highHits++
+			}
+		}
+		if highHits <= lowHits {
+			t.Errorf("expected higher beta to refresh more: low=%d high=%d", lowHits, highHits)
+		}
+	})
 }
 
 func TestValidateRefreshDefaults(t *testing.T) {

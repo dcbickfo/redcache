@@ -28,6 +28,7 @@ func TestCacheAside_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 		redcache.CacheAsideOption{
 			LockTTL:              2 * time.Second,
 			RefreshAfterFraction: 0.01, // refresh on virtually every Get
+			RefreshBeta:          0,
 			RefreshWorkers:       2,
 			RefreshQueueSize:     4, // small queue to maximize the close-during-send window
 		},
@@ -244,7 +245,10 @@ func TestPrimeableCacheAside_Set_RollbackPreservesPTTL(t *testing.T) {
 
 	val, err := pca.Client().Do(ctx, pca.Client().B().Get().Key(key).Build()).ToString()
 	require.NoError(t, err)
-	assert.Equal(t, "v", val, "rollback should restore the original value")
+	// ForceSet wraps in an envelope (delta=0); rollback restores the captured
+	// envelope verbatim so a raw GET sees the wrapped form. End users still see
+	// "v" via Get, which unwraps.
+	assert.Equal(t, "__redcache:v1:0:v", val, "rollback should restore the original captured (envelope-wrapped) value")
 }
 
 // TestCacheAside_GetMulti_CASMismatchDropsKey verifies that runSlotSet drops a

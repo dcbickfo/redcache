@@ -1,5 +1,7 @@
 package redcache
 
+import "time"
+
 // Metrics receives observability events from CacheAside operations.
 //
 // All methods must be safe for concurrent use; callers may invoke them from
@@ -25,6 +27,12 @@ type Metrics interface {
 	// LockContended fires once per Get/GetMulti with the number of keys that
 	// observed an existing lock and waited.
 	LockContended(n int64)
+	// LockWaitDuration fires once per resolved lock wait with the elapsed
+	// time. Emitted whether the wait ended via cache invalidation, a context
+	// cancellation, or a LockTTL timeout — the duration is the signal: short
+	// waits indicate healthy contention, waits at LockTTL indicate the lock
+	// holder stalled. Implementations typically histogram this.
+	LockWaitDuration(d time.Duration)
 	// RefreshTriggered fires once per refresh enqueue with the number of keys
 	// the job covers.
 	RefreshTriggered(n int64)
@@ -66,6 +74,9 @@ func (NoopMetrics) CacheMisses(int64) {}
 
 // LockContended implements Metrics.
 func (NoopMetrics) LockContended(int64) {}
+
+// LockWaitDuration implements Metrics.
+func (NoopMetrics) LockWaitDuration(time.Duration) {}
 
 // RefreshTriggered implements Metrics.
 func (NoopMetrics) RefreshTriggered(int64) {}

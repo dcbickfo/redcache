@@ -148,6 +148,7 @@ func (r Repository) GetByIDs(ctx context.Context, keys []string) (map[string]str
 | `LockPrefix` | `string` | `"__redcache:lock:"` | Prefix for distributed lock values. Choose a prefix unlikely to conflict with your data keys. |
 | `RefreshLockPrefix` | `string` | `"__redcache:refresh:"` | Prefix for distributed refresh-ahead locks. |
 | `RefreshAfterFraction` | `float64` | `0` (disabled) | Fraction of TTL after which a refresh-ahead is triggered. Must be in `[0, 1)`. |
+| `RefreshBeta` | `float64` | `0` (XFetch off) | Scales the XFetch probabilistic-refresh window. `0` keeps refresh deterministic at the floor; `1.0` is the canonical XFetch beta from Vattani et al. Higher values trigger refresh earlier within the floor, weighted by how long the value took to compute. |
 | `RefreshWorkers` | `int` | `4` (when refresh enabled) | Background workers processing refresh jobs. |
 | `RefreshQueueSize` | `int` | `64` (when refresh enabled) | Capacity of the refresh job queue. Jobs are silently dropped when full; the stale value continues to serve. |
 
@@ -166,6 +167,25 @@ client, err := redcache.NewRedCacheAside(
     },
 )
 ```
+
+### XFetch probabilistic refresh
+
+Set `RefreshBeta > 0` to add the [XFetch](https://en.wikipedia.org/wiki/Cache_stampede#Probabilistic_early_expiration) sampling layer on top of `RefreshAfterFraction`. Below the floor, each read fires refresh with probability proportional to how close the value is to expiry, weighted by how long it took to compute the previous value. Slow-to-compute values get more headroom and refresh earlier; cheap values defer until closer to expiry. This smooths refresh load instead of bunching it at the floor crossing.
+
+Values are stored with a small envelope (`__redcache:v1:<delta_ns>:<payload>`) capturing the compute time. Legacy values written before the envelope landed are read transparently with `delta=0` and fall back to plain floor-based refresh.
+
+### Stampede mitigation without refresh-ahead
+
+If you can't or don't want to enable refresh-ahead, the lock layer already prevents per-key thundering herd: only one caller per key runs the origin function while peers wait on the cached invalidation. The remaining stampede risk is *cross-key simultaneous expiry* — many keys SET in the same window (deploys, batch imports, cold-start backfill) will all expire together.
+
+This library deliberately does not jitter the `ttl` you pass to `Get`/`GetMulti`/`Set`/`ForceSet`: the contract is that you get the TTL you asked for. Jitter expiries at the call site instead, so callers retain control over the policy:
+
+```go
+ttl := baseTTL + time.Duration(rand.Int64N(int64(baseTTL/10))) // ±10%
+val, err := client.Get(ctx, ttl, key, fetch)
+```
+
+For workloads that already use `RefreshAfterFraction` + `RefreshBeta`, XFetch handles this naturally — the probabilistic refresh window smears reload moments across the keyspace without changing observable TTLs.
 
 ## Metrics
 

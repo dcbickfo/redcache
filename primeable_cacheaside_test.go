@@ -142,6 +142,7 @@ func TestPrimeableCacheAside_Set_Concurrent(t *testing.T) {
 
 	key := "key:" + uuid.New().String()
 	var callCount atomic.Int32
+	var successCount atomic.Int32
 
 	var wg sync.WaitGroup
 	for i := range 10 {
@@ -152,16 +153,18 @@ func TestPrimeableCacheAside_Set_Concurrent(t *testing.T) {
 				callCount.Add(1)
 				return "val-from-" + uuid.New().String(), nil
 			})
-			// Either success or ErrLockLost is acceptable.
-			if err != nil {
-				assert.ErrorIs(t, err, redcache.ErrLockLost, "iteration %d", i)
+			if err == nil {
+				successCount.Add(1)
+				return
 			}
+			// Only ErrLockLost is acceptable on error.
+			assert.ErrorIs(t, err, redcache.ErrLockLost, "iteration %d", i)
 		}()
 	}
 	wg.Wait()
 
-	// At least one should have succeeded.
-	assert.GreaterOrEqual(t, callCount.Load(), int32(1))
+	assert.GreaterOrEqual(t, callCount.Load(), int32(1), "at least one callback should fire")
+	assert.GreaterOrEqual(t, successCount.Load(), int32(1), "at least one Set must succeed (otherwise concurrent Sets are silently broken)")
 }
 
 func TestPrimeableCacheAside_SetMulti_Basic(t *testing.T) {
@@ -532,19 +535,15 @@ func TestPrimeableCacheAside_SetMulti_CallbackError_RestoresValues(t *testing.T)
 	})
 	require.ErrorIs(t, err, cbErr)
 
-	// Give invalidation a moment to propagate, then verify original values were restored.
+	// Give invalidation a moment to propagate, then verify originals were
+	// restored — not just that Get returned them (a re-populating callback
+	// would mask a buggy DEL-and-let-Get-recover rollback).
 	time.Sleep(100 * time.Millisecond)
-	res, err = client.GetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {
-		// If the callback fires, it means the originals were NOT restored — the keys were
-		// left as lock values (deleted). This is acceptable but we need to return values.
-		out := make(map[string]string, len(ks))
-		for _, k := range ks {
-			out[k] = originalVals[k]
-		}
-		return out, nil
+	res, err = client.GetMulti(ctx, time.Second*10, keys, func(_ context.Context, _ []string) (map[string]string, error) {
+		t.Fatal("rollback failed: callback fired, meaning the original value was DELed, not restored")
+		return nil, nil
 	})
 	require.NoError(t, err)
-	// Either the originals are restored or the callback re-populated them.
 	if diff := cmp.Diff(originalVals, res); diff != "" {
 		t.Errorf("values after rollback mismatch (-want +got):\n%s", diff)
 	}
@@ -576,16 +575,16 @@ func TestPrimeableCacheAside_SetMulti_PartialCASFailure_BatchError(t *testing.T)
 		}, nil
 	})
 
-	if err != nil {
-		// Should be a BatchError with key2 failed.
-		var batchErr *redcache.BatchError
-		if assert.ErrorAs(t, err, &batchErr) {
-			assert.True(t, batchErr.HasFailures())
-			assert.Contains(t, batchErr.Failed, key2, "key2 should have failed CAS")
-			assert.ErrorIs(t, batchErr.Failed[key2], redcache.ErrLockLost)
-		}
-	}
-	// Either way, key2 should have the forced value.
+	// A stolen lock on key2 must surface as a BatchError — silently returning
+	// nil would mask the partial failure and leave callers unaware that key2
+	// was not written.
+	require.Error(t, err, "SetMulti must report partial CAS failure")
+	var batchErr *redcache.BatchError
+	require.ErrorAs(t, err, &batchErr)
+	assert.True(t, batchErr.HasFailures())
+	assert.Contains(t, batchErr.Failed, key2, "key2 should have failed CAS")
+	assert.ErrorIs(t, batchErr.Failed[key2], redcache.ErrLockLost)
+	// key2 should have the forced value (CAS failure preserved it).
 	res, getErr := client.Get(ctx, time.Second*10, key2, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called — forced value should exist")
 		return "", nil

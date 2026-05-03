@@ -22,14 +22,20 @@ type capturingMetrics struct {
 	redcache.NoopMetrics
 	hits, misses, contended, lost            atomic.Int64
 	triggered, skipped, dropped, panic, errs atomic.Int64
+	waitDurations                            atomic.Int64 // count of LockWaitDuration calls
+	totalWait                                atomic.Int64 // sum of durations in nanoseconds
 	mu                                       sync.Mutex
 	panicKeys                                []string
 	errKeys                                  []string
 }
 
-func (m *capturingMetrics) CacheHits(n int64)        { m.hits.Add(n) }
-func (m *capturingMetrics) CacheMisses(n int64)      { m.misses.Add(n) }
-func (m *capturingMetrics) LockContended(n int64)    { m.contended.Add(n) }
+func (m *capturingMetrics) CacheHits(n int64)     { m.hits.Add(n) }
+func (m *capturingMetrics) CacheMisses(n int64)   { m.misses.Add(n) }
+func (m *capturingMetrics) LockContended(n int64) { m.contended.Add(n) }
+func (m *capturingMetrics) LockWaitDuration(d time.Duration) {
+	m.waitDurations.Add(1)
+	m.totalWait.Add(int64(d))
+}
 func (m *capturingMetrics) LockLost(string)          { m.lost.Add(1) }
 func (m *capturingMetrics) RefreshTriggered(n int64) { m.triggered.Add(n) }
 func (m *capturingMetrics) RefreshSkipped(n int64)   { m.skipped.Add(n) }
@@ -87,6 +93,7 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 		redcache.CacheAsideOption{
 			LockTTL:              time.Second * 2,
 			RefreshAfterFraction: 0.01, // refresh almost immediately
+			RefreshBeta:          0,    // disable XFetch sampling for deterministic tests
 			Metrics:              metrics,
 		},
 	)
@@ -128,6 +135,7 @@ func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
 		redcache.CacheAsideOption{
 			LockTTL:              time.Second * 2,
 			RefreshAfterFraction: 0.01,
+			RefreshBeta:          0,
 			Metrics:              metrics,
 		},
 	)
@@ -178,6 +186,7 @@ func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 		redcache.CacheAsideOption{
 			LockTTL:              time.Second * 2,
 			RefreshAfterFraction: 0.01,
+			RefreshBeta:          0,
 			Metrics:              metrics,
 		},
 	)
@@ -229,6 +238,7 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 		redcache.CacheAsideOption{
 			LockTTL:              time.Second * 3,
 			RefreshAfterFraction: 0.01, // refresh almost immediately, removes timing-margin flake
+			RefreshBeta:          0,
 			RefreshWorkers:       1,
 			RefreshQueueSize:     1,
 			Metrics:              metrics,
@@ -277,4 +287,75 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return metrics.dropped.Load() > 0
 	}, 2*time.Second, 5*time.Millisecond, "expected RefreshDropped to fire under queue saturation")
+}
+
+func TestMetrics_LockWaitDuration(t *testing.T) {
+	t.Parallel()
+	metrics := &capturingMetrics{}
+	client, err := redcache.NewRedCacheAside(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.CacheAsideOption{
+			LockTTL: 2 * time.Second,
+			Metrics: metrics,
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		client.Close()
+		client.Client().Close()
+	})
+
+	ctx := context.Background()
+	key := "lockwait:" + uuid.New().String()
+
+	// Two concurrent Gets — second one observes the lock and waits.
+	holderInCb := make(chan struct{})
+	holderProceed := make(chan struct{})
+	holderCb := func(_ context.Context, _ string) (string, error) {
+		close(holderInCb)
+		<-holderProceed
+		return "v", nil
+	}
+	waiterCb := func(_ context.Context, _ string) (string, error) {
+		return "v", nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := client.Get(ctx, 5*time.Second, key, holderCb)
+		require.NoError(t, err)
+	}()
+
+	// Wait for holder to actually be inside the callback (= it owns the lock).
+	<-holderInCb
+
+	go func() {
+		defer wg.Done()
+		_, err := client.Get(ctx, 5*time.Second, key, waiterCb)
+		require.NoError(t, err)
+	}()
+
+	// Wait until the waiter is in the contended branch (about to enter
+	// awaitLock). Without this barrier, the holder may release the lock
+	// before the waiter has even started waiting, recording a near-zero
+	// duration and hiding regressions in how the wait is timed.
+	require.Eventually(t, func() bool {
+		return metrics.contended.Load() >= 1
+	}, time.Second, time.Millisecond, "waiter never entered contended branch")
+
+	// Hold the lock for a measurable interval, then release.
+	time.Sleep(100 * time.Millisecond)
+	close(holderProceed)
+	wg.Wait()
+
+	require.Greater(t, metrics.waitDurations.Load(), int64(0), "expected LockWaitDuration to fire")
+	// Waiter began waiting before the 100ms sleep; require the recorded
+	// duration to reflect a meaningful wait. A regression that records
+	// near-zero (e.g. metric emitted before the wait, or duration captured
+	// at the wrong point) would pass a `> 0` assertion but fail this lower
+	// bound. Margin: 50ms below the 100ms hold to absorb scheduling jitter.
+	require.GreaterOrEqual(t, metrics.totalWait.Load(), int64(50*time.Millisecond),
+		"LockWaitDuration must reflect actual wait time, not near-zero")
 }

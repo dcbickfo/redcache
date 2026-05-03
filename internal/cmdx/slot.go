@@ -8,7 +8,25 @@ const (
 
 // GroupBySlot groups items by their Redis cluster slot, using keyFn to extract
 // the key for slot computation.
+//
+// Fast path: if all items share a slot (always true for non-cluster Redis and
+// common for cluster keys with hash tags), returns a single-entry map that
+// aliases the input slice — no per-group slice growth. Callers must not mutate
+// the returned slices in ways that affect the input.
 func GroupBySlot[V any](items []V, keyFn func(V) string) map[uint16][]V {
+	if len(items) == 0 {
+		return nil
+	}
+	s0 := Slot(keyFn(items[0]))
+	for i := 1; i < len(items); i++ {
+		if Slot(keyFn(items[i])) != s0 {
+			return groupBySlotMulti(items, keyFn)
+		}
+	}
+	return map[uint16][]V{s0: items}
+}
+
+func groupBySlotMulti[V any](items []V, keyFn func(V) string) map[uint16][]V {
 	groups := make(map[uint16][]V)
 	for _, item := range items {
 		slot := Slot(keyFn(item))

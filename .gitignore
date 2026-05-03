@@ -23,3 +23,6 @@
 go.work
 go.work.sum
 .claude
+
+# Local benchmark baselines (kept locally for release-time regression checks)
+bench/

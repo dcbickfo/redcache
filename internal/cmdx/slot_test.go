@@ -226,3 +226,29 @@ func BenchmarkSlot(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkGroupBySlot_SameSlot(b *testing.B) {
+	type item struct{ key string }
+	items := make([]item, 10)
+	for i := range items {
+		items[i] = item{key: "{shared}:k" + string(rune('0'+i))}
+	}
+	keyFn := func(i item) string { return i.key }
+	b.ReportAllocs()
+	for range b.N {
+		_ = cmdx.GroupBySlot(items, keyFn)
+	}
+}
+
+func BenchmarkGroupBySlot_DifferentSlots(b *testing.B) {
+	type item struct{ key string }
+	items := make([]item, 10)
+	for i := range items {
+		items[i] = item{key: "key:" + string(rune('a'+i))}
+	}
+	keyFn := func(i item) string { return i.key }
+	b.ReportAllocs()
+	for range b.N {
+		_ = cmdx.GroupBySlot(items, keyFn)
+	}
+}
