@@ -286,9 +286,11 @@ func TestPrimeableCacheAside_ForceSet_StealsLock(t *testing.T) {
 	forcedVal := "forced:" + uuid.New().String()
 
 	getStarted := make(chan struct{})
+	getDone := make(chan struct{})
 
 	// Start a slow Get that holds a lock.
 	go func() {
+		defer close(getDone)
 		_, _ = client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 			close(getStarted)
 			time.Sleep(300 * time.Millisecond)
@@ -304,7 +306,11 @@ func TestPrimeableCacheAside_ForceSet_StealsLock(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait for Get to complete (it will see ErrLockLost and retry).
-	time.Sleep(500 * time.Millisecond)
+	select {
+	case <-getDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background Get did not complete after ForceSet")
+	}
 
 	// The forced value should be present (or Get retried with its own value).
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {

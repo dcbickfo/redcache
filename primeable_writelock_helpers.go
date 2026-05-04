@@ -93,6 +93,11 @@ func (pca *PrimeableCacheAside) acquireMultiWriteLocks(
 	for len(remaining) > 0 {
 		firstFailed, err := pca.tryAcquireRemaining(ctx, remaining, lockValues, &savedValues)
 		if err != nil {
+			// lockValues holds successes from PRIOR iterations of this loop.
+			// The current iteration's acquires (across all slots in
+			// batchAcquireWithBackup) were already rolled back inside
+			// execSlotAcquire's error path, so this releases only the
+			// older entries.
 			pca.restoreMultiValues(ctx, lockValues, savedValues)
 			return nil, nil, err
 		}
@@ -278,6 +283,12 @@ func (pca *PrimeableCacheAside) execSlotAcquire(
 		// Restore prior values where the acquire script captured one. Plain
 		// unlock would DEL the lock and silently drop a real cached entry that
 		// the acquire just overwrote. Mirrors rollbackAfterFirstFailure.
+		//
+		// Iterates ALL of `acquired` (not just this slot's entries): earlier
+		// slots in the same batchAcquireWithBackup call have already populated
+		// the shared map and would otherwise leak. Prior outer-loop iterations'
+		// successes live in lockValues (a separate map) and are released by
+		// acquireMultiWriteLocks' restoreMultiValues call on error.
 		for k, v := range acquired {
 			if saved, ok := backups[k]; ok {
 				pca.bestEffortRestore(ctx, k, v, saved)
@@ -378,6 +389,10 @@ func (pca *PrimeableCacheAside) rollbackAfterFirstFailure(
 ) {
 	cleanupCtx, cancel := pca.cleanupCtx(ctx)
 	defer cancel()
+	// firstFailed itself is skipped: it was never acquired (that's why it
+	// failed), so there's nothing to release. Entries before firstFailed in
+	// sorted order remain held — the retry loop will re-attempt only
+	// firstFailed and beyond, preserving sort-order acquisition discipline.
 	pastFailure := false
 	for _, key := range sorted {
 		if key == firstFailed {
@@ -409,9 +424,15 @@ func (pca *PrimeableCacheAside) rollbackAfterFirstFailure(
 //
 // Real Redis errors (network/timeout) are logged but the entry is also retained
 // so the eventual CAS-set surfaces the failure to the caller via BatchError.
+//
+// Uses cleanupCtx so a near-expiry caller context doesn't race the TTL refresh
+// — mirrors bestEffortRestore/Unlock and keeps held locks valid through the
+// retry loop even when the original deadline is close.
 func (pca *PrimeableCacheAside) touchMultiLocks(ctx context.Context, lockValues map[string]string) {
+	cleanCtx, cancel := pca.cleanupCtx(ctx)
+	defer cancel()
 	for key, lockVal := range lockValues {
-		result, err := refreshLockScript.Exec(ctx, pca.client, []string{key}, []string{lockVal, pca.lockTTLMs}).AsInt64()
+		result, err := refreshLockScript.Exec(cleanCtx, pca.client, []string{key}, []string{lockVal, pca.lockTTLMs}).AsInt64()
 		if err != nil {
 			pca.logger.Error("lock refresh script error", "key", key, "error", err)
 			continue

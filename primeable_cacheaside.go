@@ -143,6 +143,9 @@ func (pca *PrimeableCacheAside) acquireSingleWriteLock(
 // and atomically sets the returned values. Locks are acquired in sorted order
 // to prevent deadlocks.
 //
+// The callback receives currently-held lock keys in undefined order (map
+// iteration). Callers needing a stable order should sort the slice before use.
+//
 // On partial CAS failure, returns a *BatchError listing succeeded and failed keys.
 // On full success, returns nil.
 func (pca *PrimeableCacheAside) SetMulti(

@@ -3,6 +3,7 @@ package redcache
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -22,12 +23,19 @@ type BatchError struct {
 	Succeeded []string
 }
 
-// Error returns a human-readable summary of the batch failure.
+// Error returns a human-readable summary of the batch failure. Failed keys are
+// emitted in sorted order so the string is stable across calls (map iteration
+// would otherwise scramble per-key entries).
 func (e *BatchError) Error() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "batch operation partially failed: %d succeeded, %d failed", len(e.Succeeded), len(e.Failed))
-	for key, err := range e.Failed {
-		fmt.Fprintf(&b, "; key %q: %s", key, err)
+	keys := make([]string, 0, len(e.Failed))
+	for key := range e.Failed {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(&b, "; key %q: %s", key, e.Failed[key])
 	}
 	return b.String()
 }
