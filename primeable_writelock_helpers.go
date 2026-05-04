@@ -164,7 +164,7 @@ func (pca *PrimeableCacheAside) waitForFailedKey(
 	lockValues map[string]string,
 	savedValues map[string]savedValue,
 ) error {
-	waitChan := pca.register(firstFailed)
+	waitChan, _ := pca.register(firstFailed)
 	resp := pca.client.DoCache(ctx, pca.client.B().Get().Key(firstFailed).Cache(), pca.lockTTL)
 	val, rerr := resp.ToString()
 	if rueidis.IsRedisNil(rerr) {

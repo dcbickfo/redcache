@@ -2,6 +2,7 @@ package redcache_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -886,6 +887,72 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, 1, callCount, "callback should only be called once")
+}
+
+// TestCacheAside_Get_LeaderNXFailure_WaitsForInvalidation verifies the
+// leader/follower discipline when an in-process leader's SET NX is rejected by
+// Redis (another process holds the lock). The leader must wait for the actual
+// holder's invalidation rather than cancelling its own lockEntry, which would
+// wake local followers and let them busy-loop racing the same Redis NX. The
+// test simulates "another process" by writing a synthetic lock value directly
+// to Redis, then replacing it with a real envelope-wrapped value and verifying
+// every concurrent Get returns it without ever invoking fn.
+func TestCacheAside_Get_LeaderNXFailure_WaitsForInvalidation(t *testing.T) {
+	t.Parallel()
+	client := makeClient(t, addr)
+	defer client.Client().Close()
+
+	ctx := context.Background()
+	key := "key:" + uuid.New().String()
+	val := "val:" + uuid.New().String()
+
+	// Plant a synthetic Redis lock from "another process" so any SET NX from
+	// our process will be rejected.
+	inner := client.Client()
+	syntheticLock := "__redcache:lock:other-process-" + uuid.New().String()
+	require.NoError(t, inner.Do(ctx, inner.B().Set().Key(key).Value(syntheticLock).Px(time.Second*5).Build()).Error())
+
+	// fn must NEVER fire: the synthetic lock will be replaced with a real
+	// value below, which arrives via invalidation and resolves all waiters.
+	cb := func(ctx context.Context, key string) (string, error) {
+		t.Errorf("fn unexpectedly invoked for key %q", key)
+		return "", errors.New("fn should not run")
+	}
+
+	// Start N concurrent Gets. With the leader/follower discipline correct,
+	// at most one becomes leader, attempts SET NX, fails, and waits. The rest
+	// are followers and wait directly. Without the discipline, the leader
+	// would cancel on NX failure, wake followers, who would each become new
+	// leaders racing Redis NX in a tight loop until lockTTL fires.
+	const n = 50
+	results := make([]string, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range n {
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = client.Get(ctx, time.Second*10, key, cb)
+		}()
+	}
+
+	// Give all Gets time to enter the await path before we publish the real
+	// value. Short sleep is acceptable — the test fails closed if Gets
+	// somehow resolve before invalidation arrives (fn would fire and the
+	// t.Errorf above would catch it).
+	time.Sleep(100 * time.Millisecond)
+
+	// Replace the synthetic lock with a real envelope-wrapped value, simulating
+	// "the other process finished its work". This triggers Redis invalidation
+	// for the key, which wakes the leader and all followers.
+	wrapped := "__redcache:v1:0:" + val
+	require.NoError(t, inner.Do(ctx, inner.B().Set().Key(key).Value(wrapped).Px(time.Second*10).Build()).Error())
+
+	wg.Wait()
+	for i := range n {
+		require.NoError(t, errs[i], "goroutine %d failed", i)
+		require.Equal(t, val, results[i], "goroutine %d got wrong value", i)
+	}
 }
 
 // TestConcurrentInvalidation tests that cache invalidation works correctly

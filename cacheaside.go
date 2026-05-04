@@ -477,7 +477,13 @@ func (rca *CacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 	}
 }
 
-func (rca *CacheAside) register(key string) <-chan struct{} {
+// register publishes a per-key lockEntry and returns its done channel along
+// with a leader flag. leader=true means this caller created the entry and is
+// responsible for driving the Redis-side work (tryLock + fn + setWithLock);
+// leader=false means another in-process caller already owns that work and the
+// follower should wait on done instead of re-issuing SET NX. The follower path
+// avoids N-1 SET NX commands per key when many goroutines miss the same key.
+func (rca *CacheAside) register(key string) (<-chan struct{}, bool) {
 retry:
 	// Fast path: entry already registered. Avoid allocating a new lockEntry +
 	// timer that would be immediately discarded when LoadOrStore loses the
@@ -490,7 +496,7 @@ retry:
 			rca.locks.CompareAndDelete(key, actual)
 			goto retry
 		default:
-			return actual.done
+			return actual.done, false
 		}
 	}
 
@@ -505,7 +511,7 @@ retry:
 	})
 	actual, loaded := rca.locks.LoadOrStore(key, newEntry)
 	if !loaded {
-		return newEntry.done
+		return newEntry.done, true
 	}
 
 	// Lost the race — release our timer so it doesn't keep the closure alive.
@@ -517,7 +523,7 @@ retry:
 		rca.locks.CompareAndDelete(key, actual)
 		goto retry
 	default:
-		return actual.done
+		return actual.done, false
 	}
 }
 
@@ -534,7 +540,7 @@ func (rca *CacheAside) Get(
 	fn func(ctx context.Context, key string) (val string, err error),
 ) (string, error) {
 retry:
-	wait := rca.register(key)
+	wait, leader := rca.register(key)
 	res, err := rca.tryGet(ctx, ttl, key)
 
 	if err == nil {
@@ -551,13 +557,29 @@ retry:
 	}
 
 	rca.emitCacheMisses(1)
+
+	if !leader {
+		// Follower: another in-process caller created the lockEntry and will
+		// drive the Redis-side population. Skip our own SET NX (saves one
+		// round trip per follower) and wait for the leader's invalidation.
+		rca.emitLockContended(1)
+		if werr := rca.awaitLock(ctx, wait); werr != nil {
+			return "", werr
+		}
+		goto retry
+	}
+
 	val, err := rca.trySetKeyFunc(ctx, ttl, key, fn)
 	if err == nil {
 		return val, nil
 	}
 
 	if errors.Is(err, errLockFailed) || errors.Is(err, ErrLockLost) {
-		// errLockFailed: another caller holds the lock — wait then retry.
+		// errLockFailed: another process holds the Redis lock — wait then retry.
+		// We don't cancel our local lockEntry here; doing so would wake our
+		// followers prematurely and they would busy-loop, each becoming a
+		// new leader and racing the same Redis NX. Instead we wait alongside
+		// them for the actual Redis holder's invalidation.
 		// ErrLockLost: a ForceSet (or similar) stole our lock — retry to read it.
 		rca.emitLockContended(1)
 		if werr := rca.awaitLock(ctx, wait); werr != nil {
@@ -844,11 +866,25 @@ func (rca *CacheAside) GetMulti(
 	needRefreshP := stringPool.GetCap(len(keys))
 	defer stringPool.Put(needRefreshP)
 
+	// Pooled scratch slice holding the keys for which this caller created the
+	// in-process lockEntry (leaders) — followers stay out of this slice and
+	// skip the Redis SET NX round trip, waiting on chans[i] instead. Rebuilt
+	// each retry iteration so it always reflects the current iteration's
+	// register() outcomes.
+	leaderKeysP := stringPool.GetCap(len(keys))
+	defer stringPool.Put(leaderKeysP)
+
 retry:
 	chans = chans[:len(pending)]
+	leaderKeys := (*leaderKeysP)[:0]
 	for i, key := range pending {
-		chans[i] = rca.register(key)
+		var isLeader bool
+		chans[i], isLeader = rca.register(key)
+		if isLeader {
+			leaderKeys = append(leaderKeys, key)
+		}
 	}
+	*leaderKeysP = leaderKeys
 
 	hitsBefore := len(res)
 	*needRefreshP = (*needRefreshP)[:0]
@@ -867,7 +903,7 @@ retry:
 
 	if len(pending) > 0 {
 		rca.emitCacheMisses(len(pending))
-		if err := rca.trySetMultiKeyFn(ctx, ttl, pending, fn, res); err != nil {
+		if err := rca.runLeaderSets(ctx, ttl, leaderKeys, fn, res); err != nil {
 			return nil, err
 		}
 		pending, chans = filterResolved(pending, chans, res)
@@ -875,6 +911,8 @@ retry:
 
 	if len(pending) > 0 {
 		// Wait for lock releases (channels auto-close after lockTTL or on invalidation).
+		// Pending here is followers + any leaders whose Redis NX lost the race —
+		// both wait for the actual Redis lock holder's invalidation.
 		rca.emitLockContended(len(pending))
 		if err = rca.awaitLockMulti(ctx, chans); err != nil {
 			return nil, ctx.Err()
@@ -884,8 +922,36 @@ retry:
 	return res, nil
 }
 
-// filterResolved drops keys present in resolved from pending+chans in-place via
-// swap-keep-shrink, returning the trimmed views over the same backing arrays.
+// runLeaderSets filters leaderKeys to drop entries already populated by
+// tryGetMulti (e.g. via a CSC invalidation that landed mid-call) then drives
+// trySetMultiKeyFn for the remaining leaders. Followers among pending stay
+// out of leaderKeys entirely — they're handled by the caller's awaitLockMulti
+// step.
+func (rca *CacheAside) runLeaderSets(
+	ctx context.Context,
+	ttl time.Duration,
+	leaderKeys []string,
+	fn func(ctx context.Context, key []string) (val map[string]string, err error),
+	res map[string]string,
+) error {
+	n := 0
+	for _, k := range leaderKeys {
+		if _, ok := res[k]; !ok {
+			leaderKeys[n] = k
+			n++
+		}
+	}
+	leaderKeys = leaderKeys[:n]
+	if len(leaderKeys) == 0 {
+		return nil
+	}
+	return rca.trySetMultiKeyFn(ctx, ttl, leaderKeys, fn, res)
+}
+
+// filterResolved drops keys present in resolved from pending+chans in-place
+// via swap-keep-shrink, returning the trimmed views over the same backing
+// arrays. The two slices stay index-aligned so each remaining key keeps its
+// wait channel.
 func filterResolved(pending []string, chans []<-chan struct{}, resolved map[string]string) ([]string, []<-chan struct{}) {
 	n := 0
 	for i, k := range pending {

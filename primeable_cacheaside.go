@@ -111,7 +111,7 @@ func (pca *PrimeableCacheAside) acquireSingleWriteLock(
 	ctx context.Context,
 	key, lockVal, lockTTLMs string,
 ) (saved savedValue, retry bool, err error) {
-	waitChan := pca.register(key)
+	waitChan, _ := pca.register(key)
 
 	// Subscribe + read current value.
 	resp := pca.client.DoCache(ctx, pca.client.B().Get().Key(key).Cache(), pca.lockTTL)
@@ -269,7 +269,7 @@ func (pca *PrimeableCacheAside) waitForReadLocks(ctx context.Context, keys []str
 	defer chanPool.Put(waitChansP)
 	waitChans := *waitChansP
 	for i, key := range keys {
-		waitChans[i] = pca.register(key)
+		waitChans[i], _ = pca.register(key)
 	}
 
 	// 2. DoMultiCache to subscribe and read values.
