@@ -10,18 +10,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.2.0] - 2026-05-04
 
 ### Breaking
-- **On-disk value format changed.** Stored values are now wrapped in an envelope (`__redcache:v1:<delta_ns>:<payload>`) so refresh-ahead can read the original compute time for XFetch sampling. Reads transparently unwrap this envelope, and legacy un-wrapped values continue to be served (with `delta=0`, falling back to the simple floor refresh check). **Rollback warning:** if a deployment writes values under v0.2.0+ and then rolls back to v0.1.6 or earlier, those clients will return the raw envelope string as the user value. Flush affected keys (or run a full cache invalidation) before rolling back.
+- **On-disk value format changed.** Stored values are now wrapped in an envelope (`__redcache:v1:<delta_ns>:<payload>`) so refresh-ahead can read the original compute time for XFetch sampling. Reads transparently unwrap this envelope, and legacy un-wrapped values continue to be served (with `delta=0`, falling back to the simple floor refresh check). **Rollback warning:** if a deployment writes values under v0.2.0+ and then rolls back to v0.1.7 or earlier, those clients will return the raw envelope string as the user value. Flush affected keys (or run a full cache invalidation) before rolling back.
 - `LockPrefix` is now validated at construction. If `LockPrefix` is set such that the envelope prefix `__redcache:v1:` would itself look like a lock value, `NewRedCacheAside` returns an error rather than silently making every read miss. The default lock prefix (`__redcache:lock:`) is unaffected.
+
+### Added
+- `RefreshBeta` for XFetch probabilistic refresh: weights per-read refresh probability by recorded compute time so slow-to-recompute values are refreshed earlier. Default `0` keeps XFetch disabled (simple floor only).
+- `Touch` and `TouchMulti` for sliding-TTL extensions without re-running the origin function.
+- `LockWaitDuration` metric capturing time spent waiting on contended locks.
+- In-process leader/follower coordination so concurrent goroutines missing the same key issue only one Redis `SET NX` instead of one per goroutine; followers wait on the in-process leader's invalidation.
+
+### Changed
+- Cut allocations on `Get`/`GetMulti` hot path via pooled slice headers and slice reuse.
+- High-volume metrics (cache hit/miss) switched to count-based emission and short-circuit when no metrics sink is configured.
+- Stripped hot-path `Debug` log calls and avoided map reallocation in `registerAll`.
+- `BatchError.Error()` emits failed keys in sorted order so the string is stable.
+
+## [v0.1.7] - 2026-04-27
 
 ### Added
 - `PrimeableCacheAside` with `Set` and `SetMulti` for write-through caching with CAS-based lock ownership.
 - Refresh-ahead caching via `RefreshAfterFraction`, `RefreshWorkers`, and `RefreshQueueSize`. Background workers refresh stale-but-valid entries while the previous value is still served.
-- `RefreshBeta` for XFetch probabilistic refresh: weights per-read refresh probability by recorded compute time so slow-to-recompute values are refreshed earlier. Default `0` keeps XFetch disabled (simple floor only).
 - `Metrics` interface with `NoopMetrics` default. Hooks for cache hit/miss, lock contention, lock loss, and refresh triggered/skipped/dropped/panicked events.
 - `BatchError.ErrorFor(key)` and `BatchError.HasError(key)` helpers (nil-safe) for inspecting per-key failures from multi-key operations.
 - `RefreshLockPrefix` option for customizing the distributed refresh lock prefix; defaults to `__redcache:refresh:`.
-- `Touch` and `TouchMulti` for sliding-TTL extensions without re-running the origin function.
-- In-process leader/follower coordination so concurrent goroutines missing the same key issue only one Redis `SET NX` instead of one per goroutine; followers wait on the in-process leader's invalidation.
 - Runnable `ExampleCacheAside_Get` and `ExampleCacheAside_GetMulti` in `example_test.go`.
 - Benchmarks in `cacheaside_bench_test.go`.
 - CI hardening: PR triggers, concurrency-group cancellation of stale runs, golangci-lint pinned to v2.11.4.
@@ -79,7 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI workflow with GitHub Actions.
 
 [Unreleased]: https://github.com/dcbickfo/redcache/compare/v0.2.0...HEAD
-[v0.2.0]: https://github.com/dcbickfo/redcache/compare/v0.1.6...v0.2.0
+[v0.2.0]: https://github.com/dcbickfo/redcache/compare/v0.1.7...v0.2.0
+[v0.1.7]: https://github.com/dcbickfo/redcache/compare/v0.1.6...v0.1.7
 [v0.1.6]: https://github.com/dcbickfo/redcache/compare/v0.1.5...v0.1.6
 [v0.1.5]: https://github.com/dcbickfo/redcache/compare/v0.1.4...v0.1.5
 [v0.1.4]: https://github.com/dcbickfo/redcache/compare/v0.1.3...v0.1.4
