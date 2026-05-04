@@ -212,6 +212,12 @@ type CacheAsideOption struct {
 	// applies to values written with envelope metadata; legacy values (no delta
 	// recorded) always use the simple floor-based behaviour regardless of
 	// RefreshBeta.
+	//
+	// In multi-key writes (GetMulti, SetMulti) the recorded delta is the total
+	// fn duration divided evenly across the values returned. Batches dominated
+	// by a single slow key will under-record that key's delta and may under-
+	// refresh it relative to a serial path — the tradeoff for not having to
+	// instrument each per-key compute time.
 	RefreshBeta float64
 	// RefreshWorkers is the number of background workers that process refresh-ahead
 	// jobs. Defaults to 4 when RefreshAfterFraction > 0. Must be > 0 when refresh
@@ -248,6 +254,13 @@ func validateAndApplyDefaults(clientOption rueidis.ClientOption, caOption *Cache
 	}
 	if caOption.RefreshLockPrefix == "" {
 		caOption.RefreshLockPrefix = DefaultRefreshPrefix
+	}
+	// Reject any LockPrefix that would make the envelope-prefixed value
+	// (envelopePrefix = "__redcache:v1:") read as a lock — every cached value
+	// would then look like a lock and tryGet would always return errNotFound,
+	// silently turning every read into a miss.
+	if strings.HasPrefix(envelopePrefix, caOption.LockPrefix) {
+		return fmt.Errorf("LockPrefix %q conflicts with envelope prefix %q (would mask all cached reads as locks)", caOption.LockPrefix, envelopePrefix)
 	}
 	return validateRefreshDefaults(caOption)
 }
@@ -889,7 +902,7 @@ retry:
 	hitsBefore := len(res)
 	*needRefreshP = (*needRefreshP)[:0]
 	needRefresh, err := rca.tryGetMulti(ctx, ttl, pending, res, *needRefreshP)
-	if err != nil && !rueidis.IsRedisNil(err) {
+	if err != nil {
 		return nil, err
 	}
 	*needRefreshP = needRefresh
@@ -915,7 +928,7 @@ retry:
 		// both wait for the actual Redis lock holder's invalidation.
 		rca.emitLockContended(len(pending))
 		if err = rca.awaitLockMulti(ctx, chans); err != nil {
-			return nil, ctx.Err()
+			return nil, err
 		}
 		goto retry
 	}

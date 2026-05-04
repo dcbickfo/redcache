@@ -12,6 +12,9 @@ var ErrLockLost = errors.New("lock was lost or expired before value could be set
 
 // BatchError represents partial failures in a multi-key operation.
 // Some keys may have succeeded while others failed.
+//
+// Currently only PrimeableCacheAside.SetMulti returns this type via errors.As;
+// Get/GetMulti and Del/DelMulti return plain wrapped errors.
 type BatchError struct {
 	// Failed maps each failed key to its error.
 	Failed map[string]error

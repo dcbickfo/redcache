@@ -112,10 +112,12 @@ func (rca *CacheAside) shouldRefresh(cachePTTL int64, ttl time.Duration, delta t
 // Two-level dedup: local syncx.Map + distributed SET NX on a separate refresh key.
 // If the queue is full, the refresh is silently dropped (stale value is still served).
 //
-// Safe against concurrent Close: the closing flag short-circuits the common case,
-// and enqueueRefresh selects on refreshDone so a Close racing the send unblocks
-// the sender without a closed-channel send (we only ever close the signal channel,
-// never the data channel).
+// Safe against concurrent Close: the closing-flag check is a fast-exit
+// optimization, not a correctness guarantee — Close can still flip the flag
+// after we read it. Correctness comes from enqueueRefresh's select on
+// refreshDone, which unblocks the sender if Close races us to send (we only
+// ever close the signal channel refreshDone, never the data channel
+// refreshQueue, so a closed-channel send is impossible).
 func (rca *CacheAside) triggerRefresh(
 	ctx context.Context,
 	ttl time.Duration,
