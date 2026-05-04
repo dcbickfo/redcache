@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-05-04
+
 ### Breaking
 - **On-disk value format changed.** Stored values are now wrapped in an envelope (`__redcache:v1:<delta_ns>:<payload>`) so refresh-ahead can read the original compute time for XFetch sampling. Reads transparently unwrap this envelope, and legacy un-wrapped values continue to be served (with `delta=0`, falling back to the simple floor refresh check). **Rollback warning:** if a deployment writes values under v0.1.7+ and then rolls back to v0.1.6 or earlier, those clients will return the raw envelope string as the user value. Flush affected keys (or run a full cache invalidation) before rolling back.
 - `LockPrefix` is now validated at construction. If `LockPrefix` is set such that the envelope prefix `__redcache:v1:` would itself look like a lock value, `NewRedCacheAside` returns an error rather than silently making every read miss. The default lock prefix (`__redcache:lock:`) is unaffected.
@@ -76,7 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lua scripts for atomic lock verification on SET and DEL.
 - CI workflow with GitHub Actions.
 
-[Unreleased]: https://github.com/dcbickfo/redcache/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/dcbickfo/redcache/compare/v0.2.0...HEAD
+[v0.2.0]: https://github.com/dcbickfo/redcache/compare/v0.1.6...v0.2.0
 [v0.1.6]: https://github.com/dcbickfo/redcache/compare/v0.1.5...v0.1.6
 [v0.1.5]: https://github.com/dcbickfo/redcache/compare/v0.1.4...v0.1.5
 [v0.1.4]: https://github.com/dcbickfo/redcache/compare/v0.1.3...v0.1.4
