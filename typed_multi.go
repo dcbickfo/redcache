@@ -65,6 +65,41 @@ func (t *Typed[K, V]) GetMulti(
 	return out, nil
 }
 
+// DelMulti removes multiple keys from Redis, triggering invalidation on all
+// clients. See (*CacheAside).DelMulti.
+func (t *Typed[K, V]) DelMulti(ctx context.Context, keys ...K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	encKeys := make([]string, len(keys))
+	for i, k := range keys {
+		s, err := t.keyCodec.EncodeKey(k)
+		if err != nil {
+			return fmt.Errorf("redcache: encode key: %w", err)
+		}
+		encKeys[i] = s
+	}
+	return t.cache.DelMulti(ctx, encKeys...)
+}
+
+// TouchMulti sets the TTL of multiple cached values to ttl (this can shorten
+// or extend the remaining lifetime). See (*CacheAside).TouchMulti for
+// no-op-on-lock and no-op-on-missing-key semantics.
+func (t *Typed[K, V]) TouchMulti(ctx context.Context, ttl time.Duration, keys ...K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	encKeys := make([]string, len(keys))
+	for i, k := range keys {
+		s, err := t.keyCodec.EncodeKey(k)
+		if err != nil {
+			return fmt.Errorf("redcache: encode key: %w", err)
+		}
+		encKeys[i] = s
+	}
+	return t.cache.TouchMulti(ctx, ttl, encKeys...)
+}
+
 // encodeMultiResult converts a typed map[K]V from the user's loader into the
 // map[string]string that (*CacheAside).GetMulti stores in Redis.
 func (t *Typed[K, V]) encodeMultiResult(result map[K]V) (map[string]string, error) {

@@ -73,3 +73,68 @@ func TestTyped_GetMulti_IntKeys(t *testing.T) {
 		t.Fatalf("typed int keys not preserved: %+v", got)
 	}
 }
+
+func TestTyped_DelMulti_RemovesAll(t *testing.T) {
+	cache := newTestCacheAside(t)
+	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+	prefix := uuid.NewString() + ":"
+	keys := []string{prefix + "a", prefix + "b"}
+
+	loader := func(_ context.Context, missing []string) (map[string]tUser, error) {
+		out := make(map[string]tUser, len(missing))
+		for _, k := range missing {
+			out[k] = tUser{ID: 1, Name: k}
+		}
+		return out, nil
+	}
+	if _, err := users.GetMulti(context.Background(), time.Second, keys, loader); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := users.DelMulti(context.Background(), keys...); err != nil {
+		t.Fatalf("delmulti: %v", err)
+	}
+	calls := 0
+	wrapped := func(ctx context.Context, missing []string) (map[string]tUser, error) {
+		calls++
+		return loader(ctx, missing)
+	}
+	if _, err := users.GetMulti(context.Background(), time.Second, keys, wrapped); err != nil {
+		t.Fatalf("get after del: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("loader called %d times after del, want 1", calls)
+	}
+}
+
+func TestTyped_TouchMulti_ExtendsTTL(t *testing.T) {
+	cache := newTestCacheAside(t)
+	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+	prefix := uuid.NewString() + ":"
+	keys := []string{prefix + "a", prefix + "b"}
+
+	loader := func(_ context.Context, missing []string) (map[string]tUser, error) {
+		out := make(map[string]tUser, len(missing))
+		for _, k := range missing {
+			out[k] = tUser{ID: 1, Name: k}
+		}
+		return out, nil
+	}
+	if _, err := users.GetMulti(context.Background(), 200*time.Millisecond, keys, loader); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := users.TouchMulti(context.Background(), 5*time.Second, keys...); err != nil {
+		t.Fatalf("touchmulti: %v", err)
+	}
+	time.Sleep(400 * time.Millisecond)
+	calls := 0
+	wrapped := func(ctx context.Context, missing []string) (map[string]tUser, error) {
+		calls++
+		return loader(ctx, missing)
+	}
+	if _, err := users.GetMulti(context.Background(), time.Second, keys, wrapped); err != nil {
+		t.Fatalf("get after touch: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("loader called %d times after touch, want 0", calls)
+	}
+}
