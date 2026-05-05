@@ -73,6 +73,25 @@ func (t *Typed[K, V]) Get(
 	return v, nil
 }
 
+// Del removes a key from Redis, triggering invalidation on all clients.
+func (t *Typed[K, V]) Del(ctx context.Context, k K) error {
+	encKey, err := t.keyCodec.EncodeKey(k)
+	if err != nil {
+		return fmt.Errorf("redcache: encode key: %w", err)
+	}
+	return t.cache.Del(ctx, encKey)
+}
+
+// Touch extends the TTL of a cached value to ttl. See (*CacheAside).Touch
+// for no-op-on-lock semantics.
+func (t *Typed[K, V]) Touch(ctx context.Context, ttl time.Duration, k K) error {
+	encKey, err := t.keyCodec.EncodeKey(k)
+	if err != nil {
+		return fmt.Errorf("redcache: encode key: %w", err)
+	}
+	return t.cache.Touch(ctx, ttl, encKey)
+}
+
 // stringToBytes returns the bytes backing s. Callers must not mutate the
 // returned slice — codecs are documented to treat their Decode input as
 // borrowed.

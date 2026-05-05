@@ -104,3 +104,55 @@ func TestTyped_Get_DecodeErrorPreservesUnderlying(t *testing.T) {
 		t.Fatalf("expected *json.SyntaxError in chain, got %v (%T)", err, err)
 	}
 }
+
+func TestTyped_Del_RemovesEntry(t *testing.T) {
+	cache := newTestCacheAside(t)
+	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+	key := "del:" + uuid.NewString()
+
+	loader := func(context.Context, string) (tUser, error) { return tUser{ID: 9, Name: "x"}, nil }
+	if _, err := users.Get(context.Background(), time.Second, key, loader); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := users.Del(context.Background(), key); err != nil {
+		t.Fatalf("del: %v", err)
+	}
+	var calls int
+	wrapped := func(ctx context.Context, k string) (tUser, error) {
+		calls++
+		return loader(ctx, k)
+	}
+	if _, err := users.Get(context.Background(), time.Second, key, wrapped); err != nil {
+		t.Fatalf("get after del: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("loader called %d times after del, want 1", calls)
+	}
+}
+
+func TestTyped_Touch_ExtendsTTL(t *testing.T) {
+	cache := newTestCacheAside(t)
+	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+	key := "touch:" + uuid.NewString()
+
+	loader := func(context.Context, string) (tUser, error) { return tUser{ID: 9, Name: "x"}, nil }
+	if _, err := users.Get(context.Background(), 200*time.Millisecond, key, loader); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := users.Touch(context.Background(), 5*time.Second, key); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	// Wait past the original TTL — Touch should have extended it.
+	time.Sleep(400 * time.Millisecond)
+	var calls int
+	wrapped := func(ctx context.Context, k string) (tUser, error) {
+		calls++
+		return loader(ctx, k)
+	}
+	if _, err := users.Get(context.Background(), time.Second, key, wrapped); err != nil {
+		t.Fatalf("get after touch: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("loader called %d times after touch, want 0 (entry should still be cached)", calls)
+	}
+}
