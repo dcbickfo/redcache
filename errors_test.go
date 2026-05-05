@@ -83,6 +83,7 @@ func TestBatchError_NilReceiverSafe(t *testing.T) {
 }
 
 func TestBatchKeyError_Int_AccessorsAndFormat(t *testing.T) {
+	t.Parallel()
 	err := redcache.NewBatchKeyError(
 		map[int]error{1: errors.New("boom"), 2: errors.New("bad")},
 		[]int{3, 4},
@@ -108,6 +109,7 @@ func TestBatchKeyError_Int_AccessorsAndFormat(t *testing.T) {
 }
 
 func TestBatchKeyError_Nil_SafeAccessors(t *testing.T) {
+	t.Parallel()
 	var bke *redcache.BatchKeyError[string]
 	if bke.HasError("x") || bke.ErrorFor("x") != nil {
 		t.Fatal("nil receiver should be safe and return zero values")
@@ -115,14 +117,38 @@ func TestBatchKeyError_Nil_SafeAccessors(t *testing.T) {
 }
 
 func TestNewBatchKeyError_NilWhenNoFailures(t *testing.T) {
+	t.Parallel()
 	if redcache.NewBatchKeyError(map[int]error{}, []int{1}) != nil {
 		t.Fatal("expected untyped-nil error")
 	}
 }
 
 func TestErrDecode_IsSentinel(t *testing.T) {
+	t.Parallel()
 	wrapped := fmt.Errorf("decoding user: %w", redcache.ErrDecode)
 	if !errors.Is(wrapped, redcache.ErrDecode) {
 		t.Fatal("ErrDecode should be reachable via errors.Is")
+	}
+}
+
+func TestBatchError_NilReceiverHasFailuresAndError(t *testing.T) {
+	t.Parallel()
+	var be *redcache.BatchError
+	if be.HasFailures() {
+		t.Fatal("nil receiver HasFailures should be false")
+	}
+	if got := be.Error(); got != "" {
+		t.Fatalf("nil receiver Error should be empty, got %q", got)
+	}
+}
+
+func TestBatchKeyError_NilReceiverHasFailuresAndError(t *testing.T) {
+	t.Parallel()
+	var bke *redcache.BatchKeyError[int]
+	if bke.HasFailures() {
+		t.Fatal("nil receiver HasFailures should be false")
+	}
+	if got := bke.Error(); got != "" {
+		t.Fatalf("nil receiver Error should be empty, got %q", got)
 	}
 }

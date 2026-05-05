@@ -25,8 +25,11 @@ type BatchError struct {
 
 // Error returns a human-readable summary of the batch failure. Failed keys are
 // emitted in sorted order so the string is stable across calls (map iteration
-// would otherwise scramble per-key entries).
+// would otherwise scramble per-key entries). Safe to call on a nil receiver.
 func (e *BatchError) Error() string {
+	if e == nil {
+		return ""
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "batch operation partially failed: %d succeeded, %d failed", len(e.Succeeded), len(e.Failed))
 	keys := make([]string, 0, len(e.Failed))
@@ -40,8 +43,11 @@ func (e *BatchError) Error() string {
 	return b.String()
 }
 
-// HasFailures returns true if any keys failed.
+// HasFailures returns true if any keys failed. Safe to call on a nil receiver.
 func (e *BatchError) HasFailures() bool {
+	if e == nil {
+		return false
+	}
 	return len(e.Failed) > 0
 }
 
@@ -97,7 +103,11 @@ type BatchKeyError[K comparable] struct {
 
 // Error returns a human-readable summary. Failed keys are emitted in the order
 // produced by sorting their %v formatting so the string is stable across calls.
+// Safe to call on a nil receiver.
 func (e *BatchKeyError[K]) Error() string {
+	if e == nil {
+		return ""
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "batch operation partially failed: %d succeeded, %d failed", len(e.Succeeded), len(e.Failed))
 	type kv struct {
@@ -108,15 +118,20 @@ func (e *BatchKeyError[K]) Error() string {
 	for k := range e.Failed {
 		pairs = append(pairs, kv{k: k, s: fmt.Sprintf("%v", k)})
 	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].s < pairs[j].s })
+	sort.SliceStable(pairs, func(i, j int) bool { return pairs[i].s < pairs[j].s })
 	for _, p := range pairs {
 		fmt.Fprintf(&b, "; key %q: %s", p.s, e.Failed[p.k])
 	}
 	return b.String()
 }
 
-// HasFailures returns true if any keys failed.
-func (e *BatchKeyError[K]) HasFailures() bool { return len(e.Failed) > 0 }
+// HasFailures returns true if any keys failed. Safe to call on a nil receiver.
+func (e *BatchKeyError[K]) HasFailures() bool {
+	if e == nil {
+		return false
+	}
+	return len(e.Failed) > 0
+}
 
 // ErrorFor returns the error recorded for k, or nil if the key did not fail.
 // Safe to call on a nil receiver.
