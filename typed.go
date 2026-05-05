@@ -82,8 +82,9 @@ func (t *Typed[K, V]) Del(ctx context.Context, k K) error {
 	return t.cache.Del(ctx, encKey)
 }
 
-// Touch extends the TTL of a cached value to ttl. See (*CacheAside).Touch
-// for no-op-on-lock semantics.
+// Touch sets the TTL of a cached value to ttl (this can shorten or extend
+// the remaining lifetime). See (*CacheAside).Touch for no-op-on-lock and
+// no-op-on-missing-key semantics.
 func (t *Typed[K, V]) Touch(ctx context.Context, ttl time.Duration, k K) error {
 	encKey, err := t.keyCodec.EncodeKey(k)
 	if err != nil {
