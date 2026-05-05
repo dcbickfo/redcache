@@ -102,3 +102,74 @@ func (badEncodeCodec) Encode(b badEncode) ([]byte, error) {
 	return []byte("ok"), nil
 }
 func (badEncodeCodec) Decode(b []byte) (badEncode, error) { return badEncode{}, nil }
+
+func TestPrimeableTyped_SetMulti_PopulatesAll(t *testing.T) {
+	pca := newTestPrimeable(t)
+	users := redcache.NewPrimeableStringTyped[tUser](pca, redcache.JSONCodec[tUser]{})
+	prefix := uuid.NewString() + ":"
+	keys := []string{prefix + "a", prefix + "b"}
+
+	if err := users.SetMulti(context.Background(), time.Second, keys,
+		func(_ context.Context, keys []string) (map[string]tUser, error) {
+			out := make(map[string]tUser, len(keys))
+			for i, k := range keys {
+				out[k] = tUser{ID: i, Name: k}
+			}
+			return out, nil
+		},
+	); err != nil {
+		t.Fatalf("setmulti: %v", err)
+	}
+
+	got, err := users.GetMulti(context.Background(), time.Second, keys,
+		func(context.Context, []string) (map[string]tUser, error) {
+			t.Fatal("loader should not run after SetMulti")
+			return nil, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("get after setmulti: %v", err)
+	}
+	if len(got) != 2 || got[keys[0]].Name != keys[0] || got[keys[1]].Name != keys[1] {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+// TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces verifies that when the
+// underlying *BatchError surfaces from a partial CAS failure, the typed
+// wrapper converts it to *BatchKeyError[string] reachable via errors.As.
+// Lock-stealing is induced by ForceSet from inside the SetMulti callback,
+// which races the CAS-set for that key.
+func TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
+	pca := newTestPrimeable(t)
+	users := redcache.NewPrimeableStringTyped[tUser](pca, redcache.JSONCodec[tUser]{})
+	prefix := uuid.NewString() + ":"
+	keys := []string{prefix + "a", prefix + "b"}
+
+	err := users.SetMulti(context.Background(), time.Second, keys,
+		func(_ context.Context, gotKeys []string) (map[string]tUser, error) {
+			// Steal lock on outer keys[1] before our CAS-set runs.
+			if serr := pca.ForceSet(context.Background(), time.Second, keys[1], "stolen"); serr != nil {
+				t.Fatalf("steal force set: %v", serr)
+			}
+			out := make(map[string]tUser, len(gotKeys))
+			for _, k := range gotKeys {
+				out[k] = tUser{ID: 1, Name: k}
+			}
+			return out, nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected partial failure")
+	}
+	var bke *redcache.BatchKeyError[string]
+	if !errors.As(err, &bke) {
+		t.Fatalf("expected *BatchKeyError[string], got %T: %v", err, err)
+	}
+	if !bke.HasFailures() {
+		t.Fatalf("expected failures, got %+v", bke)
+	}
+	if !bke.HasError(keys[1]) {
+		t.Fatalf("expected failure for stolen key %q; got %+v", keys[1], bke.Failed)
+	}
+}

@@ -2,6 +2,7 @@ package redcache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -116,4 +117,72 @@ func (t *Typed[K, V]) encodeMultiResult(result map[K]V) (map[string]string, erro
 		out[s] = bytesToString(b)
 	}
 	return out, nil
+}
+
+// SetMulti explicitly populates the cache via fn under write locks.
+// See (*PrimeableCacheAside).SetMulti.
+//
+// On partial failure the returned error wraps a *BatchKeyError[K] (reachable
+// via errors.As) listing per-key Failed / Succeeded entries.
+func (p *PrimeableTyped[K, V]) SetMulti(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []K,
+	fn func(ctx context.Context, keys []K) (map[K]V, error),
+) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	encKeys := make([]string, len(keys))
+	byEnc := make(map[string]K, len(keys))
+	for i, k := range keys {
+		s, err := p.keyCodec.EncodeKey(k)
+		if err != nil {
+			return fmt.Errorf("redcache: encode key: %w", err)
+		}
+		encKeys[i] = s
+		byEnc[s] = k
+	}
+
+	err := p.primeable.SetMulti(ctx, ttl, encKeys, func(ctx context.Context, encArg []string) (map[string]string, error) {
+		argK := make([]K, len(encArg))
+		for i, s := range encArg {
+			argK[i] = byEnc[s]
+		}
+		result, ferr := fn(ctx, argK)
+		if ferr != nil {
+			return nil, ferr
+		}
+		return p.encodeMultiResult(result)
+	})
+	if err == nil {
+		return nil
+	}
+
+	// Convert *BatchError (string-keyed) to *BatchKeyError[K] using byEnc.
+	var be *BatchError
+	if !errors.As(err, &be) {
+		return err
+	}
+	return convertBatchErrorToTyped(be, byEnc)
+}
+
+// convertBatchErrorToTyped maps a *BatchError's string keys back to typed K
+// using byEnc. Keys not in byEnc are silently skipped: their presence would
+// indicate an internal invariant violation, and surfacing a slightly-incomplete
+// BatchKeyError is safer than panicking.
+func convertBatchErrorToTyped[K comparable](be *BatchError, byEnc map[string]K) error {
+	failedK := make(map[K]error, len(be.Failed))
+	for s, ferr := range be.Failed {
+		if k, ok := byEnc[s]; ok {
+			failedK[k] = ferr
+		}
+	}
+	succeededK := make([]K, 0, len(be.Succeeded))
+	for _, s := range be.Succeeded {
+		if k, ok := byEnc[s]; ok {
+			succeededK = append(succeededK, k)
+		}
+	}
+	return NewBatchKeyError(failedK, succeededK)
 }
