@@ -135,6 +135,63 @@ func (r Repository) GetByIDs(ctx context.Context, keys []string) (map[string]str
 }
 ```
 
+## Typed API
+
+For typed values and keys, wrap a `*CacheAside` (or `*PrimeableCacheAside`) in a `Typed[K, V]` (or `PrimeableTyped[K, V]`) view. The default codec is JSON; supply your own `Codec[V]` / `KeyCodec[K]` to use a different format.
+
+```go
+type User struct {
+    ID   int    `json:"id"`
+    Name string `json:"name"`
+}
+
+client, err := redcache.NewPrimeableCacheAside(
+    rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+    redcache.CacheAsideOption{LockTTL: time.Second},
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+// String keys, JSON-encoded User values.
+users := redcache.NewPrimeableStringTyped[User](client, redcache.JSONCodec[User]{})
+
+u, err := users.Get(ctx, time.Minute, "u-123",
+    func(ctx context.Context, key string) (User, error) {
+        // load from db
+        return User{ID: 123, Name: "alice"}, nil
+    },
+)
+```
+
+For typed keys, supply a `KeyCodec[K]`:
+
+```go
+type UserID int64
+
+userIDCodec := redcache.KeyCodecFunc[UserID](func(id UserID) (string, error) {
+    return fmt.Sprintf("user:%d", id), nil
+})
+users := redcache.NewPrimeableTyped[UserID, User](client, userIDCodec, redcache.JSONCodec[User]{})
+u, err := users.Get(ctx, time.Minute, UserID(123), loader)
+```
+
+Provided codecs:
+
+| Type | Description |
+|---|---|
+| `JSONCodec[V]` | Default; serializes V via `encoding/json`. |
+| `BytesCodec` | Identity for `V = []byte`. |
+| `StringCodec` | Identity for `V = string`. |
+| `StringKeyCodec` | Identity for `K = string`. |
+| `KeyCodecFunc[K]` | Adapts a `func(K) (string, error)` to `KeyCodec[K]`. |
+
+Caller owns absence semantics — use `*T`, `sql.Null[T]`, or a domain sentinel inside `V`. The library does not introduce an `ErrNotFound` sentinel.
+
+Decode failures on read are returned wrapped with `redcache.ErrDecode` (`errors.Is`-checkable). The library does not auto-evict; the caller decides whether to log, `Del`, or retry.
+
+Multi-set partial failures surface as `*BatchKeyError[K]` (reachable via `errors.As`), mirroring the existing string `*BatchError`.
+
 ## Configuration
 
 `CacheAsideOption` controls the behavior of the cache-aside client:
