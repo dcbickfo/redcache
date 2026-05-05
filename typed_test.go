@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -154,5 +155,56 @@ func TestTyped_Touch_ExtendsTTL(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("loader called %d times after touch, want 0 (entry should still be cached)", calls)
+	}
+}
+
+func TestTyped_RefreshAhead_FiresThroughTypedView(t *testing.T) {
+	c, err := redcache.NewRedCacheAside(
+		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+		redcache.CacheAsideOption{
+			LockTTL:              500 * time.Millisecond,
+			RefreshAfterFraction: 0.1,
+			RefreshWorkers:       1,
+			RefreshQueueSize:     8,
+		},
+	)
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	defer c.Close()
+
+	users := redcache.NewStringTyped[tUser](c, redcache.JSONCodec[tUser]{})
+	key := "refresh:" + uuid.NewString()
+
+	var calls int32
+	loader := func(_ context.Context, _ string) (tUser, error) {
+		n := atomic.AddInt32(&calls, 1)
+		return tUser{ID: int(n), Name: "v"}, nil
+	}
+
+	first, err := users.Get(context.Background(), 500*time.Millisecond, key, loader)
+	if err != nil {
+		t.Fatalf("first get: %v", err)
+	}
+	if first.ID != 1 {
+		t.Fatalf("first ID %d, want 1", first.ID)
+	}
+	// Wait past RefreshAfterFraction floor (0.1 * 500ms = 50ms).
+	time.Sleep(150 * time.Millisecond)
+
+	// Next Get returns the still-cached value but should trigger a refresh.
+	if _, err := users.Get(context.Background(), 500*time.Millisecond, key, loader); err != nil {
+		t.Fatalf("trigger get: %v", err)
+	}
+	// Give the refresh worker time to run.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&calls) >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&calls); got < 2 {
+		t.Fatalf("loader call count %d; expected refresh-ahead to have fired (>=2)", got)
 	}
 }
