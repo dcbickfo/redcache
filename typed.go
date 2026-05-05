@@ -112,3 +112,70 @@ func bytesToString(b []byte) string {
 	}
 	return unsafe.String(unsafe.SliceData(b), len(b))
 }
+
+// PrimeableTyped is a type-safe view over a *PrimeableCacheAside, adding
+// Set / ForceSet / SetMulti / ForceSetMulti to the read/delete/touch surface
+// from Typed.
+type PrimeableTyped[K comparable, V any] struct {
+	Typed[K, V]
+	primeable *PrimeableCacheAside
+}
+
+// NewPrimeableTyped constructs a typed view over a *PrimeableCacheAside.
+func NewPrimeableTyped[K comparable, V any](
+	cache *PrimeableCacheAside,
+	keyCodec KeyCodec[K],
+	valCodec Codec[V],
+) *PrimeableTyped[K, V] {
+	return &PrimeableTyped[K, V]{
+		Typed:     Typed[K, V]{cache: cache.CacheAside, keyCodec: keyCodec, valCodec: valCodec},
+		primeable: cache,
+	}
+}
+
+// NewPrimeableStringTyped is sugar for NewPrimeableTyped[string, V] with
+// StringKeyCodec{} preset.
+func NewPrimeableStringTyped[V any](
+	cache *PrimeableCacheAside,
+	valCodec Codec[V],
+) *PrimeableTyped[string, V] {
+	return NewPrimeableTyped[string, V](cache, StringKeyCodec{}, valCodec)
+}
+
+// Set explicitly populates the cache via fn under a write lock.
+// See (*PrimeableCacheAside).Set.
+func (p *PrimeableTyped[K, V]) Set(
+	ctx context.Context,
+	ttl time.Duration,
+	k K,
+	fn func(ctx context.Context, k K) (V, error),
+) error {
+	encKey, err := p.keyCodec.EncodeKey(k)
+	if err != nil {
+		return fmt.Errorf("redcache: encode key: %w", err)
+	}
+	return p.primeable.Set(ctx, ttl, encKey, func(ctx context.Context, _ string) (string, error) {
+		v, ferr := fn(ctx, k)
+		if ferr != nil {
+			return "", ferr
+		}
+		b, eerr := p.valCodec.Encode(v)
+		if eerr != nil {
+			return "", fmt.Errorf("redcache: encode value: %w", eerr)
+		}
+		return bytesToString(b), nil
+	})
+}
+
+// ForceSet unconditionally writes v to Redis. See (*PrimeableCacheAside).ForceSet.
+func (p *PrimeableTyped[K, V]) ForceSet(ctx context.Context, ttl time.Duration, k K, v V) error {
+	encKey, err := p.keyCodec.EncodeKey(k)
+	if err != nil {
+		return fmt.Errorf("redcache: encode key: %w", err)
+	}
+	b, err := p.valCodec.Encode(v)
+	if err != nil {
+		return fmt.Errorf("redcache: encode value: %w", err)
+	}
+	return p.primeable.ForceSet(ctx, ttl, encKey, bytesToString(b))
+}
