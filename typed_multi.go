@@ -167,6 +167,69 @@ func (p *PrimeableTyped[K, V]) SetMulti(
 	return convertBatchErrorToTyped(be, byEnc)
 }
 
+// ForceSetMulti unconditionally writes values to Redis. See
+// (*PrimeableCacheAside).ForceSetMulti.
+//
+// Encode failures are collected per-key and returned as *BatchKeyError[K];
+// successfully encoded entries are still written.
+//
+// If the underlying ForceSetMulti returns a non-nil error, the wrapper
+// cannot determine which keys succeeded and which failed — every encoded
+// key is reported as failed with that same error. If you need per-key
+// success/failure beyond encode-time, use Set/SetMulti instead.
+func (p *PrimeableTyped[K, V]) ForceSetMulti(
+	ctx context.Context,
+	ttl time.Duration,
+	values map[K]V,
+) error {
+	if len(values) == 0 {
+		return nil
+	}
+	encVals := make(map[string]string, len(values))
+	failed := make(map[K]error)
+	byEnc := make(map[string]K, len(values))
+	for k, v := range values {
+		s, err := p.keyCodec.EncodeKey(k)
+		if err != nil {
+			failed[k] = fmt.Errorf("redcache: encode key: %w", err)
+			continue
+		}
+		b, err := p.valCodec.Encode(v)
+		if err != nil {
+			failed[k] = fmt.Errorf("redcache: encode value: %w", err)
+			continue
+		}
+		encVals[s] = bytesToString(b)
+		byEnc[s] = k
+	}
+
+	if len(encVals) == 0 {
+		// Every key failed encoding — return BatchKeyError without touching Redis.
+		return NewBatchKeyError(failed, nil)
+	}
+
+	err := p.primeable.ForceSetMulti(ctx, ttl, encVals)
+	if err == nil && len(failed) == 0 {
+		return nil
+	}
+
+	// Build per-key result. Underlying ForceSetMulti returns plain error
+	// (not *BatchError); on success all encVals were written.
+	succeeded := make([]K, 0, len(byEnc))
+	if err == nil {
+		for _, k := range byEnc {
+			succeeded = append(succeeded, k)
+		}
+	} else {
+		// Underlying returned a non-batch error; treat all encVals as failed
+		// with the same underlying error so the caller still sees per-key info.
+		for _, k := range byEnc {
+			failed[k] = err
+		}
+	}
+	return NewBatchKeyError(failed, succeeded)
+}
+
 // convertBatchErrorToTyped maps a *BatchError's string keys back to typed K
 // using byEnc. Keys not in byEnc are silently skipped: their presence would
 // indicate an internal invariant violation, and surfacing a slightly-incomplete

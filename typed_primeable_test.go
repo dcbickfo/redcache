@@ -173,3 +173,31 @@ func TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
 		t.Fatalf("expected failure for stolen key %q; got %+v", keys[1], bke.Failed)
 	}
 }
+
+func TestPrimeableTyped_ForceSetMulti_OverwritesAll(t *testing.T) {
+	pca := newTestPrimeable(t)
+	users := redcache.NewPrimeableStringTyped[tUser](pca, redcache.JSONCodec[tUser]{})
+	prefix := uuid.NewString() + ":"
+	in := map[string]tUser{
+		prefix + "a": {ID: 1, Name: "a"},
+		prefix + "b": {ID: 2, Name: "b"},
+	}
+
+	if err := users.ForceSetMulti(context.Background(), time.Second, in); err != nil {
+		t.Fatalf("force set multi: %v", err)
+	}
+
+	keys := []string{prefix + "a", prefix + "b"}
+	got, err := users.GetMulti(context.Background(), time.Second, keys,
+		func(context.Context, []string) (map[string]tUser, error) {
+			t.Fatal("loader should not run after ForceSetMulti")
+			return nil, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("get after force set multi: %v", err)
+	}
+	if len(got) != 2 || got[prefix+"a"].ID != 1 || got[prefix+"b"].ID != 2 {
+		t.Fatalf("got %+v", got)
+	}
+}
