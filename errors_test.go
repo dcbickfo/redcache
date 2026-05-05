@@ -2,6 +2,8 @@ package redcache_test
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -78,4 +80,49 @@ func TestBatchError_NilReceiverSafe(t *testing.T) {
 	var be *redcache.BatchError
 	assert.False(t, be.HasError("anything"))
 	assert.NoError(t, be.ErrorFor("anything"))
+}
+
+func TestBatchKeyError_Int_AccessorsAndFormat(t *testing.T) {
+	err := redcache.NewBatchKeyError(
+		map[int]error{1: errors.New("boom"), 2: errors.New("bad")},
+		[]int{3, 4},
+	)
+	if err == nil {
+		t.Fatal("expected non-nil error")
+	}
+	var bke *redcache.BatchKeyError[int]
+	if !errors.As(err, &bke) {
+		t.Fatalf("errors.As failed for *BatchKeyError[int]; got %T", err)
+	}
+	if !bke.HasFailures() || !bke.HasError(1) || bke.HasError(99) {
+		t.Fatalf("HasFailures/HasError wrong: %+v", bke)
+	}
+	if bke.ErrorFor(1) == nil || bke.ErrorFor(99) != nil {
+		t.Fatal("ErrorFor wrong")
+	}
+	// Stable formatting: failed keys ordered.
+	got := bke.Error()
+	if !strings.Contains(got, "2 succeeded, 2 failed") {
+		t.Fatalf("missing summary: %s", got)
+	}
+}
+
+func TestBatchKeyError_Nil_SafeAccessors(t *testing.T) {
+	var bke *redcache.BatchKeyError[string]
+	if bke.HasError("x") || bke.ErrorFor("x") != nil {
+		t.Fatal("nil receiver should be safe and return zero values")
+	}
+}
+
+func TestNewBatchKeyError_NilWhenNoFailures(t *testing.T) {
+	if redcache.NewBatchKeyError(map[int]error{}, []int{1}) != nil {
+		t.Fatal("expected untyped-nil error")
+	}
+}
+
+func TestErrDecode_IsSentinel(t *testing.T) {
+	wrapped := fmt.Errorf("decoding user: %w", redcache.ErrDecode)
+	if !errors.Is(wrapped, redcache.ErrDecode) {
+		t.Fatal("ErrDecode should be reachable via errors.Is")
+	}
 }
