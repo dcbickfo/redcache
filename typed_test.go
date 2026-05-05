@@ -2,6 +2,7 @@ package redcache_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -77,5 +78,29 @@ func TestTyped_Get_DecodeErrorIsWrapped(t *testing.T) {
 	})
 	if !errors.Is(err, redcache.ErrDecode) {
 		t.Fatalf("expected ErrDecode, got %v", err)
+	}
+}
+
+func TestTyped_Get_DecodeErrorPreservesUnderlying(t *testing.T) {
+	cache := newTestCacheAside(t)
+	key := "decode-chain:" + uuid.NewString()
+	if err := cache.Client().Do(context.Background(),
+		cache.Client().B().Set().Key(key).Value("not json").Px(time.Second).Build()).Error(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+	_, err := users.Get(context.Background(), time.Second, key,
+		func(context.Context, string) (tUser, error) { return tUser{}, nil },
+	)
+	if err == nil {
+		t.Fatal("expected decode error")
+	}
+	if !errors.Is(err, redcache.ErrDecode) {
+		t.Fatalf("expected ErrDecode in chain, got %v", err)
+	}
+	// Underlying json error must also be in the chain.
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Fatalf("expected *json.SyntaxError in chain, got %v (%T)", err, err)
 	}
 }

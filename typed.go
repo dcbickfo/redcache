@@ -68,7 +68,7 @@ func (t *Typed[K, V]) Get(
 
 	v, derr := t.valCodec.Decode(stringToBytes(raw))
 	if derr != nil {
-		return zero, fmt.Errorf("redcache: decode key %q: %w: %s", encKey, ErrDecode, derr)
+		return zero, fmt.Errorf("redcache: decode key %q: %w: %w", encKey, ErrDecode, derr)
 	}
 	return v, nil
 }
