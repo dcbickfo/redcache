@@ -171,12 +171,9 @@ func (p *PrimeableTyped[K, V]) SetMulti(
 // (*PrimeableCacheAside).ForceSetMulti.
 //
 // Encode failures are collected per-key and returned as *BatchKeyError[K];
-// successfully encoded entries are still written.
-//
-// If the underlying ForceSetMulti returns a non-nil error, the wrapper
-// cannot determine which keys succeeded and which failed — every encoded
-// key is reported as failed with that same error. If you need per-key
-// success/failure beyond encode-time, use Set/SetMulti instead.
+// successfully encoded entries are still written. On partial Redis failure,
+// the per-key results from the upstream *BatchError are merged into the
+// returned *BatchKeyError[K].
 func (p *PrimeableTyped[K, V]) ForceSetMulti(
 	ctx context.Context,
 	ttl time.Duration,
@@ -212,22 +209,40 @@ func (p *PrimeableTyped[K, V]) ForceSetMulti(
 	if err == nil && len(failed) == 0 {
 		return nil
 	}
+	succeeded := mergeForceSetResult(err, byEnc, failed)
+	return NewBatchKeyError(failed, succeeded)
+}
 
-	// Build per-key result. Underlying ForceSetMulti returns plain error
-	// (not *BatchError); on success all encVals were written.
+// mergeForceSetResult interprets the result of (*PrimeableCacheAside).ForceSetMulti
+// and merges per-key outcomes into failed (encode errors are preserved). Returns
+// the corresponding succeeded slice. A non-*BatchError err is treated as a total
+// failure since per-key status cannot be inferred.
+func mergeForceSetResult[K comparable](err error, byEnc map[string]K, failed map[K]error) []K {
 	succeeded := make([]K, 0, len(byEnc))
 	if err == nil {
 		for _, k := range byEnc {
 			succeeded = append(succeeded, k)
 		}
-	} else {
-		// Underlying returned a non-batch error; treat all encVals as failed
-		// with the same underlying error so the caller still sees per-key info.
+		return succeeded
+	}
+	var be *BatchError
+	if !errors.As(err, &be) {
 		for _, k := range byEnc {
 			failed[k] = err
 		}
+		return succeeded
 	}
-	return NewBatchKeyError(failed, succeeded)
+	for s, ferr := range be.Failed {
+		if k, ok := byEnc[s]; ok {
+			failed[k] = ferr
+		}
+	}
+	for _, s := range be.Succeeded {
+		if k, ok := byEnc[s]; ok {
+			succeeded = append(succeeded, k)
+		}
+	}
+	return succeeded
 }
 
 // convertBatchErrorToTyped maps a *BatchError's string keys back to typed K

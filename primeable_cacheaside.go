@@ -232,10 +232,8 @@ func (pca *PrimeableCacheAside) ForceSet(ctx context.Context, ttl time.Duration,
 //
 // ttl must be > 0 (Redis rejects PX 0).
 //
-// All commands are issued; on partial failure each per-key error is logged and
-// the first error encountered is returned. Some writes may have succeeded.
-// Callers that need structured per-key status should use SetMulti, which returns
-// a BatchError with per-key results.
+// All commands are issued. On partial failure, returns a *BatchError listing
+// succeeded and failed keys. On full success, returns nil.
 func (pca *PrimeableCacheAside) ForceSetMulti(ctx context.Context, ttl time.Duration, values map[string]string) error {
 	if len(values) == 0 {
 		return nil
@@ -248,16 +246,20 @@ func (pca *PrimeableCacheAside) ForceSetMulti(ctx context.Context, ttl time.Dura
 		*cmdsP = append(*cmdsP, pca.client.B().Set().Key(key).Value(wrapEnvelope(val, 0)).Px(ttl).Build())
 	}
 	resps := pca.client.DoMulti(ctx, *cmdsP...)
-	var firstErr error
+	var failed map[string]error
+	succeeded := make([]string, 0, len(resps))
 	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
 			pca.logger.Error("ForceSetMulti key failed", "key", keyOrder[i], "error", err)
-			if firstErr == nil {
-				firstErr = err
+			if failed == nil {
+				failed = make(map[string]error)
 			}
+			failed[keyOrder[i]] = err
+			continue
 		}
+		succeeded = append(succeeded, keyOrder[i])
 	}
-	return firstErr
+	return NewBatchError(failed, succeeded)
 }
 
 // waitForReadLocks registers all keys, batch-reads them, and waits for any that
