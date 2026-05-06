@@ -55,7 +55,7 @@ func (t *Typed[K, V]) GetMulti(
 	for s, payload := range raw {
 		k, ok := byEnc[s]
 		if !ok {
-			continue // unexpected; underlying returned a key we did not request
+			continue
 		}
 		v, derr := t.valCodec.Decode(stringToBytes(payload))
 		if derr != nil {
@@ -66,8 +66,8 @@ func (t *Typed[K, V]) GetMulti(
 	return out, nil
 }
 
-// DelMulti removes multiple keys from Redis, triggering invalidation on all
-// clients. See (*CacheAside).DelMulti.
+// DelMulti removes multiple keys from Redis, triggering invalidation. See
+// (*CacheAside).DelMulti.
 func (t *Typed[K, V]) DelMulti(ctx context.Context, keys ...K) error {
 	if len(keys) == 0 {
 		return nil
@@ -83,9 +83,8 @@ func (t *Typed[K, V]) DelMulti(ctx context.Context, keys ...K) error {
 	return t.cache.DelMulti(ctx, encKeys...)
 }
 
-// TouchMulti sets the TTL of multiple cached values to ttl (this can shorten
-// or extend the remaining lifetime). See (*CacheAside).TouchMulti for
-// no-op-on-lock and no-op-on-missing-key semantics.
+// TouchMulti sets the TTL of multiple cached values to ttl. See
+// (*CacheAside).TouchMulti for no-op-on-lock and no-op-on-missing-key semantics.
 func (t *Typed[K, V]) TouchMulti(ctx context.Context, ttl time.Duration, keys ...K) error {
 	if len(keys) == 0 {
 		return nil
@@ -159,7 +158,6 @@ func (p *PrimeableTyped[K, V]) SetMulti(
 		return nil
 	}
 
-	// Convert *BatchError (string-keyed) to *BatchKeyError[K] using byEnc.
 	var be *BatchError
 	if !errors.As(err, &be) {
 		return err
@@ -201,7 +199,6 @@ func (p *PrimeableTyped[K, V]) ForceSetMulti(
 	}
 
 	if len(encVals) == 0 {
-		// Every key failed encoding — return BatchKeyError without touching Redis.
 		return NewBatchKeyError(failed, nil)
 	}
 
@@ -213,10 +210,9 @@ func (p *PrimeableTyped[K, V]) ForceSetMulti(
 	return NewBatchKeyError(failed, succeeded)
 }
 
-// mergeForceSetResult interprets the result of (*PrimeableCacheAside).ForceSetMulti
-// and merges per-key outcomes into failed (encode errors are preserved). Returns
-// the corresponding succeeded slice. A non-*BatchError err is treated as a total
-// failure since per-key status cannot be inferred.
+// mergeForceSetResult merges per-key outcomes from (*PrimeableCacheAside).ForceSetMulti
+// into failed (encode errors are preserved) and returns the succeeded slice.
+// A non-*BatchError err is treated as a total failure.
 func mergeForceSetResult[K comparable](err error, byEnc map[string]K, failed map[K]error) []K {
 	succeeded := make([]K, 0, len(byEnc))
 	if err == nil {
@@ -246,9 +242,8 @@ func mergeForceSetResult[K comparable](err error, byEnc map[string]K, failed map
 }
 
 // convertBatchErrorToTyped maps a *BatchError's string keys back to typed K
-// using byEnc. Keys not in byEnc are silently skipped: their presence would
-// indicate an internal invariant violation, and surfacing a slightly-incomplete
-// BatchKeyError is safer than panicking.
+// using byEnc. Keys not in byEnc are silently skipped — surfacing a partial
+// BatchKeyError is safer than panicking on an invariant violation.
 func convertBatchErrorToTyped[K comparable](be *BatchError, byEnc map[string]K) error {
 	failedK := make(map[K]error, len(be.Failed))
 	for s, ferr := range be.Failed {

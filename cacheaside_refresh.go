@@ -11,10 +11,8 @@ import (
 	"github.com/redis/rueidis"
 )
 
-// refreshJob is a unit of work for the refresh worker pool. Holding fields
-// directly (rather than a closure) avoids an allocation per trigger on the
-// hot path. Exactly one of singleFn / multiFn is set; runRefreshJob dispatches
-// based on which is non-nil.
+// refreshJob is a unit of work for the refresh worker pool. Exactly one of
+// singleFn / multiFn is set; runRefreshJob dispatches on which is non-nil.
 type refreshJob struct {
 	ctx      context.Context
 	ttl      time.Duration
@@ -23,9 +21,9 @@ type refreshJob struct {
 	multiFn  func(ctx context.Context, keys []string) (map[string]string, error)
 }
 
-// startRefreshWorkers launches n background workers that drain refreshQueue.
-// Each worker exits when refreshDone is closed (during Close). The data channel
-// is never closed because concurrent send + close races even with recover.
+// startRefreshWorkers launches n workers that drain refreshQueue, exiting when
+// refreshDone is closed. The data channel is never closed because concurrent
+// send + close races even with recover.
 func (rca *CacheAside) startRefreshWorkers(n int) {
 	for range n {
 		rca.refreshWg.Add(1)
@@ -44,18 +42,17 @@ func (rca *CacheAside) startRefreshWorkers(n int) {
 }
 
 // refreshKeyFor returns the distributed refresh-lock key for a data key.
-// The data key is wrapped in a Redis cluster hash tag ("{key}") so the refresh
-// lock always hashes to the same slot as the data key, keeping a key and its
-// refresh lock co-located in cluster deployments.
+// The data key is wrapped in a hash tag ("{key}") so the refresh lock hashes
+// to the same cluster slot as the data key.
 func (rca *CacheAside) refreshKeyFor(key string) string {
 	return rca.refreshPrefix + "{" + key + "}"
 }
 
 // runRefreshJob runs a refresh-ahead job, recovering from any panic so a
-// misbehaving callback cannot kill the worker goroutine and degrade the pool.
-// On panic, RefreshPanicked fires once per key the job was operating on.
+// misbehaving callback cannot kill the worker goroutine. On panic,
+// RefreshPanicked fires once per key.
 //
-// Defer order is LIFO, so refreshing-map cleanup runs before panic recovery —
+// Defer order is LIFO: refreshing-map cleanup runs before panic recovery, so
 // in-flight markers are released even when the callback panics.
 func (rca *CacheAside) runRefreshJob(job refreshJob) {
 	defer func() {
@@ -80,18 +77,15 @@ func (rca *CacheAside) runRefreshJob(job refreshJob) {
 
 // shouldRefresh reports whether the current read should trigger refresh-ahead.
 //
-// Two-stage decision:
-//  1. Floor: while the remaining TTL is at or above (1 - refreshAfter) * ttl,
-//     never refresh — fresh values are left alone regardless of XFetch noise.
-//  2. Below floor: if XFetch metadata is available (delta from envelope) and
-//     RefreshBeta > 0, sample probabilistically per Vattani et al. (VLDB 2015):
-//     refresh when remaining_pttl <= delta * beta * Exp(1). Per-read
-//     probability climbs to 1 at expiry, weighted by how slow the value is to
-//     recompute.
+// Two stages:
+//  1. Floor: while remaining TTL is at or above (1 - refreshAfter) * ttl, never
+//     refresh.
+//  2. Below floor: if delta and RefreshBeta are both > 0, sample probabilistically
+//     per Vattani et al. (VLDB 2015): refresh when remaining_pttl <= delta * beta
+//     * Exp(1). Per-read probability climbs to 1 at expiry.
 //
-// Falls back to "always refresh below floor" when delta is unknown (legacy
-// values written before envelope wrapping) or RefreshBeta=0 (operator opted
-// out of XFetch).
+// Falls back to "always refresh below floor" when delta is 0 (legacy values)
+// or RefreshBeta is 0 (XFetch disabled).
 func (rca *CacheAside) shouldRefresh(cachePTTL int64, ttl time.Duration, delta time.Duration) bool {
 	if rca.refreshAfter == 0 || cachePTTL <= 0 {
 		return false
@@ -110,14 +104,10 @@ func (rca *CacheAside) shouldRefresh(cachePTTL int64, ttl time.Duration, delta t
 
 // triggerRefresh enqueues a single-key refresh job to the worker pool.
 // Two-level dedup: local syncx.Map + distributed SET NX on a separate refresh key.
-// If the queue is full, the refresh is silently dropped (stale value is still served).
+// If the queue is full, the refresh is silently dropped.
 //
-// Safe against concurrent Close: the closing-flag check is a fast-exit
-// optimization, not a correctness guarantee — Close can still flip the flag
-// after we read it. Correctness comes from enqueueRefresh's select on
-// refreshDone, which unblocks the sender if Close races us to send (we only
-// ever close the signal channel refreshDone, never the data channel
-// refreshQueue, so a closed-channel send is impossible).
+// Safe against concurrent Close: the closing flag is a fast-exit optimization;
+// correctness comes from enqueueRefresh's select on refreshDone.
 func (rca *CacheAside) triggerRefresh(
 	ctx context.Context,
 	ttl time.Duration,
@@ -127,7 +117,6 @@ func (rca *CacheAside) triggerRefresh(
 	if rca.closing.Load() {
 		return
 	}
-	// Local dedup: skip if this process is already refreshing this key.
 	if _, loaded := rca.refreshing.LoadOrStore(key, struct{}{}); loaded {
 		rca.emitRefreshSkipped(1)
 		return
@@ -143,9 +132,8 @@ func (rca *CacheAside) triggerRefresh(
 }
 
 // enqueueRefresh sends a job to the refresh queue. The select includes a
-// refreshDone case so a concurrent Close unblocks senders without a data race —
-// reads on a closed channel are safe, sends on a closed channel are not, so we
-// only ever close refreshDone (the signal) and never refreshQueue (the data).
+// refreshDone case so a concurrent Close unblocks senders without ever
+// closing the data channel (sends on closed channels panic).
 func (rca *CacheAside) enqueueRefresh(job refreshJob, keys []string) {
 	select {
 	case rca.refreshQueue <- job:
@@ -173,10 +161,9 @@ func (rca *CacheAside) doSingleRefresh(
 	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rca.lockTTL)
 	defer cancel()
 
-	// Distributed dedup: SET NX on a separate refresh lock key. IsRedisNil
-	// signals "another node is refreshing" (healthy contention); other errors
-	// are real Redis problems and must be reported separately so operators can
-	// distinguish a healthy dedup signal from a broken Redis.
+	// Distributed dedup: SET NX on a separate refresh lock key. IsRedisNil =
+	// "another node is refreshing" (healthy); other errors = real Redis
+	// problems, reported separately so operators can distinguish them.
 	refreshKey := rca.refreshKeyFor(key)
 	err := rca.client.Do(refreshCtx, rca.client.B().Set().Key(refreshKey).Value("1").Nx().Px(rca.lockTTL).Build()).Error()
 	if err != nil {
@@ -212,11 +199,9 @@ func (rca *CacheAside) doSingleRefresh(
 	}
 }
 
-// triggerMultiRefresh enqueues a multi-key refresh job to the worker pool.
-// Two-level dedup: local syncx.Map + distributed SET NX on separate refresh keys.
-// If the queue is full, the refresh is silently dropped (stale values are still served).
-//
-// Safe against concurrent Close: see triggerRefresh for the closing+refreshDone pattern.
+// triggerMultiRefresh enqueues a multi-key refresh job. Two-level dedup: local
+// syncx.Map + distributed SET NX on separate refresh keys. Drops silently when
+// the queue is full. Safe against concurrent Close (see triggerRefresh).
 func (rca *CacheAside) triggerMultiRefresh(
 	ctx context.Context,
 	ttl time.Duration,
@@ -226,7 +211,6 @@ func (rca *CacheAside) triggerMultiRefresh(
 	if rca.closing.Load() {
 		return
 	}
-	// Local dedup: filter to keys not already being refreshed.
 	var toRefresh []string
 	var skipped int
 	for _, key := range keys {
@@ -278,9 +262,8 @@ func (rca *CacheAside) doMultiRefresh(
 	rca.setRefreshedValues(refreshCtx, ttl, vals, perValueDelta(time.Since(start), len(vals)))
 }
 
-// acquireRefreshLocks batch-acquires distributed SET NX locks for refresh keys.
-// Distinguishes IsRedisNil (healthy dedup → RefreshSkipped) from real Redis
-// errors (→ RefreshError + log).
+// acquireRefreshLocks batch-acquires distributed SET NX locks for refresh keys,
+// distinguishing IsRedisNil (healthy dedup) from real Redis errors.
 func (rca *CacheAside) acquireRefreshLocks(ctx context.Context, keys []string) []string {
 	cmdsP := commandsPool.Get(len(keys))
 	defer commandsPool.Put(cmdsP)
@@ -309,8 +292,7 @@ func (rca *CacheAside) acquireRefreshLocks(ctx context.Context, keys []string) [
 }
 
 // deleteRefreshLocks removes distributed refresh lock keys (best effort).
-// Failures are logged so operators can investigate; a stuck refresh lock
-// disables refresh-ahead for that key for one lockTTL window.
+// A stuck refresh lock disables refresh-ahead for that key for one lockTTL.
 func (rca *CacheAside) deleteRefreshLocks(ctx context.Context, keys []string) {
 	cleanupCtx, cleanupCancel := rca.cleanupCtx(ctx)
 	defer cleanupCancel()
@@ -329,10 +311,8 @@ func (rca *CacheAside) deleteRefreshLocks(ctx context.Context, keys []string) {
 }
 
 // setRefreshedValues writes refreshed values via a CAS-style Lua script that
-// skips keys currently holding a lock value (so a concurrent Get/Set is not
-// stomped) or missing entirely (let Get-on-miss handle population). Values
-// are envelope-wrapped with the supplied delta so future reads can apply
-// XFetch sampling.
+// skips keys currently holding a lock value (so concurrent Get/Set is not
+// stomped) or missing entirely (let Get-on-miss handle population).
 func (rca *CacheAside) setRefreshedValues(ctx context.Context, ttl time.Duration, vals map[string]string, delta time.Duration) {
 	if len(vals) == 0 {
 		return

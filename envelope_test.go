@@ -35,13 +35,13 @@ func TestEnvelope_RoundTrip(t *testing.T) {
 
 func TestEnvelope_LegacyValuePassthrough(t *testing.T) {
 	t.Parallel()
-	// Values written before envelope wrapping must be read as-is with delta=0
-	// so shouldRefresh falls back to floor-based refresh.
+	// Pre-envelope values must round-trip with delta=0 so shouldRefresh falls
+	// back to floor-based refresh.
 	cases := []string{
 		"plain",
 		"",
 		"with:colons",
-		"__redcache:lock:1234", // looks like a lock value; unwrap returns as-is
+		"__redcache:lock:1234", // lock-shaped values pass through as-is
 	}
 	for _, val := range cases {
 		gotVal, gotDelta := unwrapEnvelope(val)
@@ -56,12 +56,11 @@ func TestEnvelope_LegacyValuePassthrough(t *testing.T) {
 
 func TestEnvelope_MalformedFallsBack(t *testing.T) {
 	t.Parallel()
-	// Inputs that start with the envelope prefix but cannot be parsed must
-	// surface the raw string with delta=0 rather than panicking or returning
-	// garbage; treat them as "no XFetch metadata".
+	// Prefixed-but-unparseable inputs must pass through with delta=0 rather
+	// than panicking or returning garbage.
 	cases := []string{
 		"__redcache:v1:notanumber:body",
-		"__redcache:v1:-5:body", // negative delta rejected
+		"__redcache:v1:-5:body", // negative delta is rejected
 		"__redcache:v1:nocolons",
 	}
 	for _, val := range cases {

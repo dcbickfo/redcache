@@ -2,17 +2,14 @@
 package cmdx
 
 const (
-	// RedisClusterSlots is the maximum slot number in a Redis cluster (16384 total slots, numbered 0-16383).
+	// RedisClusterSlots is the maximum slot number in a Redis cluster (0-16383).
 	RedisClusterSlots = 16383
 )
 
 // GroupBySlot groups items by their Redis cluster slot, using keyFn to extract
-// the key for slot computation.
-//
-// Fast path: if all items share a slot (always true for non-cluster Redis and
-// common for cluster keys with hash tags), returns a single-entry map that
-// aliases the input slice — no per-group slice growth. Callers must not mutate
-// the returned slices in ways that affect the input.
+// the key for slot computation. When all items share a slot, returns a
+// single-entry map aliasing the input slice; callers must not mutate the
+// returned slices in ways that affect the input.
 func GroupBySlot[V any](items []V, keyFn func(V) string) map[uint16][]V {
 	if len(items) == 0 {
 		return nil

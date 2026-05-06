@@ -46,7 +46,6 @@ func TestPrimeableCacheAside_Set_Basic(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Subsequent Get should return cached value without callback.
 	called := false
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		called = true
@@ -67,20 +66,17 @@ func TestPrimeableCacheAside_Set_Overwrites(t *testing.T) {
 	val1 := "val1:" + uuid.New().String()
 	val2 := "val2:" + uuid.New().String()
 
-	// Set initial value via Get.
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		return val1, nil
 	})
 	require.NoError(t, err)
 	assert.Equal(t, val1, res)
 
-	// Overwrite with Set.
 	err = client.Set(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		return val2, nil
 	})
 	require.NoError(t, err)
 
-	// Verify new value.
 	res, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called")
 		return "", nil
@@ -102,7 +98,6 @@ func TestPrimeableCacheAside_Set_WaitsForExistingReadLock(t *testing.T) {
 	getStarted := make(chan struct{})
 	getComplete := make(chan struct{})
 
-	// Start a Get that holds a lock for a while.
 	go func() {
 		_, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 			close(getStarted)
@@ -113,11 +108,9 @@ func TestPrimeableCacheAside_Set_WaitsForExistingReadLock(t *testing.T) {
 		close(getComplete)
 	}()
 
-	// Wait for Get to acquire its lock.
 	<-getStarted
 	time.Sleep(50 * time.Millisecond)
 
-	// Set should wait for the Get lock to be released, then proceed.
 	err := client.Set(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		return setVal, nil
 	})
@@ -125,7 +118,6 @@ func TestPrimeableCacheAside_Set_WaitsForExistingReadLock(t *testing.T) {
 
 	<-getComplete
 
-	// The Set value should be the final value.
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called")
 		return "", nil
@@ -192,7 +184,6 @@ func TestPrimeableCacheAside_SetMulti_Basic(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Verify all keys cached.
 	res, err := client.GetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {
 		t.Fatal("GetMulti callback should not be called after SetMulti")
 		return nil, nil
@@ -210,14 +201,14 @@ func TestPrimeableCacheAside_SetMulti_NoDeadlock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Two overlapping key sets — sorted order prevents deadlock.
+	// Sorted key order is what prevents deadlock under overlap.
 	keys1 := []string{
 		"key:a:" + uuid.New().String(),
 		"key:b:" + uuid.New().String(),
 		"key:c:" + uuid.New().String(),
 	}
 	keys2 := []string{
-		keys1[1], // overlap on key:b
+		keys1[1], // overlap on key:b.
 		"key:d:" + uuid.New().String(),
 		"key:e:" + uuid.New().String(),
 	}
@@ -251,7 +242,6 @@ func TestPrimeableCacheAside_SetMulti_NoDeadlock(t *testing.T) {
 		}
 	}()
 
-	// If there's a deadlock, the test will timeout.
 	wg.Wait()
 }
 
@@ -267,7 +257,6 @@ func TestPrimeableCacheAside_ForceSet_Basic(t *testing.T) {
 	err := client.ForceSet(ctx, time.Second*10, key, val)
 	require.NoError(t, err)
 
-	// Get should return the force-set value.
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called")
 		return "", nil
@@ -288,7 +277,6 @@ func TestPrimeableCacheAside_ForceSet_StealsLock(t *testing.T) {
 	getStarted := make(chan struct{})
 	getDone := make(chan struct{})
 
-	// Start a slow Get that holds a lock.
 	go func() {
 		defer close(getDone)
 		_, _ = client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
@@ -301,18 +289,16 @@ func TestPrimeableCacheAside_ForceSet_StealsLock(t *testing.T) {
 	<-getStarted
 	time.Sleep(50 * time.Millisecond)
 
-	// ForceSet overwrites the lock.
 	err := client.ForceSet(ctx, time.Second*10, key, forcedVal)
 	require.NoError(t, err)
 
-	// Wait for Get to complete (it will see ErrLockLost and retry).
+	// Get sees ErrLockLost and retries.
 	select {
 	case <-getDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("background Get did not complete after ForceSet")
 	}
 
-	// The forced value should be present (or Get retried with its own value).
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called — value should exist")
 		return "", nil
@@ -335,7 +321,6 @@ func TestPrimeableCacheAside_ForceSetMulti_Basic(t *testing.T) {
 	err := client.ForceSetMulti(ctx, time.Second*10, values)
 	require.NoError(t, err)
 
-	// Verify via direct reads.
 	for key, expected := range values {
 		res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 			t.Fatal("callback should not be called")
@@ -353,7 +338,7 @@ func TestPrimeableCacheAside_Set_ContextCancellation(t *testing.T) {
 
 	key := "key:" + uuid.New().String()
 
-	// Place a lock so Set will wait.
+	// Lock the key so Set waits.
 	innerClient := client.Client()
 	lockVal := "__redcache:lock:" + uuid.New().String()
 	err := innerClient.Do(context.Background(), innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
@@ -377,13 +362,12 @@ func TestPrimeableCacheAside_Close_CancelsPendingLocks(t *testing.T) {
 
 	key := "key:" + uuid.New().String()
 
-	// Place a lock so operations will wait.
 	innerClient := client.Client()
 	lockVal := "__redcache:lock:" + uuid.New().String()
 	err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
-	// Use a context with timeout so Set doesn't loop forever after Close.
+	// Bound Set so it can't loop forever after Close.
 	setCtx, setCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer setCancel()
 
@@ -394,18 +378,15 @@ func TestPrimeableCacheAside_Close_CancelsPendingLocks(t *testing.T) {
 		})
 	}()
 
-	// Give Set time to start waiting.
 	time.Sleep(100 * time.Millisecond)
 
-	// Close should cancel pending lock entries, causing Set to wake up and retry.
 	client.Close()
 
 	select {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Set did not return after Close")
 	case err := <-errCh:
-		// Set should eventually fail with context deadline exceeded because
-		// the external lock persists, but Close woke it up at least once.
+		// External lock persists; Set must surface the deadline.
 		require.Error(t, err)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 	}
@@ -421,7 +402,6 @@ func TestPrimeableCacheAside_SetMulti_ContextCancellation(t *testing.T) {
 		"key:1:" + uuid.New().String(),
 	}
 
-	// Place locks on all keys.
 	innerClient := client.Client()
 	for _, key := range keys {
 		lockVal := "__redcache:lock:" + uuid.New().String()
@@ -449,20 +429,18 @@ func TestPrimeableCacheAside_Set_CallbackError(t *testing.T) {
 	key := "key:" + uuid.New().String()
 	cbErr := fmt.Errorf("set callback failed")
 
-	// Set with failing callback.
 	err := client.Set(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		return "", cbErr
 	})
 	require.ErrorIs(t, err, cbErr)
 
-	// Lock should have been cleaned up — a subsequent Set should succeed.
+	// Lock cleanup lets a follow-up Set succeed.
 	val := "good-val:" + uuid.New().String()
 	err = client.Set(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		return val, nil
 	})
 	require.NoError(t, err)
 
-	// Verify the value is there.
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called")
 		return "", nil
@@ -480,26 +458,23 @@ func TestPrimeableCacheAside_Set_CallbackError_RestoresValue(t *testing.T) {
 	key := "key:" + uuid.New().String()
 	originalVal := "original:" + uuid.New().String()
 
-	// Pre-populate with a known value via Get.
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		return originalVal, nil
 	})
 	require.NoError(t, err)
 	assert.Equal(t, originalVal, res)
 
-	// Set with failing callback — should restore the original value.
 	cbErr := fmt.Errorf("set callback failed")
 	err = client.Set(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		return "", cbErr
 	})
 	require.ErrorIs(t, err, cbErr)
 
-	// Give invalidation a moment to propagate.
+	// Allow invalidation to propagate.
 	time.Sleep(100 * time.Millisecond)
 
-	// Original value should be restored.
 	res, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
-		// If callback fires, the original was NOT restored — it was deleted.
+		// Callback firing here means the rollback DELed instead of restoring.
 		return originalVal, nil
 	})
 	require.NoError(t, err)
@@ -517,7 +492,6 @@ func TestPrimeableCacheAside_SetMulti_CallbackError_RestoresValues(t *testing.T)
 		"key:1:" + uuid.New().String(),
 	}
 
-	// Pre-populate with known values via Get.
 	originalVals := map[string]string{
 		keys[0]: "original:0:" + uuid.New().String(),
 		keys[1]: "original:1:" + uuid.New().String(),
@@ -534,16 +508,14 @@ func TestPrimeableCacheAside_SetMulti_CallbackError_RestoresValues(t *testing.T)
 		t.Fatalf("setup mismatch: %s", diff)
 	}
 
-	// SetMulti with failing callback — should restore original values.
 	cbErr := fmt.Errorf("setmulti callback failed")
 	err = client.SetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {
 		return nil, cbErr
 	})
 	require.ErrorIs(t, err, cbErr)
 
-	// Give invalidation a moment to propagate, then verify originals were
-	// restored — not just that Get returned them (a re-populating callback
-	// would mask a buggy DEL-and-let-Get-recover rollback).
+	// Use a t.Fatal callback so a buggy DEL-and-recover rollback is detected
+	// rather than masked by a re-populate.
 	time.Sleep(100 * time.Millisecond)
 	res, err = client.GetMulti(ctx, time.Second*10, keys, func(_ context.Context, _ []string) (map[string]string, error) {
 		t.Fatal("rollback failed: callback fired, meaning the original value was DELed, not restored")
@@ -565,32 +537,27 @@ func TestPrimeableCacheAside_SetMulti_PartialCASFailure_BatchError(t *testing.T)
 	key2 := "key:1:" + uuid.New().String()
 	keys := []string{key1, key2}
 
-	// Use SetMulti with a callback that calls ForceSet on key2 to steal its lock
-	// between lock acquisition and CAS write.
 	forcedVal := "forced:" + uuid.New().String()
 	err := client.SetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {
-		// Steal key2's lock while we hold it.
+		// Steal key2's lock between acquisition and CAS write.
 		forceErr := client.ForceSet(ctx, time.Second*10, key2, forcedVal)
 		if forceErr != nil {
 			return nil, forceErr
 		}
-		// Return values for both keys — but CAS on key2 should fail.
 		return map[string]string{
 			key1: "val1:" + uuid.New().String(),
 			key2: "val2:" + uuid.New().String(),
 		}, nil
 	})
 
-	// A stolen lock on key2 must surface as a BatchError — silently returning
-	// nil would mask the partial failure and leave callers unaware that key2
-	// was not written.
+	// Stolen lock must surface as a BatchError; silently returning nil would
+	// mask the partial failure.
 	require.Error(t, err, "SetMulti must report partial CAS failure")
 	var batchErr *redcache.BatchError
 	require.ErrorAs(t, err, &batchErr)
 	assert.True(t, batchErr.HasFailures())
 	assert.Contains(t, batchErr.Failed, key2, "key2 should have failed CAS")
 	assert.ErrorIs(t, batchErr.Failed[key2], redcache.ErrLockLost)
-	// key2 should have the forced value (CAS failure preserved it).
 	res, getErr := client.Get(ctx, time.Second*10, key2, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called — forced value should exist")
 		return "", nil
@@ -609,21 +576,18 @@ func TestPrimeableCacheAside_ForceSet_OverwritesExistingValue(t *testing.T) {
 	originalVal := "original:" + uuid.New().String()
 	forcedVal := "forced:" + uuid.New().String()
 
-	// Populate via Get.
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		return originalVal, nil
 	})
 	require.NoError(t, err)
 	assert.Equal(t, originalVal, res)
 
-	// ForceSet overwrites the real value.
 	err = client.ForceSet(ctx, time.Second*10, key, forcedVal)
 	require.NoError(t, err)
 
-	// Allow invalidation message to propagate to the client-side cache.
+	// Allow invalidation to propagate to the client-side cache.
 	time.Sleep(100 * time.Millisecond)
 
-	// Verify forced value is returned.
 	res, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called")
 		return "", nil
@@ -665,13 +629,11 @@ func TestPrimeableCacheAside_MultiClient_SetGet(t *testing.T) {
 	key := "key:" + uuid.New().String()
 	setVal := "set-val:" + uuid.New().String()
 
-	// client1 does Set.
 	err := client1.Set(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		return setVal, nil
 	})
 	require.NoError(t, err)
 
-	// client2 does Get — should see the Set value without invoking callback.
 	called := false
 	res, err := client2.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		called = true
@@ -709,7 +671,6 @@ func TestPrimeableCacheAside_ConcurrentSetAndGet(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Key should have a value — no deadlock, no panic.
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called — value should exist")
 		return "", nil

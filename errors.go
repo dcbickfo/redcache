@@ -7,15 +7,12 @@ import (
 	"strings"
 )
 
-// ErrLockLost indicates the distributed lock was lost or expired before the value could be set.
-// This can occur if the lock TTL expires during callback execution or if Redis invalidates the lock.
+// ErrLockLost indicates the distributed lock was lost or expired before the
+// value could be set.
 var ErrLockLost = errors.New("lock was lost or expired before value could be set")
 
-// BatchError represents partial failures in a multi-key operation.
-// Some keys may have succeeded while others failed.
-//
-// Currently only PrimeableCacheAside.SetMulti returns this type via errors.As;
-// Get/GetMulti and Del/DelMulti return plain wrapped errors.
+// BatchError represents partial failures in a multi-key operation. Currently
+// only PrimeableCacheAside.SetMulti returns this type via errors.As.
 type BatchError struct {
 	// Failed maps each failed key to its error.
 	Failed map[string]error
@@ -24,8 +21,8 @@ type BatchError struct {
 }
 
 // Error returns a human-readable summary of the batch failure. Failed keys are
-// emitted in sorted order so the string is stable across calls (map iteration
-// would otherwise scramble per-key entries). Safe to call on a nil receiver.
+// emitted in sorted order so the string is stable across calls. Safe to call
+// on a nil receiver.
 func (e *BatchError) Error() string {
 	if e == nil {
 		return ""
@@ -52,8 +49,7 @@ func (e *BatchError) HasFailures() bool {
 }
 
 // ErrorFor returns the error recorded for key, or nil if the key did not fail.
-// Safe to call on a nil receiver, so callers can chain after errors.As without
-// a nil-check.
+// Safe to call on a nil receiver.
 func (e *BatchError) ErrorFor(key string) error {
 	if e == nil {
 		return nil
@@ -71,8 +67,8 @@ func (e *BatchError) HasError(key string) bool {
 }
 
 // NewBatchError creates a BatchError from the given failures and successes.
-// Returns nil (untyped) if there are no failures, so it is safe to return
-// directly as an error interface value.
+// Returns untyped nil when failed is empty so call sites can return it directly
+// as `error`.
 func NewBatchError(failed map[string]error, succeeded []string) error {
 	if len(failed) == 0 {
 		return nil
@@ -84,26 +80,19 @@ func NewBatchError(failed map[string]error, succeeded []string) error {
 }
 
 // ErrDecode is returned (wrapped) from typed reads when a stored value
-// cannot be decoded by the configured Codec. The library does not auto-evict
-// — the caller decides whether to log, Del, or retry.
+// cannot be decoded. The library does not auto-evict — the caller decides
+// whether to log, Del, or retry.
 var ErrDecode = errors.New("redcache: decode failed")
 
 // BatchKeyError is the typed counterpart of BatchError, returned (via errors.As)
-// from PrimeableTyped's multi-set methods on partial failure. Same semantics
-// as BatchError; the only difference is that keys are typed K instead of string.
-//
-// Note: the Error() formatter is intentionally a structural duplicate of
-// BatchError.Error() (~13 lines). The format is stable and the duplication
-// is preferable to a generic helper that would either constrain K to ordered
-// types or sort by fmt.Sprintf("%v", k).
+// from PrimeableTyped's multi-set methods on partial failure.
 type BatchKeyError[K comparable] struct {
 	Failed    map[K]error
 	Succeeded []K
 }
 
-// Error returns a human-readable summary. Failed keys are emitted in the order
-// produced by sorting their %v formatting so the string is stable across calls.
-// Safe to call on a nil receiver.
+// Error returns a human-readable summary. Failed keys are sorted by their %v
+// formatting so the output is stable. Safe to call on a nil receiver.
 func (e *BatchKeyError[K]) Error() string {
 	if e == nil {
 		return ""
@@ -151,8 +140,8 @@ func (e *BatchKeyError[K]) HasError(k K) bool {
 	return ok
 }
 
-// NewBatchKeyError mirrors NewBatchError. Returns untyped nil when there
-// are no failures, so call sites can return it directly as `error`.
+// NewBatchKeyError mirrors NewBatchError. Returns untyped nil when failed is
+// empty so call sites can return it directly as `error`.
 func NewBatchKeyError[K comparable](failed map[K]error, succeeded []K) error {
 	if len(failed) == 0 {
 		return nil

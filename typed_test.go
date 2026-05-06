@@ -64,8 +64,7 @@ func TestTyped_Get_LoadsAndCaches(t *testing.T) {
 
 func TestTyped_Get_DecodeErrorIsWrapped(t *testing.T) {
 	cache := newTestCacheAside(t)
-	// Write a non-JSON payload directly via the underlying client so the
-	// typed Get reads garbage and surfaces ErrDecode.
+	// Seed garbage so the typed Get's decode call surfaces ErrDecode.
 	key := "decode:" + uuid.NewString()
 	if err := cache.Client().Do(context.Background(),
 		cache.Client().B().Set().Key(key).Value("not json").Px(time.Second).Build()).Error(); err != nil {
@@ -99,7 +98,6 @@ func TestTyped_Get_DecodeErrorPreservesUnderlying(t *testing.T) {
 	if !errors.Is(err, redcache.ErrDecode) {
 		t.Fatalf("expected ErrDecode in chain, got %v", err)
 	}
-	// Underlying json error must also be in the chain.
 	var syntaxErr *json.SyntaxError
 	if !errors.As(err, &syntaxErr) {
 		t.Fatalf("expected *json.SyntaxError in chain, got %v (%T)", err, err)
@@ -143,7 +141,7 @@ func TestTyped_Touch_ExtendsTTL(t *testing.T) {
 	if err := users.Touch(context.Background(), 5*time.Second, key); err != nil {
 		t.Fatalf("touch: %v", err)
 	}
-	// Wait past the original TTL — Touch should have extended it.
+	// Sleep past the original TTL; Touch must have extended it.
 	time.Sleep(400 * time.Millisecond)
 	var calls int
 	wrapped := func(ctx context.Context, k string) (tUser, error) {
@@ -189,14 +187,12 @@ func TestTyped_RefreshAhead_FiresThroughTypedView(t *testing.T) {
 	if first.ID != 1 {
 		t.Fatalf("first ID %d, want 1", first.ID)
 	}
-	// Wait past RefreshAfterFraction floor (0.1 * 500ms = 50ms).
+	// Cross the RefreshAfterFraction floor (0.1 * 500ms = 50ms).
 	time.Sleep(150 * time.Millisecond)
 
-	// Next Get returns the still-cached value but should trigger a refresh.
 	if _, err := users.Get(context.Background(), 500*time.Millisecond, key, loader); err != nil {
 		t.Fatalf("trigger get: %v", err)
 	}
-	// Give the refresh worker time to run.
 	deadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(deadline) {
 		if atomic.LoadInt32(&calls) >= 2 {

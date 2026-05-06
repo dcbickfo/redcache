@@ -15,12 +15,9 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-// TestCacheAside_Close_SafeUnderConcurrentRefresh hammers Get from many
-// goroutines (each potentially triggering a refresh) while Close runs
-// concurrently — and calls Close twice. The closing-flag + recover guard in
-// enqueueRefresh, plus closeOnce in Close, is the only thing preventing a
-// "send on closed channel" panic from killing user goroutines on shutdown.
-// A regression that drops either guard would surface here as a panic.
+// TestCacheAside_Close_SafeUnderConcurrentRefresh hammers Get while Close runs
+// concurrently and is called twice. A regression in enqueueRefresh's
+// closing-flag/recover guard or Close's closeOnce would surface as a panic.
 func TestCacheAside_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	t.Parallel()
 	client, err := redcache.NewRedCacheAside(
@@ -30,7 +27,7 @@ func TestCacheAside_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 			RefreshAfterFraction: 0.01, // refresh on virtually every Get
 			RefreshBeta:          0,
 			RefreshWorkers:       2,
-			RefreshQueueSize:     4, // small queue to maximize the close-during-send window
+			RefreshQueueSize:     4, // small queue maximizes the close-during-send window
 		},
 	)
 	require.NoError(t, err)
@@ -39,12 +36,11 @@ func TestCacheAside_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	ctx := context.Background()
 	key := "close-stress:" + uuid.New().String()
 
-	// Populate so subsequent Gets are hits and may trigger refresh.
 	_, err = client.Get(ctx, time.Second, key, func(_ context.Context, _ string) (string, error) {
 		return "v", nil
 	})
 	require.NoError(t, err)
-	time.Sleep(50 * time.Millisecond) // let PTTL drop below the 1% threshold
+	time.Sleep(50 * time.Millisecond) // PTTL drops below the 1% threshold
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -65,7 +61,6 @@ func TestCacheAside_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 		}()
 	}
 
-	// Let the workers run, then close concurrently AND double-close.
 	time.Sleep(50 * time.Millisecond)
 	var closeWg sync.WaitGroup
 	closeWg.Add(2)
@@ -75,21 +70,18 @@ func TestCacheAside_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	}()
 	go func() {
 		defer closeWg.Done()
-		client.Close() // double-close must be a no-op (closeOnce)
+		client.Close() // double-close must be a no-op (closeOnce).
 	}()
 	closeWg.Wait()
 
 	close(stop)
 	wg.Wait()
-	// Reaching here without a panic is the assertion. The deferred t.Cleanup
-	// will fail the test if any goroutine panicked via recover-then-nil-deref.
+	// Reaching here without a panic is the assertion.
 }
 
-// TestCacheAside_Get_CleanMissEmitsNoFalseLockLost verifies that a vanilla
-// cache-miss-then-populate Get does NOT emit a LockLost metric. Regression
-// guard for a bug where setKeyLua's `return redis.call("SET", ...)` returned
-// the string "OK", which AsInt64 cannot parse, causing every successful CAS
-// to be misreported as a lost lock and forcing a spurious retry.
+// TestCacheAside_Get_CleanMissEmitsNoFalseLockLost guards against the bug where
+// setKeyLua returned "OK" (unparseable by AsInt64), causing every successful CAS
+// to be misreported as a lost lock.
 func TestCacheAside_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
@@ -118,8 +110,7 @@ func TestCacheAside_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 }
 
 // TestCacheAside_GetMulti_CleanMissEmitsNoFalseLockLost is the multi-key
-// counterpart: regressions in runSlotSet's CAS-result interpretation would
-// drop succeeded keys and force GetMulti through a retry round.
+// counterpart: catches runSlotSet CAS-interpretation regressions.
 func TestCacheAside_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
@@ -151,9 +142,8 @@ func TestCacheAside_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	assert.Zero(t, metrics.contended.Load(), "uncontended GetMulti must not emit LockContended")
 }
 
-// TestCacheAside_EmptyValueIsCacheHit verifies that an empty-string value
-// stored in Redis is returned as a cache hit, not treated as a miss. Prior
-// to the fix, callers had to store a sentinel like "nil" to force a hit.
+// TestCacheAside_EmptyValueIsCacheHit verifies an empty-string cached value is
+// returned as a hit rather than treated as a miss.
 func TestCacheAside_EmptyValueIsCacheHit(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
@@ -182,11 +172,8 @@ func TestCacheAside_EmptyValueIsCacheHit(t *testing.T) {
 	assert.Zero(t, metrics.misses.Load(), "no CacheMiss should be recorded for an empty value")
 }
 
-// TestPrimeableCacheAside_Set_RollbackPreservesEmptyValue verifies that
-// savedValue.present distinguishes "no prior value" from "prior value was an
-// empty string" — so a Set callback failure restores "" rather than DELing
-// the key. Without this, callers using "" as a valid cached value would lose
-// it on every Set rollback.
+// TestPrimeableCacheAside_Set_RollbackPreservesEmptyValue verifies a Set callback
+// failure restores "" rather than DELing the key.
 func TestPrimeableCacheAside_Set_RollbackPreservesEmptyValue(t *testing.T) {
 	t.Parallel()
 	pca := makePrimeableClient(t, addr)
@@ -211,13 +198,10 @@ func TestPrimeableCacheAside_Set_RollbackPreservesEmptyValue(t *testing.T) {
 	assert.Equal(t, "", res, "rollback should preserve the empty-string value, not DEL the key")
 }
 
-// TestPrimeableCacheAside_Set_RollbackPreservesPTTL verifies that
-// savedValue.pttl preserves the prior value's remaining TTL on Set rollback,
-// rather than restoring the key as persistent or with a freshly-extended TTL.
-//
-// Failure modes:
-//   - PTTL == -2: rollback DELed instead of restoring (key gone).
-//   - PTTL == -1: rollback SET without PX (key now persistent).
+// TestPrimeableCacheAside_Set_RollbackPreservesPTTL verifies the prior value's
+// remaining TTL is preserved on rollback. Failure modes:
+//   - PTTL == -2: rollback DELed instead of restoring.
+//   - PTTL == -1: rollback SET without PX (now persistent).
 //   - PTTL ~= ttl arg: rollback used the new ttl, not the captured PTTL.
 func TestPrimeableCacheAside_Set_RollbackPreservesPTTL(t *testing.T) {
 	t.Parallel()
@@ -229,7 +213,7 @@ func TestPrimeableCacheAside_Set_RollbackPreservesPTTL(t *testing.T) {
 
 	require.NoError(t, pca.ForceSet(ctx, 2*time.Second, key, "v"))
 
-	// Sleep so the captured PTTL on rollback is well under 2000ms.
+	// Captured PTTL on rollback should be well under 2000ms.
 	time.Sleep(500 * time.Millisecond)
 
 	sentinel := errors.New("callback failed")
@@ -245,16 +229,12 @@ func TestPrimeableCacheAside_Set_RollbackPreservesPTTL(t *testing.T) {
 
 	val, err := pca.Client().Do(ctx, pca.Client().B().Get().Key(key).Build()).ToString()
 	require.NoError(t, err)
-	// ForceSet wraps in an envelope (delta=0); rollback restores the captured
-	// envelope verbatim so a raw GET sees the wrapped form. End users still see
-	// "v" via Get, which unwraps.
+	// Raw GET sees the envelope; Get() unwraps to "v" for callers.
 	assert.Equal(t, "__redcache:v1:0:v", val, "rollback should restore the original captured (envelope-wrapped) value")
 }
 
-// TestCacheAside_GetMulti_CASMismatchDropsKey verifies that runSlotSet drops a
-// key from the success set when the CAS Lua returns 0 (lock stolen), and emits
-// the LockLost metric. Without this, GetMulti's slot-batched path could keep
-// claiming a value was set when in fact a concurrent ForceSet has the key.
+// TestCacheAside_GetMulti_CASMismatchDropsKey verifies runSlotSet drops keys
+// with a stolen lock (CAS Lua returned 0) and emits LockLost.
 func TestCacheAside_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
@@ -285,20 +265,14 @@ func TestCacheAside_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, val1, res[key1], "key1's CAS-set should succeed")
-	// GetMulti retries after the failed CAS and re-reads from cache, so it
-	// should surface the stolen value rather than the callback's val2.
+	// Retry after CAS failure surfaces the ForceSet value, not val2.
 	assert.Equal(t, forcedVal, res[key2], "key2 should reflect the ForceSet, not the callback's value")
 	assert.NotEqual(t, val2, res[key2], "callback's value must not be returned after CAS mismatch")
 	assert.GreaterOrEqual(t, metrics.lost.Load(), int64(1), "expected LockLost metric for the stolen key")
 }
 
-// TestPrimeableCacheAside_Set_RollbackSurvivesContextCancel verifies that Set's
-// rollback runs to completion even when the caller's context is cancelled.
-// bestEffortRestore exists specifically to handle this: cleanupCtx strips
-// cancellation so a cancelled request still rolls back the lock rather than
-// letting it linger until lockTTL expires. A regression that switched
-// bestEffortRestore back to using the caller's ctx would let the lock value
-// persist and block subsequent writers for the full lockTTL window.
+// TestPrimeableCacheAside_Set_RollbackSurvivesContextCancel verifies Set's rollback
+// completes under a cancelled caller ctx (bestEffortRestore uses cleanupCtx).
 func TestPrimeableCacheAside_Set_RollbackSurvivesContextCancel(t *testing.T) {
 	t.Parallel()
 	client, err := redcache.NewPrimeableCacheAside(
@@ -315,26 +289,22 @@ func TestPrimeableCacheAside_Set_RollbackSurvivesContextCancel(t *testing.T) {
 	key := "rollback-cancel:" + uuid.New().String()
 	originalVal := "original:" + uuid.New().String()
 
-	// Pre-populate.
 	_, err = client.Get(bg, 10*time.Second, key, func(_ context.Context, _ string) (string, error) {
 		return originalVal, nil
 	})
 	require.NoError(t, err)
 
-	// Set with a context that gets cancelled after the callback returns its
-	// error. The rollback must still run.
 	cbErr := errors.New("callback failed under cancelled context")
 	cancelCtx, cancel := context.WithCancel(bg)
 	err = client.Set(cancelCtx, 10*time.Second, key, func(_ context.Context, _ string) (string, error) {
-		cancel() // cancel BEFORE returning so rollback path sees a dead ctx
+		cancel() // cancel before returning so the rollback path sees a dead ctx.
 		return "", cbErr
 	})
 	require.ErrorIs(t, err, cbErr)
 
-	// Give invalidation a moment to propagate.
+	// Allow invalidation to propagate.
 	time.Sleep(100 * time.Millisecond)
 
-	// Original value must still be present despite the cancelled ctx.
 	res, err := client.Get(bg, 10*time.Second, key, func(_ context.Context, _ string) (string, error) {
 		return "callback-fired-restore-failed", nil
 	})

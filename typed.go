@@ -7,12 +7,8 @@ import (
 	"unsafe"
 )
 
-// Typed is a type-safe view over a *CacheAside.
-//
-// One *CacheAside can be shared across many Typed views with different
-// K / V instantiations and codecs. The wrapper itself is stateless beyond
-// its codec and underlying-client pointers and is safe for concurrent use
-// to the same extent as the underlying *CacheAside and codecs.
+// Typed is a type-safe view over a *CacheAside. One *CacheAside can be shared
+// across many Typed views with different K/V instantiations and codecs.
 type Typed[K comparable, V any] struct {
 	cache    *CacheAside
 	keyCodec KeyCodec[K]
@@ -30,8 +26,7 @@ func NewStringTyped[V any](cache *CacheAside, valCodec Codec[V]) *Typed[string, 
 }
 
 // Get returns the cached value for k, populating the cache via fn on a miss.
-// See (*CacheAside).Get for stampede / lock semantics — Typed.Get is a thin
-// codec wrapper around it.
+// See (*CacheAside).Get for stampede / lock semantics.
 //
 // Errors:
 //   - keyCodec.EncodeKey error: returned before any Redis I/O.
@@ -82,9 +77,8 @@ func (t *Typed[K, V]) Del(ctx context.Context, k K) error {
 	return t.cache.Del(ctx, encKey)
 }
 
-// Touch sets the TTL of a cached value to ttl (this can shorten or extend
-// the remaining lifetime). See (*CacheAside).Touch for no-op-on-lock and
-// no-op-on-missing-key semantics.
+// Touch sets the TTL of a cached value to ttl. See (*CacheAside).Touch for
+// no-op-on-lock and no-op-on-missing-key semantics.
 func (t *Typed[K, V]) Touch(ctx context.Context, ttl time.Duration, k K) error {
 	encKey, err := t.keyCodec.EncodeKey(k)
 	if err != nil {
@@ -94,8 +88,7 @@ func (t *Typed[K, V]) Touch(ctx context.Context, ttl time.Duration, k K) error {
 }
 
 // stringToBytes returns the bytes backing s. Callers must not mutate the
-// returned slice — codecs are documented to treat their Decode input as
-// borrowed.
+// returned slice — codecs treat Decode input as borrowed.
 func stringToBytes(s string) []byte {
 	if s == "" {
 		return nil
@@ -103,9 +96,8 @@ func stringToBytes(s string) []byte {
 	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
-// bytesToString returns a string viewing the bytes of b. Callers (the library)
-// own b after Encode returns and never mutate it, so the returned string is
-// safe for the lifetime of b.
+// bytesToString returns a string viewing the bytes of b. The library owns b
+// after Encode returns and never mutates it.
 func bytesToString(b []byte) string {
 	if len(b) == 0 {
 		return ""
@@ -114,8 +106,7 @@ func bytesToString(b []byte) string {
 }
 
 // PrimeableTyped is a type-safe view over a *PrimeableCacheAside, adding
-// Set / ForceSet / SetMulti / ForceSetMulti to the read/delete/touch surface
-// from Typed.
+// Set / ForceSet / SetMulti / ForceSetMulti on top of Typed.
 type PrimeableTyped[K comparable, V any] struct {
 	Typed[K, V]
 	primeable *PrimeableCacheAside

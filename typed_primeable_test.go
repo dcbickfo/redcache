@@ -135,11 +135,8 @@ func TestPrimeableTyped_SetMulti_PopulatesAll(t *testing.T) {
 	}
 }
 
-// TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces verifies that when the
-// underlying *BatchError surfaces from a partial CAS failure, the typed
-// wrapper converts it to *BatchKeyError[string] reachable via errors.As.
-// Lock-stealing is induced by ForceSet from inside the SetMulti callback,
-// which races the CAS-set for that key.
+// TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces verifies the typed
+// wrapper converts *BatchError to *BatchKeyError[string] on partial CAS failure.
 func TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
 	pca := newTestPrimeable(t)
 	users := redcache.NewPrimeableStringTyped[tUser](pca, redcache.JSONCodec[tUser]{})
@@ -148,7 +145,7 @@ func TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
 
 	err := users.SetMulti(context.Background(), time.Second, keys,
 		func(_ context.Context, gotKeys []string) (map[string]tUser, error) {
-			// Steal lock on outer keys[1] before our CAS-set runs.
+			// Steal the lock on keys[1] before our CAS-set runs.
 			if serr := pca.ForceSet(context.Background(), time.Second, keys[1], "stolen"); serr != nil {
 				t.Fatalf("steal force set: %v", serr)
 			}

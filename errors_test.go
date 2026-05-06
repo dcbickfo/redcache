@@ -101,7 +101,6 @@ func TestBatchKeyError_Int_AccessorsAndFormat(t *testing.T) {
 	if bke.ErrorFor(1) == nil || bke.ErrorFor(99) != nil {
 		t.Fatal("ErrorFor wrong")
 	}
-	// Stable formatting: failed keys ordered.
 	got := bke.Error()
 	if !strings.Contains(got, "2 succeeded, 2 failed") {
 		t.Fatalf("missing summary: %s", got)
