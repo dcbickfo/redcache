@@ -28,9 +28,7 @@ func makeBenchClient(b *testing.B) *redcache.CacheAside {
 	return client
 }
 
-// Hoisted callbacks reused across benchmarks. Defining them as package-level
-// vars keeps the per-iteration loop free of closure-allocation noise that
-// would otherwise dominate hot-path measurements.
+// Hoisted to package scope so per-iteration loops don't allocate closures.
 var (
 	benchValue        = "bench-value"
 	benchPrimeFn      = func(ctx context.Context, key string) (string, error) { return benchValue, nil }
@@ -255,8 +253,6 @@ func BenchmarkPrimeable_ForceSetMulti(b *testing.B) {
 }
 
 // BenchmarkCacheAside_Get_Refresh measures the refresh-ahead-triggering path.
-// The cache is primed with a short TTL so the per-iteration Get crosses the
-// refresh threshold and enqueues a background job.
 func BenchmarkCacheAside_Get_Refresh(b *testing.B) {
 	client, err := redcache.NewRedCacheAside(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
@@ -275,9 +271,6 @@ func BenchmarkCacheAside_Get_Refresh(b *testing.B) {
 	key := "bench:get:refresh:" + uuid.New().String()
 	const val = "bench-value"
 
-	// Hoist the callback out of the loop so we measure the refresh-ahead path
-	// itself, not the per-iteration closure allocation a captured-variable
-	// callback would produce.
 	cb := func(ctx context.Context, key string) (string, error) { return val, nil }
 
 	if _, err := client.Get(ctx, time.Minute, key, cb); err != nil {
@@ -292,9 +285,7 @@ func BenchmarkCacheAside_Get_Refresh(b *testing.B) {
 	}
 }
 
-// BenchmarkCacheAside_GetMulti_Refresh measures the refresh-ahead-triggering
-// multi-key path. RefreshAfterFraction is set so every iteration crosses the
-// threshold and enqueues a background refresh job for each key.
+// BenchmarkCacheAside_GetMulti_Refresh measures the multi-key refresh-ahead path.
 func BenchmarkCacheAside_GetMulti_Refresh(b *testing.B) {
 	client, err := redcache.NewRedCacheAside(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},

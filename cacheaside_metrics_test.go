@@ -69,13 +69,11 @@ func TestMetrics_HitAndMiss(t *testing.T) {
 	ctx := context.Background()
 	key := "metrics:" + uuid.New().String()
 
-	// First Get: miss + populate.
 	_, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, _ string) (string, error) {
 		return "v1", nil
 	})
 	require.NoError(t, err)
 
-	// Second Get: hit.
 	_, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, _ string) (string, error) {
 		return "v1", nil
 	})
@@ -93,7 +91,7 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 		redcache.CacheAsideOption{
 			LockTTL:              time.Second * 2,
 			RefreshAfterFraction: 0.01, // refresh almost immediately
-			RefreshBeta:          0,    // disable XFetch sampling for deterministic tests
+			RefreshBeta:          0,    // disable XFetch for determinism
 			Metrics:              metrics,
 		},
 	)
@@ -106,22 +104,18 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 	ctx := context.Background()
 	key := "refresh-metrics:" + uuid.New().String()
 
-	// Populate.
 	_, err = client.Get(ctx, time.Second, key, func(ctx context.Context, _ string) (string, error) {
 		return "initial", nil
 	})
 	require.NoError(t, err)
 
-	// Wait so PTTL crosses the very-low threshold.
 	time.Sleep(50 * time.Millisecond)
 
-	// Read again — should fire RefreshTriggered.
 	_, err = client.Get(ctx, time.Second, key, func(ctx context.Context, _ string) (string, error) {
 		return "refreshed", nil
 	})
 	require.NoError(t, err)
 
-	// Poll until the refresh worker has emitted the metric (avoids hard-coded sleep).
 	require.Eventually(t, func() bool {
 		return metrics.triggered.Load() >= 1
 	}, 2*time.Second, 5*time.Millisecond, "expected RefreshTriggered to fire")
@@ -174,10 +168,8 @@ func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
 	require.Contains(t, metrics.panicKeys, key, "RefreshPanicked should be tagged with the offending key")
 }
 
-// TestMetrics_RefreshErrorOnCallbackError verifies that a refresh-ahead callback
-// returning an error emits RefreshError tagged with the affected key. Without
-// this signal, operators can't distinguish healthy dedup contention
-// (RefreshSkipped) from a broken upstream that's silently failing every refresh.
+// TestMetrics_RefreshErrorOnCallbackError verifies a failing refresh-ahead callback
+// emits RefreshError tagged with the affected key.
 func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
@@ -225,11 +217,8 @@ func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 	require.Contains(t, metrics.errKeys, key, "RefreshError should be tagged with the offending key")
 }
 
-// TestMetrics_RefreshDroppedUnderBackpressure verifies that RefreshDropped fires
-// when the refresh queue saturates. Without this signal, an operator running a
-// queue too small for traffic sees only slowly-drifting cache freshness — they
-// can't distinguish healthy contention (RefreshSkipped) from queue exhaustion
-// (RefreshDropped) without the metric.
+// TestMetrics_RefreshDroppedUnderBackpressure verifies RefreshDropped fires when
+// the refresh queue saturates.
 func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
@@ -237,7 +226,7 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 		rueidis.ClientOption{InitAddress: addr},
 		redcache.CacheAsideOption{
 			LockTTL:              time.Second * 3,
-			RefreshAfterFraction: 0.01, // refresh almost immediately, removes timing-margin flake
+			RefreshAfterFraction: 0.01, // refresh almost immediately
 			RefreshBeta:          0,
 			RefreshWorkers:       1,
 			RefreshQueueSize:     1,
@@ -266,7 +255,7 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	time.Sleep(50 * time.Millisecond) // cross the very-low refresh threshold
+	time.Sleep(50 * time.Millisecond)
 
 	refreshCb := func(_ context.Context, _ string) (string, error) {
 		time.Sleep(500 * time.Millisecond) // keep the single worker busy
@@ -308,7 +297,7 @@ func TestMetrics_LockWaitDuration(t *testing.T) {
 	ctx := context.Background()
 	key := "lockwait:" + uuid.New().String()
 
-	// Two concurrent Gets — second one observes the lock and waits.
+	// Two concurrent Gets — the second observes the lock and waits.
 	holderInCb := make(chan struct{})
 	holderProceed := make(chan struct{})
 	holderCb := func(_ context.Context, _ string) (string, error) {
@@ -328,7 +317,7 @@ func TestMetrics_LockWaitDuration(t *testing.T) {
 		require.NoError(t, err)
 	}()
 
-	// Wait for holder to actually be inside the callback (= it owns the lock).
+	// Holder is inside the callback, so it owns the lock.
 	<-holderInCb
 
 	go func() {
@@ -337,25 +326,20 @@ func TestMetrics_LockWaitDuration(t *testing.T) {
 		require.NoError(t, err)
 	}()
 
-	// Wait until the waiter is in the contended branch (about to enter
-	// awaitLock). Without this barrier, the holder may release the lock
-	// before the waiter has even started waiting, recording a near-zero
-	// duration and hiding regressions in how the wait is timed.
+	// Barrier: wait until the waiter is in the contended branch. Without it,
+	// the holder may release the lock before the waiter starts waiting,
+	// hiding regressions in how the wait is timed.
 	require.Eventually(t, func() bool {
 		return metrics.contended.Load() >= 1
 	}, time.Second, time.Millisecond, "waiter never entered contended branch")
 
-	// Hold the lock for a measurable interval, then release.
 	time.Sleep(100 * time.Millisecond)
 	close(holderProceed)
 	wg.Wait()
 
 	require.Greater(t, metrics.waitDurations.Load(), int64(0), "expected LockWaitDuration to fire")
-	// Waiter began waiting before the 100ms sleep; require the recorded
-	// duration to reflect a meaningful wait. A regression that records
-	// near-zero (e.g. metric emitted before the wait, or duration captured
-	// at the wrong point) would pass a `> 0` assertion but fail this lower
-	// bound. Margin: 50ms below the 100ms hold to absorb scheduling jitter.
+	// Lower bound (50ms below the 100ms hold) catches near-zero regressions
+	// that a `> 0` assertion would miss.
 	require.GreaterOrEqual(t, metrics.totalWait.Load(), int64(50*time.Millisecond),
 		"LockWaitDuration must reflect actual wait time, not near-zero")
 }

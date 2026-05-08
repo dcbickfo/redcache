@@ -2,13 +2,9 @@
 // across multi-key call paths.
 //
 // Slices are stored as *[]T to avoid the per-Get interface-boxing allocation
-// that plain []T values would incur — sync.Pool's Get returns any, and a
-// slice header is three words wide, so storing it as a value escapes via the
-// interface. Callers receive a *[]T handle, dereference it to read the slice,
-// and reassign through the pointer when appending: *h = append(*h, ...).
-//
-// Capacity is capped at maxCap so a single oversized request does not pin a
-// giant backing array in the pool.
+// that plain []T values would incur. Callers reassign through the pointer
+// when appending: *h = append(*h, ...). Capacity is capped at maxCap so a
+// single oversized request does not pin a giant backing array.
 package poolx
 
 import "sync"
@@ -16,8 +12,7 @@ import "sync"
 const maxCap = 1024
 
 // Slice is a typed sync.Pool of []T. Callers receive a *[]T from Get / GetCap
-// and return it via Put. The pointer indirection avoids the alloc that would
-// occur if []T values were boxed into sync.Pool's any.
+// and return it via Put.
 type Slice[T any] struct {
 	p sync.Pool
 }
@@ -30,9 +25,8 @@ func NewSlice[T any](newFn func() []T) *Slice[T] {
 	}}}
 }
 
-// Get returns a *[]T whose slice has length n and capacity ≥ n. The slice
-// contents are zero-valued for the requested length. The returned pointer
-// must be returned via Put when the caller is done.
+// Get returns a *[]T whose slice has length n and capacity ≥ n, zero-valued.
+// The returned pointer must be returned via Put when the caller is done.
 func (s *Slice[T]) Get(n int) *[]T {
 	h := s.p.Get().(*[]T)
 	v := *h
@@ -50,9 +44,7 @@ func (s *Slice[T]) Get(n int) *[]T {
 }
 
 // GetCap returns a *[]T whose slice is empty (len=0) with capacity ≥ n. Use
-// when callers will append rather than index. If a subsequent append exceeds
-// the returned capacity, the reallocated slice replaces the pooled one when
-// the caller writes back via *h = append(*h, ...).
+// when callers will append rather than index.
 func (s *Slice[T]) GetCap(n int) *[]T {
 	h := s.p.Get().(*[]T)
 	v := *h
@@ -65,8 +57,7 @@ func (s *Slice[T]) GetCap(n int) *[]T {
 	return h
 }
 
-// Put returns a *[]T to the pool. If the underlying slice grew past maxCap,
-// it is dropped to avoid pinning an oversized backing array.
+// Put returns a *[]T to the pool. Slices grown past maxCap are dropped.
 func (s *Slice[T]) Put(h *[]T) {
 	if cap(*h) > maxCap {
 		return

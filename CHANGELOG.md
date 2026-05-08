@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `Typed[K, V]` / `PrimeableTyped[K, V]` typed wrappers over `CacheAside` / `PrimeableCacheAside`, with `JSONCodec[V]`, `BytesCodec`, `StringCodec`, `StringKeyCodec`, and `KeyCodecFunc[K]` provided.
+- `BatchKeyError[K comparable]` typed counterpart of `BatchError`, returned (via `errors.As`) from `PrimeableTyped` multi-set methods.
+- `ErrDecode` sentinel returned (wrapped) from typed reads when the configured codec rejects a stored value.
+
+### Notes
+- Existing string-typed public API (`*CacheAside`, `*PrimeableCacheAside`, `*BatchError`, all options and method signatures) is unchanged.
+
 ## [v0.2.0] - 2026-05-04
 
 ### Breaking

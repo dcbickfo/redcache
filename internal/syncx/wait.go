@@ -5,14 +5,13 @@ import (
 	"sync"
 )
 
-// WaitForAll blocks until all channels are closed (or receive a value) or the context is cancelled.
-// Returns nil if all channels signaled, or the context error if cancelled first.
+// WaitForAll blocks until all channels are closed (or receive a value) or the
+// context is cancelled. Returns nil on success, or the context error.
 func WaitForAll[C ~<-chan V, V any](ctx context.Context, channels []C) error {
 	if len(channels) == 0 {
 		return nil
 	}
 
-	// Merged channel: each goroutine sends one signal when its channel fires.
 	done := make(chan struct{}, len(channels))
 	var wg sync.WaitGroup
 	wg.Add(len(channels))
@@ -28,12 +27,10 @@ func WaitForAll[C ~<-chan V, V any](ctx context.Context, channels []C) error {
 		}()
 	}
 
-	// Wait for all signals or context cancellation.
 	for range len(channels) {
 		select {
 		case <-done:
 		case <-ctx.Done():
-			// Ensure all goroutines finish before returning.
 			wg.Wait()
 			return ctx.Err()
 		}

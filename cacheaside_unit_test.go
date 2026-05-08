@@ -7,10 +7,7 @@ import (
 
 func TestShouldRefresh_Deterministic(t *testing.T) {
 	t.Parallel()
-	// These cases all resolve without invoking the XFetch sampler:
-	// either refresh is disabled, the value is above the floor, or the
-	// value is below the floor with no XFetch metadata (delta=0) so the
-	// fallback "always refresh below floor" kicks in.
+	// Cases that resolve without invoking the XFetch sampler.
 	tests := []struct {
 		name         string
 		refreshAfter float64
@@ -44,9 +41,8 @@ func TestShouldRefresh_Deterministic(t *testing.T) {
 	}
 }
 
-// TestShouldRefresh_XFetch covers the probabilistic path: below floor, delta>0,
-// beta>0. Asserts rates fall in expected ranges over many trials rather than
-// exact thresholds.
+// TestShouldRefresh_XFetch covers the probabilistic path (below floor, delta>0,
+// beta>0) by asserting refresh rates fall in expected ranges over many trials.
 func TestShouldRefresh_XFetch(t *testing.T) {
 	t.Parallel()
 	const trials = 5000
@@ -55,8 +51,7 @@ func TestShouldRefresh_XFetch(t *testing.T) {
 
 	t.Run("near expiry refreshes almost always", func(t *testing.T) {
 		t.Parallel()
-		// cachePTTL=1ms, delta=100ms → jitter ~ delta * Exp(1) (mean=100ms);
-		// P(jitter >= 1ms) ≈ 0.99.
+		// jitter ~ delta * Exp(1) (mean=100ms); P(jitter >= 1ms) ≈ 0.99.
 		hits := 0
 		for range trials {
 			if rca.shouldRefresh(1, ttl, 100*time.Millisecond) {
@@ -71,8 +66,7 @@ func TestShouldRefresh_XFetch(t *testing.T) {
 
 	t.Run("just below floor with tiny delta rarely refreshes", func(t *testing.T) {
 		t.Parallel()
-		// cachePTTL=199ms (just below floor=200ms), delta=1ms → jitter mean = 1ms;
-		// P(jitter >= 199ms) ≈ exp(-199) ≈ 0.
+		// jitter mean = 1ms; P(jitter >= 199ms) ≈ exp(-199) ≈ 0.
 		hits := 0
 		for range trials {
 			if rca.shouldRefresh(199, ttl, time.Millisecond) {
@@ -86,7 +80,6 @@ func TestShouldRefresh_XFetch(t *testing.T) {
 
 	t.Run("higher beta increases refresh rate", func(t *testing.T) {
 		t.Parallel()
-		// Same cachePTTL/delta, beta=10 should refresh substantially more than beta=1.
 		low := &CacheAside{refreshAfter: 0.8, refreshBeta: 1.0}
 		high := &CacheAside{refreshAfter: 0.8, refreshBeta: 10.0}
 		var lowHits, highHits int

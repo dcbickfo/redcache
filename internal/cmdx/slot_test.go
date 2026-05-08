@@ -15,7 +15,6 @@ func TestSlot(t *testing.T) {
 		key      string
 		expected uint16
 	}{
-		// Basic keys - verified against Redis cluster spec
 		{
 			name:     "simple key",
 			key:      "key",
@@ -31,7 +30,6 @@ func TestSlot(t *testing.T) {
 			key:      "",
 			expected: 0,
 		},
-		// Hash tags - only the content between { and } is hashed
 		{
 			name:     "hash tag simple",
 			key:      "{user:1000}:profile",
@@ -52,16 +50,15 @@ func TestSlot(t *testing.T) {
 			key:      "prefix{tag}suffix",
 			expected: cmdx.Slot("tag"),
 		},
-		// Edge cases with braces
 		{
 			name:     "empty hash tag",
 			key:      "key{}value",
-			expected: cmdx.Slot("key{}value"), // Empty tags are ignored
+			expected: cmdx.Slot("key{}value"),
 		},
 		{
 			name:     "no closing brace",
 			key:      "key{value",
-			expected: cmdx.Slot("key{value"), // No closing brace, whole key hashed
+			expected: cmdx.Slot("key{value"),
 		},
 		{
 			name:     "only opening brace",
@@ -81,18 +78,17 @@ func TestSlot(t *testing.T) {
 		{
 			name:     "nested braces",
 			key:      "{{nested}}",
-			expected: cmdx.Slot("{nested"), // First { to first }
+			expected: cmdx.Slot("{nested"),
 		},
-		// Common patterns - these should be deterministic
 		{
 			name:     "user pattern",
 			key:      "user:1000",
-			expected: 1649, // Verified against Redis CLUSTER KEYSLOT
+			expected: 1649,
 		},
 		{
 			name:     "session pattern",
 			key:      "session:abc123",
-			expected: 11692, // Verified against Redis CLUSTER KEYSLOT
+			expected: 11692,
 		},
 	}
 
@@ -107,7 +103,6 @@ func TestSlot(t *testing.T) {
 
 func TestSlot_Consistency(t *testing.T) {
 	t.Parallel()
-	// Test that the same key always produces the same slot
 	key := "test:key:123"
 	slot1 := cmdx.Slot(key)
 	slot2 := cmdx.Slot(key)
@@ -116,7 +111,6 @@ func TestSlot_Consistency(t *testing.T) {
 
 func TestSlot_Distribution(t *testing.T) {
 	t.Parallel()
-	// Test that slots are distributed across the valid range
 	keys := []string{
 		"key1", "key2", "key3", "key4", "key5",
 		"user:1", "user:2", "user:3", "user:4", "user:5",
@@ -130,13 +124,11 @@ func TestSlot_Distribution(t *testing.T) {
 		slots[slot] = true
 	}
 
-	// With 15 different keys, we should have some distribution (not all the same slot)
 	assert.Greater(t, len(slots), 1, "Keys should distribute across multiple slots")
 }
 
 func TestSlot_HashTagCollision(t *testing.T) {
 	t.Parallel()
-	// Keys with the same hash tag should go to the same slot
 	keys := []string{
 		"{user:1000}:profile",
 		"{user:1000}:settings",
@@ -187,18 +179,15 @@ func TestGroupBySlot(t *testing.T) {
 
 	groups := cmdx.GroupBySlot(items, func(i item) string { return i.key })
 
-	// {user:1}:a and {user:1}:b should be in the same slot (same hash tag).
 	slot1 := cmdx.Slot("{user:1}:a")
 	assert.Len(t, groups[slot1], 2)
 	assert.Equal(t, 1, groups[slot1][0].value)
 	assert.Equal(t, 2, groups[slot1][1].value)
 
-	// {user:2}:a should be in its own slot.
 	slot2 := cmdx.Slot("{user:2}:a")
 	assert.Len(t, groups[slot2], 1)
 	assert.Equal(t, 3, groups[slot2][0].value)
 
-	// standalone should be in its own slot.
 	slot3 := cmdx.Slot("standalone")
 	assert.Len(t, groups[slot3], 1)
 	assert.Equal(t, 4, groups[slot3][0].value)

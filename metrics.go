@@ -2,21 +2,15 @@ package redcache
 
 import "time"
 
-// Metrics receives observability events from CacheAside operations.
-//
-// All methods must be safe for concurrent use; callers may invoke them from
-// background workers and request goroutines simultaneously. Implementations
-// should be cheap — they run on the hot path.
+// Metrics receives observability events from CacheAside operations. All methods
+// must be safe for concurrent use and run on the hot path.
 //
 // High-volume events (CacheHits, CacheMisses, LockContended, RefreshTriggered,
 // RefreshSkipped, RefreshDropped) are aggregated per operation and emitted
-// once with a count, rather than once per key. Use logs for per-key diagnosis.
+// once with a count. Low-volume diagnostic events (LockLost, RefreshError,
+// RefreshPanicked) carry the affected key.
 //
-// Low-volume diagnostic events (LockLost, RefreshError, RefreshPanicked) carry
-// the affected key for tagging.
-//
-// Implementations that only care about a subset of events can embed
-// NoopMetrics and override the methods of interest.
+// Implementations can embed NoopMetrics and override only the methods of interest.
 type Metrics interface {
 	// CacheHits fires once per Get/GetMulti with the number of values served
 	// from the client-side cache.
@@ -28,10 +22,8 @@ type Metrics interface {
 	// observed an existing lock and waited.
 	LockContended(n int64)
 	// LockWaitDuration fires once per resolved lock wait with the elapsed
-	// time. Emitted whether the wait ended via cache invalidation, a context
-	// cancellation, or a LockTTL timeout — the duration is the signal: short
-	// waits indicate healthy contention, waits at LockTTL indicate the lock
-	// holder stalled. Implementations typically histogram this.
+	// time. Emitted regardless of how the wait ended (invalidation, context
+	// cancellation, or LockTTL timeout). Typically histogrammed.
 	LockWaitDuration(d time.Duration)
 	// RefreshTriggered fires once per refresh enqueue with the number of keys
 	// the job covers.
@@ -42,17 +34,17 @@ type Metrics interface {
 	// RefreshDropped fires with the number of keys whose refresh was dropped
 	// because the worker queue was full.
 	RefreshDropped(n int64)
-	// LockLost fires when a CAS detected the operation's lock was no longer held
-	// (typically because a ForceSet or similar overwrote it). Per-key for diagnosis.
+	// LockLost fires when a CAS detected the operation's lock was no longer
+	// held (typically because a ForceSet overwrote it).
 	LockLost(key string)
 	// RefreshError fires when a refresh-ahead operation failed due to a Redis
-	// error or callback error. Per-key for diagnosis.
+	// error or callback error.
 	RefreshError(key string)
-	// RefreshPanicked fires once per affected key when a refresh worker
-	// recovered from a panic in the callback. Per-key for diagnosis.
+	// RefreshPanicked fires when a refresh worker recovered from a panic in
+	// the callback.
 	RefreshPanicked(key string)
 	// InvalidationError fires when a Redis invalidation message could not be
-	// parsed. The key is unknown in this case.
+	// parsed. The key is unknown.
 	InvalidationError()
 }
 

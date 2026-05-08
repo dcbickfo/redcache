@@ -11,7 +11,6 @@ var _ Metrics = NoopMetrics{}
 
 func TestNoopMetrics_AllMethodsSafe(t *testing.T) {
 	t.Parallel()
-	// All methods must be safe to call and never panic.
 	m := NoopMetrics{}
 	m.CacheHits(1)
 	m.CacheMisses(1)
@@ -40,7 +39,6 @@ func TestValidateAndApplyDefaults_DefaultsToNoopMetrics(t *testing.T) {
 	}
 }
 
-// countingMetrics records events for assertions in tests.
 type countingMetrics struct {
 	NoopMetrics
 	Hits, Misses, Contended, Lost int

@@ -11,16 +11,13 @@ import (
 //
 // Format: __redcache:v1:<delta_ns>:<payload>
 //
-// Constraints:
-//   - The prefix must not collide with the lock prefix. The default lock prefix
-//     ("__redcache:lock:") is distinct, but operators choosing a custom
-//     LockPrefix must avoid one that is itself a prefix of envelopePrefix.
-//   - Values stored before envelope wrapping (legacy) are returned with delta=0,
-//     which makes shouldRefresh fall back to the simple floor-based check.
+// A custom LockPrefix must not be a prefix of envelopePrefix. Values without
+// the prefix are returned with delta=0 so shouldRefresh falls back to the
+// floor-based check.
 const envelopePrefix = "__redcache:v1:"
 
 // wrapEnvelope wraps a user value with the v1 envelope so the compute delta
-// travels with the value and can be recovered on read.
+// can be recovered on read.
 func wrapEnvelope(val string, delta time.Duration) string {
 	if delta < 0 {
 		delta = 0
@@ -34,10 +31,9 @@ func wrapEnvelope(val string, delta time.Duration) string {
 	return b.String()
 }
 
-// unwrapEnvelope returns the inner value and the recorded delta. For values
-// that were not envelope-wrapped (legacy data, or malformed envelope) it
-// returns the input unchanged and delta=0. shouldRefresh treats delta=0 as
-// "no XFetch metadata available" and falls back to the simple floor check.
+// unwrapEnvelope returns the inner value and the recorded delta. For
+// non-envelope or malformed input it returns the input unchanged with delta=0,
+// which shouldRefresh treats as "no XFetch metadata".
 func unwrapEnvelope(s string) (val string, delta time.Duration) {
 	if !strings.HasPrefix(s, envelopePrefix) {
 		return s, 0

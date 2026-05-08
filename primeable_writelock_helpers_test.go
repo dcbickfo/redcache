@@ -26,9 +26,8 @@ func newHelperPCA(t *testing.T) *PrimeableCacheAside {
 	return pca
 }
 
-// touchMultiLocks must NOT remove lost-lock entries from lockValues. The
-// stale entry stays so the eventual CAS-set surfaces ErrLockLost — preserving
-// the stealer's value rather than letting a re-acquire overwrite it.
+// touchMultiLocks must keep lost-lock entries in lockValues so the eventual
+// CAS-set surfaces ErrLockLost rather than overwriting the stealer's value.
 func TestTouchMultiLocks_RetainsLostLocksForCASFailure(t *testing.T) {
 	t.Parallel()
 	pca := newHelperPCA(t)
@@ -37,7 +36,6 @@ func TestTouchMultiLocks_RetainsLostLocksForCASFailure(t *testing.T) {
 	lostKey := "touch:lost:" + uuid.New().String()
 	heldLock := pca.lockPool.Generate()
 
-	// Acquire a real lock for heldKey; we'll claim a fake lock for lostKey.
 	ctx := context.Background()
 	ok, _, err := pca.tryAcquireWriteLock(ctx, heldKey, heldLock, "2000")
 	require.NoError(t, err)
@@ -46,7 +44,7 @@ func TestTouchMultiLocks_RetainsLostLocksForCASFailure(t *testing.T) {
 
 	lockValues := map[string]string{
 		heldKey: heldLock,
-		lostKey: "__redcache:lock:nonexistent", // never set in Redis
+		lostKey: "__redcache:lock:nonexistent", // never written to Redis
 	}
 
 	pca.touchMultiLocks(ctx, lockValues)
@@ -55,19 +53,18 @@ func TestTouchMultiLocks_RetainsLostLocksForCASFailure(t *testing.T) {
 	require.Contains(t, lockValues, lostKey, "lost lock retained so CAS-set surfaces ErrLockLost")
 }
 
-// restoreValue logs (but does not propagate) an error when the underlying script
-// errors. Closing the client is the simplest way to trigger an Exec error.
+// restoreValue must log (not propagate) script errors. A closed client is the
+// simplest way to force the script call to error.
 func TestRestoreValue_LogsErrorOnClientFailure(t *testing.T) {
 	t.Parallel()
 	pca := newHelperPCA(t)
 
-	pca.Client().Close() // force subsequent Lua exec to fail
+	pca.Client().Close()
 
-	// Should return without panicking even though the script call errors.
 	pca.restoreValue(context.Background(), "restore:"+uuid.New().String(), "lock", savedValue{val: "saved", present: true})
 }
 
-// bestEffortUnlock should swallow errors from the unlock script.
+// bestEffortUnlock must swallow unlock-script errors.
 func TestBestEffortUnlock_LogsErrorOnClientFailure(t *testing.T) {
 	t.Parallel()
 	pca := newHelperPCA(t)
@@ -77,10 +74,8 @@ func TestBestEffortUnlock_LogsErrorOnClientFailure(t *testing.T) {
 	pca.bestEffortUnlock(context.Background(), "unlock:"+uuid.New().String(), "lock")
 }
 
-// waitForReadLocks must surface a real Redis error (with key context) instead
-// of silently advancing SetMulti against a broken cluster. Regression guard for
-// the silent-failure fix that distinguishes redis-nil ("key absent") from real
-// errors. Closing the client is the simplest way to make DoMultiCache fail.
+// waitForReadLocks must surface real Redis errors (tagged with the key) rather
+// than silently advancing SetMulti against a broken cluster.
 func TestWaitForReadLocks_SurfacesRedisError(t *testing.T) {
 	t.Parallel()
 	pca := newHelperPCA(t)
@@ -95,7 +90,7 @@ func TestWaitForReadLocks_SurfacesRedisError(t *testing.T) {
 }
 
 // waitForFailedKey returns ctx.Err() and triggers restoreMultiValues when the
-// caller's context expires before the holder releases.
+// caller's ctx expires before the holder releases.
 func TestWaitForFailedKey_ContextCancelled(t *testing.T) {
 	t.Parallel()
 	holder := newHelperPCA(t)
