@@ -46,6 +46,7 @@ var (
 
 // BenchmarkCacheAside_Get measures hot-path performance for a single cached key.
 func BenchmarkCacheAside_Get(b *testing.B) {
+	b.ReportAllocs()
 	client := makeBenchClient(b)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -65,6 +66,7 @@ func BenchmarkCacheAside_Get(b *testing.B) {
 
 // BenchmarkCacheAside_Get_Parallel measures hot-path performance under contention.
 func BenchmarkCacheAside_Get_Parallel(b *testing.B) {
+	b.ReportAllocs()
 	client := makeBenchClient(b)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -86,6 +88,7 @@ func BenchmarkCacheAside_Get_Parallel(b *testing.B) {
 
 // BenchmarkCacheAside_GetMulti measures hot-path performance for multiple cached keys.
 func BenchmarkCacheAside_GetMulti(b *testing.B) {
+	b.ReportAllocs()
 	client := makeBenchClient(b)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -109,6 +112,7 @@ func BenchmarkCacheAside_GetMulti(b *testing.B) {
 
 // BenchmarkCacheAside_GetMulti_Parallel measures hot-path multi-key performance under contention.
 func BenchmarkCacheAside_GetMulti_Parallel(b *testing.B) {
+	b.ReportAllocs()
 	client := makeBenchClient(b)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -134,6 +138,7 @@ func BenchmarkCacheAside_GetMulti_Parallel(b *testing.B) {
 
 // BenchmarkCacheAside_Del measures the single-key delete path.
 func BenchmarkCacheAside_Del(b *testing.B) {
+	b.ReportAllocs()
 	client := makeBenchClient(b)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -149,6 +154,7 @@ func BenchmarkCacheAside_Del(b *testing.B) {
 
 // BenchmarkCacheAside_DelMulti measures the multi-key delete path with N=10 keys.
 func BenchmarkCacheAside_DelMulti(b *testing.B) {
+	b.ReportAllocs()
 	client := makeBenchClient(b)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -183,6 +189,7 @@ func makePrimeableBenchClient(b *testing.B) redcache.Cache[string, string] {
 
 // BenchmarkPrimeable_Set measures the single-key Set hot path.
 func BenchmarkPrimeable_Set(b *testing.B) {
+	b.ReportAllocs()
 	client := makePrimeableBenchClient(b)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -198,6 +205,7 @@ func BenchmarkPrimeable_Set(b *testing.B) {
 
 // BenchmarkPrimeable_SetMulti measures multi-key Set with N=10 keys.
 func BenchmarkPrimeable_SetMulti(b *testing.B) {
+	b.ReportAllocs()
 	client := makePrimeableBenchClient(b)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -217,6 +225,7 @@ func BenchmarkPrimeable_SetMulti(b *testing.B) {
 
 // BenchmarkPrimeable_ForceSet measures the unconditional ForceSet path.
 func BenchmarkPrimeable_ForceSet(b *testing.B) {
+	b.ReportAllocs()
 	client := makePrimeableBenchClient(b)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -232,6 +241,7 @@ func BenchmarkPrimeable_ForceSet(b *testing.B) {
 
 // BenchmarkPrimeable_ForceSetMulti measures unconditional multi-key writes.
 func BenchmarkPrimeable_ForceSetMulti(b *testing.B) {
+	b.ReportAllocs()
 	client := makePrimeableBenchClient(b)
 	defer client.Client().Close()
 	ctx := context.Background()
@@ -252,6 +262,7 @@ func BenchmarkPrimeable_ForceSetMulti(b *testing.B) {
 
 // BenchmarkCacheAside_Get_Refresh measures the refresh-ahead-triggering path.
 func BenchmarkCacheAside_Get_Refresh(b *testing.B) {
+	b.ReportAllocs()
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.StringCodec{},
@@ -284,6 +295,7 @@ func BenchmarkCacheAside_Get_Refresh(b *testing.B) {
 
 // BenchmarkCacheAside_GetMulti_Refresh measures the multi-key refresh-ahead path.
 func BenchmarkCacheAside_GetMulti_Refresh(b *testing.B) {
+	b.ReportAllocs()
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.StringCodec{},

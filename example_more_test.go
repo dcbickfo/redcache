@@ -2,6 +2,7 @@ package redcache_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -10,6 +11,48 @@ import (
 
 	"github.com/dcbickfo/redcache"
 )
+
+// failOnEmpty is a value codec that refuses to encode the empty string, used to
+// force a deterministic per-key failure in the ForceSetMulti example.
+type failOnEmpty struct{}
+
+func (failOnEmpty) Encode(s string) ([]byte, error) {
+	if s == "" {
+		return nil, errors.New("empty value not allowed")
+	}
+	return []byte(s), nil
+}
+
+func (failOnEmpty) Decode(b []byte) (string, error) { return string(b), nil }
+
+// Multi-key writes report per-key partial failures as *BatchKeyError[K],
+// reachable via errors.As. Note the generic type argument on the target pointer:
+// it must match the cache's key type (string here).
+func ExampleCache_ForceSetMulti() {
+	cache, err := redcache.NewString[string](
+		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+		failOnEmpty{},
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer cache.Close()
+
+	err = cache.ForceSetMulti(context.Background(), time.Minute, map[string]string{
+		"a": "alpha",
+		"b": "", // fails to encode
+	})
+
+	var be *redcache.BatchKeyError[string]
+	if errors.As(err, &be) {
+		fmt.Println("b failed:", be.HasError("b"))
+		fmt.Println("a succeeded:", !be.HasError("a"))
+		for k, kerr := range be.Failed {
+			_ = k
+			_ = kerr // handle each failed key
+		}
+	}
+}
 
 // New keys the cache by a domain type via a KeyCodec. KeyCodecFunc adapts a
 // plain function into a KeyCodec.

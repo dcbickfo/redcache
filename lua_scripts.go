@@ -2,7 +2,7 @@ package redcache
 
 import "github.com/redis/rueidis"
 
-// Lua scripts for CacheAside lock operations.
+// Lua scripts for Cache lock operations.
 var (
 	// delKeyLua atomically deletes a key only if the current value matches the lock.
 	delKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("DEL",KEYS[1]) else return 0 end`)
@@ -13,7 +13,7 @@ var (
 	setKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then redis.call("SET",KEYS[1],ARGV[2],"PX",ARGV[3]) return 1 else return 0 end`)
 )
 
-// Lua scripts for PrimeableCacheAside write-lock operations.
+// Lua scripts for Cache write-lock operations (Set/SetMulti).
 var (
 	// acquireWriteLockWithBackupScript atomically acquires a write lock and
 	// returns the previous value plus its PTTL for rollback. Allows overwriting

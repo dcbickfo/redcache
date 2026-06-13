@@ -75,6 +75,9 @@ func New[K comparable, V any](
 	valCodec Codec[V],
 	opts ...Option,
 ) (Cache[K, V], error) {
+	if keyCodec == nil || valCodec == nil {
+		return nil, errors.New("redcache: keyCodec and valCodec must not be nil")
+	}
 	cfg := newConfig(opts...)
 	core, err := newCacheAside(clientOption, cfg)
 	if err != nil {
@@ -118,6 +121,9 @@ func View[K comparable, V any](
 	keyCodec KeyCodec[K],
 	valCodec Codec[V],
 ) (Cache[K, V], error) {
+	if keyCodec == nil || valCodec == nil {
+		return nil, errors.New("redcache: keyCodec and valCodec must not be nil")
+	}
 	shared, ok := parent.(interface{ engine() *cacheAside })
 	if !ok {
 		return nil, errors.New("redcache: View requires a *Cache built by New, NewString, or NewBytes")
@@ -364,6 +370,9 @@ func (c *cache[K, V]) Set(
 	k K,
 	fn func(ctx context.Context, k K) (V, error),
 ) error {
+	if ttl <= 0 {
+		return ErrInvalidTTL
+	}
 	encKey, err := c.keyCodec.EncodeKey(k)
 	if err != nil {
 		return fmt.Errorf("redcache: encode key: %w", err)
@@ -383,6 +392,9 @@ func (c *cache[K, V]) Set(
 
 // ForceSet writes v unconditionally.
 func (c *cache[K, V]) ForceSet(ctx context.Context, ttl time.Duration, k K, v V) error {
+	if ttl <= 0 {
+		return ErrInvalidTTL
+	}
 	encKey, err := c.keyCodec.EncodeKey(k)
 	if err != nil {
 		return fmt.Errorf("redcache: encode key: %w", err)
@@ -404,6 +416,9 @@ func (c *cache[K, V]) SetMulti(
 ) error {
 	if len(keys) == 0 {
 		return nil
+	}
+	if ttl <= 0 {
+		return ErrInvalidTTL
 	}
 	if c.keyIsString {
 		return c.setMultiString(ctx, ttl, keys, fn)
@@ -485,6 +500,9 @@ func (c *cache[K, V]) ForceSetMulti(
 ) error {
 	if len(values) == 0 {
 		return nil
+	}
+	if ttl <= 0 {
+		return ErrInvalidTTL
 	}
 	if c.keyIsString {
 		return c.forceSetMultiString(ctx, ttl, values)

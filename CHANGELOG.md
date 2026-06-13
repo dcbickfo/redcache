@@ -41,10 +41,15 @@ settles.
 - **`BytesCodec` renamed to `UnsafeBytesCodec`** — the name now states the
   zero-copy retention hazard: the decoded slice aliases borrowed library memory
   and must not be mutated or retained past the call.
+- **`New` and `View` reject nil codecs at construction** rather than panicking on
+  the first call.
 
 ### Added
 - `WithRefreshTimeout(d)` — bounds how long a refresh-ahead callback may run,
   defaulting to the data `ttl` passed to `Get`/`GetMulti` rather than `LockTTL`.
+- `ErrInvalidTTL` — write methods (`Set`/`SetMulti`/`ForceSet`/`ForceSetMulti`)
+  now reject a non-positive `ttl` with this sentinel instead of leaking the raw
+  Redis `PX 0` error.
 - `redcachetest.Fake[K, V]` (constructed with `redcachetest.New[K, V]()`) — an
   in-memory `Cache[K, V]` for adopter unit tests. Models the observable
   single-process cache-aside contract (loader-once-per-miss, presence-based hits,

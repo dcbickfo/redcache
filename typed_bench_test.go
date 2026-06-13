@@ -34,6 +34,7 @@ var (
 )
 
 func BenchmarkTypedGet(b *testing.B) {
+	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
 	ctx := context.Background()
 	key := "bench:typed:get:" + uuid.NewString()
@@ -51,6 +52,7 @@ func BenchmarkTypedGet(b *testing.B) {
 }
 
 func BenchmarkTypedGet_Parallel(b *testing.B) {
+	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
 	ctx := context.Background()
 	key := "bench:typed:get:parallel:" + uuid.NewString()
@@ -70,6 +72,7 @@ func BenchmarkTypedGet_Parallel(b *testing.B) {
 }
 
 func BenchmarkTypedGetMulti(b *testing.B) {
+	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
 	ctx := context.Background()
 
@@ -92,6 +95,7 @@ func BenchmarkTypedGetMulti(b *testing.B) {
 }
 
 func BenchmarkTypedGetMulti_Parallel(b *testing.B) {
+	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
 	ctx := context.Background()
 
@@ -116,6 +120,7 @@ func BenchmarkTypedGetMulti_Parallel(b *testing.B) {
 }
 
 func BenchmarkTypedSet(b *testing.B) {
+	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
 	ctx := context.Background()
 	key := "bench:typed:set:" + uuid.NewString()
@@ -129,6 +134,7 @@ func BenchmarkTypedSet(b *testing.B) {
 }
 
 func BenchmarkTypedSetMulti(b *testing.B) {
+	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
 	ctx := context.Background()
 
@@ -146,6 +152,7 @@ func BenchmarkTypedSetMulti(b *testing.B) {
 }
 
 func BenchmarkTypedForceSet(b *testing.B) {
+	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
 	ctx := context.Background()
 	key := "bench:typed:forceset:" + uuid.NewString()
@@ -159,6 +166,7 @@ func BenchmarkTypedForceSet(b *testing.B) {
 }
 
 func BenchmarkTypedForceSetMulti(b *testing.B) {
+	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
 	ctx := context.Background()
 
@@ -178,6 +186,7 @@ func BenchmarkTypedForceSetMulti(b *testing.B) {
 // BenchmarkTypedGet_Codec isolates decode cost across codecs on the hit path.
 // JSON pays json.Unmarshal; Bytes/String are zero-/single-copy.
 func BenchmarkTypedGet_Codec(b *testing.B) {
+	b.ReportAllocs()
 	ctx := context.Background()
 	payload := `{"id":1,"name":"alice"}`
 
