@@ -5,15 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.3.0] - 2026-06-13
+
+Generics-first collapse: the public surface is now a single generic `Cache[K, V]`
+interface. The stampede/lock engine and the on-disk value format are unchanged —
+this is a surface redesign only. Stay v0.x; a v1 will be cut once the surface
+settles.
+
+### Breaking
+- **Single generic `Cache[K, V]` interface** replaces the four concrete types.
+  Removed `CacheAside`, `PrimeableCacheAside`, `Typed[K, V]`, and
+  `PrimeableTyped[K, V]`. Read methods (`Get`/`GetMulti`), write/prime methods
+  (`Set`/`SetMulti`/`ForceSet`/`ForceSetMulti`), invalidation (`Del`/`DelMulti`),
+  TTL extension (`Touch`/`TouchMulti`), `Client()`, and `Close()` are all methods
+  on `Cache[K, V]`.
+- **New constructors; old ones removed.** Removed `NewRedCacheAside`,
+  `NewPrimeableCacheAside`, `NewTyped`, `NewStringTyped`, `NewPrimeableTyped`, and
+  `NewPrimeableStringTyped`. Added:
+  - `New[K, V](clientOption, keyCodec, valCodec, opts...)`
+  - `NewString[V](clientOption, valCodec, opts...)` — `StringKeyCodec` preset.
+  - `NewBytes(clientOption, opts...)` — zero-copy `Cache[string, []byte]`.
+  - `View[K, V](parent, keyCodec, valCodec)` — derive a sibling typed view sharing
+    one client/engine/invalidation stream, for caching multiple value types over a
+    single connection.
+  Constructors take a `rueidis.ClientOption` and build the client internally.
+- **Functional options replace the `CacheAsideOption` struct.** Removed
+  `CacheAsideOption`. Configure with `WithLockTTL`, `WithLogger`, `WithMetrics`,
+  `WithLockPrefix`, `WithRefreshLockPrefix`, `WithRefreshAfterFraction`,
+  `WithRefreshBeta`, `WithRefreshWorkers`, `WithRefreshQueueSize`, and
+  `WithClientBuilder`.
+- **Typed batch error only.** Removed `BatchError`, `NewBatchError`, and
+  `NewBatchKeyError` from the public surface. Multi-key write partial failures
+  surface as `*BatchKeyError[K]` via `errors.As` (with nil-safe `HasFailures`,
+  `ErrorFor`, `HasError` accessors).
+- **`BytesCodec` renamed to `UnsafeBytesCodec`** — the name now states the
+  zero-copy retention hazard: the decoded slice aliases borrowed library memory
+  and must not be mutated or retained past the call.
 
 ### Added
-- `Typed[K, V]` / `PrimeableTyped[K, V]` typed wrappers over `CacheAside` / `PrimeableCacheAside`, with `JSONCodec[V]`, `BytesCodec`, `StringCodec`, `StringKeyCodec`, and `KeyCodecFunc[K]` provided.
-- `BatchKeyError[K comparable]` typed counterpart of `BatchError`, returned (via `errors.As`) from `PrimeableTyped` multi-set methods.
-- `ErrDecode` sentinel returned (wrapped) from typed reads when the configured codec rejects a stored value.
+- `WithRefreshTimeout(d)` — bounds how long a refresh-ahead callback may run,
+  defaulting to the data `ttl` passed to `Get`/`GetMulti` rather than `LockTTL`.
+- `redcachetest.Fake[K, V]` (constructed with `redcachetest.New[K, V]()`) — an
+  in-memory `Cache[K, V]` for adopter unit tests. Models the observable
+  single-process cache-aside contract (loader-once-per-miss, presence-based hits,
+  TTL expiry); does not model distributed single-flight, the lock layer,
+  invalidation pushes, the envelope, or refresh-ahead.
 
-### Notes
-- Existing string-typed public API (`*CacheAside`, `*PrimeableCacheAside`, `*BatchError`, all options and method signatures) is unchanged.
+### Fixed
+- **Refresh-ahead callbacks were silently capped at `LockTTL`.** A refresh
+  function that legitimately ran longer than `LockTTL` (e.g. a 20s fn under a 10s
+  lock) was cancelled and its result lost. `WithRefreshTimeout` decouples the
+  refresh compute budget from `LockTTL`, and the back-write that records a
+  slow-but-successful refresh is decoupled from the timeout so the write is kept.
 
 ## [v0.2.0] - 2026-05-04
 
@@ -97,7 +140,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lua scripts for atomic lock verification on SET and DEL.
 - CI workflow with GitHub Actions.
 
-[Unreleased]: https://github.com/dcbickfo/redcache/compare/v0.2.0...HEAD
+[v0.3.0]: https://github.com/dcbickfo/redcache/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/dcbickfo/redcache/compare/v0.1.7...v0.2.0
 [v0.1.7]: https://github.com/dcbickfo/redcache/compare/v0.1.6...v0.1.7
 [v0.1.6]: https://github.com/dcbickfo/redcache/compare/v0.1.5...v0.1.6

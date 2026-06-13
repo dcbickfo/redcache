@@ -1,7 +1,3 @@
-// Package redcache implements a Redis cache-aside built on rueidis. It uses
-// rueidis client-side caching plus Redis SET NX locking so only one goroutine
-// (across all processes) populates a missing key, with the rest waiting on the
-// invalidation push for the populated value.
 package redcache
 
 import (

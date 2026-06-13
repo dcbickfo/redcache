@@ -25,16 +25,18 @@ func TestView_SharesEngine(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(base.Close)
 
-	// A concrete *cache satisfies interface{ engine() *cacheAside }.
-	parent, ok := base.(*cache[string, string])
-	require.True(t, ok, "New should return *cache[string, string]")
+	// An external caller passes the Cache interface value straight to View.
+	sibling, err := View[string, int](base, StringKeyCodec{}, JSONCodec[int]{})
+	require.NoError(t, err)
 
-	sibling := View[string, int](parent, StringKeyCodec{}, JSONCodec[int]{})
-	siblingCache, ok := sibling.(*cache[string, int])
-	require.True(t, ok)
+	baseCache := base.(*cache[string, string])
+	siblingCache := sibling.(*cache[string, int])
+	require.Same(t, baseCache.engine(), siblingCache.engine(), "view must share the parent engine")
+	require.Equal(t, base.Client(), sibling.Client(), "view must share the parent client")
 
-	require.Same(t, parent.engine(), siblingCache.engine(), "view must share the parent engine")
-	require.Equal(t, parent.Client(), sibling.Client(), "view must share the parent client")
+	// A non-redcache Cache (or any other value) is rejected, not panicked on.
+	_, viewErr := View[string, int]("not a cache", StringKeyCodec{}, JSONCodec[int]{})
+	require.Error(t, viewErr)
 
 	// Both views are usable over the shared engine.
 	ctx := context.Background()

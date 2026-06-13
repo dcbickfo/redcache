@@ -104,21 +104,30 @@ func NewBytes(clientOption rueidis.ClientOption, opts ...Option) (Cache[string, 
 	return NewString[[]byte](clientOption, UnsafeBytesCodec{}, opts...)
 }
 
-// View derives a sibling typed view sharing parent's engine — one client, one
-// invalidation stream — with a different K/V and codecs. Use it to cache
-// multiple value types over a single Redis connection. Closing any view (or the
-// parent) closes the shared engine.
+// View derives a sibling typed cache that shares parent's client, connection,
+// and invalidation stream, with its own key/value types and codecs. Use it to
+// cache multiple value types over a single Redis connection.
+//
+// parent must be a Cache built by New, NewString, or NewBytes; View returns an
+// error for any other value (e.g. a third-party or test implementation), since
+// only redcache's own caches expose a shareable engine. Closing any view — or
+// the parent — closes the shared client, so derive views from one long-lived
+// parent and close it last.
 func View[K comparable, V any](
-	parent interface{ engine() *cacheAside },
+	parent any,
 	keyCodec KeyCodec[K],
 	valCodec Codec[V],
-) Cache[K, V] {
+) (Cache[K, V], error) {
+	shared, ok := parent.(interface{ engine() *cacheAside })
+	if !ok {
+		return nil, errors.New("redcache: View requires a *Cache built by New, NewString, or NewBytes")
+	}
 	return &cache[K, V]{
-		core:        parent.engine(),
+		core:        shared.engine(),
 		keyCodec:    keyCodec,
 		valCodec:    valCodec,
 		keyIsString: isStringKeyCodec[K](keyCodec),
-	}
+	}, nil
 }
 
 // engine exposes the shared *cacheAside for View. Unexported so it stays a
