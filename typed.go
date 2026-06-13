@@ -2,56 +2,162 @@ package redcache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 	"unsafe"
+
+	"github.com/redis/rueidis"
 )
 
-// Typed is a type-safe view over a *CacheAside. One *CacheAside may be shared
-// across many Typed views with different K/V and codecs.
-type Typed[K comparable, V any] struct {
-	cache    *CacheAside
+// Cache is the primary cache-aside surface: a generic interface over a key type
+// K and value type V. It mirrors rueidis.Client in being an interface so callers
+// can fake it in tests. All read methods run the stampede-protected lock loop;
+// all write methods populate every subscribed client's cache.
+type Cache[K comparable, V any] interface {
+	// Get returns the cached value for k, calling fn on a miss. Only one caller
+	// across all processes runs fn for a given key; the rest wait on the
+	// resulting invalidation. Decode errors on read are wrapped with ErrDecode.
+	Get(ctx context.Context, ttl time.Duration, k K, fn func(context.Context, K) (V, error)) (V, error)
+	// GetMulti returns cached values for keys, calling fn for misses. SETs are
+	// grouped by Redis cluster slot. A decode error aborts the batch (wrapped
+	// with ErrDecode).
+	GetMulti(ctx context.Context, ttl time.Duration, keys []K, fn func(context.Context, []K) (map[K]V, error)) (map[K]V, error)
+	// Set populates k via fn under a write lock, writing the value to every
+	// subscribed client. On callback error the prior value is restored.
+	Set(ctx context.Context, ttl time.Duration, k K, fn func(context.Context, K) (V, error)) error
+	// SetMulti populates keys via fn under write locks. Partial failures surface
+	// as *BatchKeyError[K] via errors.As.
+	SetMulti(ctx context.Context, ttl time.Duration, keys []K, fn func(context.Context, []K) (map[K]V, error)) error
+	// ForceSet writes v unconditionally, bypassing locks. In-progress Get/Set
+	// callers on the same key see ErrLockLost and retry.
+	ForceSet(ctx context.Context, ttl time.Duration, k K, v V) error
+	// ForceSetMulti writes values unconditionally. Encode failures are collected
+	// per-key; successfully-encoded entries are still written. Partial failures
+	// surface as *BatchKeyError[K].
+	ForceSetMulti(ctx context.Context, ttl time.Duration, values map[K]V) error
+	// Del removes a key, triggering invalidation on all subscribed clients.
+	Del(ctx context.Context, k K) error
+	// DelMulti removes keys, triggering invalidation.
+	DelMulti(ctx context.Context, keys ...K) error
+	// Touch sets the TTL of a cached value. No-ops on a missing key or lock value.
+	Touch(ctx context.Context, ttl time.Duration, k K) error
+	// TouchMulti extends the TTL of cached values.
+	TouchMulti(ctx context.Context, ttl time.Duration, keys ...K) error
+	// Client returns the underlying rueidis.Client. Bypasses cache-aside
+	// semantics; do NOT raw-SET cached keys (it skips the envelope).
+	Client() rueidis.Client
+	// Close cancels pending lock entries, drains refresh workers, and closes the
+	// underlying client. Idempotent.
+	Close()
+}
+
+// cache is the concrete generic implementation of Cache[K, V]. It encodes K/V
+// and delegates to the unexported string-typed engine (*cacheAside). One engine
+// may back many cache views with different K/V and codecs (see View).
+type cache[K comparable, V any] struct {
+	core     *cacheAside
 	keyCodec KeyCodec[K]
 	valCodec Codec[V]
-	// Set when keyCodec is StringKeyCodec; multi-key paths then alias
-	// []K↔[]string instead of building a reverse-lookup map.
+	// keyIsString is set when keyCodec is StringKeyCodec; multi-key paths then
+	// alias []K↔[]string instead of building a reverse-lookup map.
 	keyIsString bool
 }
 
-func NewTyped[K comparable, V any](cache *CacheAside, keyCodec KeyCodec[K], valCodec Codec[V]) *Typed[K, V] {
-	t := &Typed[K, V]{cache: cache, keyCodec: keyCodec, valCodec: valCodec}
-	if _, ok := any(keyCodec).(StringKeyCodec); ok {
-		t.keyIsString = true
+var _ Cache[string, []byte] = (*cache[string, []byte])(nil)
+
+// New builds a self-contained Cache[K, V] with its own rueidis.Client (wired for
+// invalidation). keyCodec maps K to the Redis key; valCodec maps V to the
+// envelope payload.
+func New[K comparable, V any](
+	clientOption rueidis.ClientOption,
+	keyCodec KeyCodec[K],
+	valCodec Codec[V],
+	opts ...Option,
+) (Cache[K, V], error) {
+	cfg := newConfig(opts...)
+	core, err := newCacheAside(clientOption, cfg)
+	if err != nil {
+		return nil, err
 	}
-	return t
+	return &cache[K, V]{
+		core:        core,
+		keyCodec:    keyCodec,
+		valCodec:    valCodec,
+		keyIsString: isStringKeyCodec[K](keyCodec),
+	}, nil
 }
 
-// NewStringTyped is NewTyped[string, V] with StringKeyCodec preset.
-func NewStringTyped[V any](cache *CacheAside, valCodec Codec[V]) *Typed[string, V] {
-	return NewTyped[string, V](cache, StringKeyCodec{}, valCodec)
+// NewString is New[string, V] with StringKeyCodec preset (enabling the K=string
+// fast path).
+func NewString[V any](
+	clientOption rueidis.ClientOption,
+	valCodec Codec[V],
+	opts ...Option,
+) (Cache[string, V], error) {
+	return New[string, V](clientOption, StringKeyCodec{}, valCodec, opts...)
 }
+
+// NewBytes is NewString[[]byte] with UnsafeBytesCodec — a zero-copy raw []byte
+// cache. The decoded slice aliases borrowed memory; do not mutate or retain it.
+func NewBytes(clientOption rueidis.ClientOption, opts ...Option) (Cache[string, []byte], error) {
+	return NewString[[]byte](clientOption, UnsafeBytesCodec{}, opts...)
+}
+
+// View derives a sibling typed view sharing parent's engine — one client, one
+// invalidation stream — with a different K/V and codecs. Use it to cache
+// multiple value types over a single Redis connection. Closing any view (or the
+// parent) closes the shared engine.
+func View[K comparable, V any](
+	parent interface{ engine() *cacheAside },
+	keyCodec KeyCodec[K],
+	valCodec Codec[V],
+) Cache[K, V] {
+	return &cache[K, V]{
+		core:        parent.engine(),
+		keyCodec:    keyCodec,
+		valCodec:    valCodec,
+		keyIsString: isStringKeyCodec[K](keyCodec),
+	}
+}
+
+// engine exposes the shared *cacheAside for View. Unexported so it stays a
+// power-user seam rather than public surface.
+func (c *cache[K, V]) engine() *cacheAside { return c.core }
+
+// isStringKeyCodec reports whether keyCodec is StringKeyCodec, which guarantees
+// K=string and so gates the unsafe []K↔[]string fast path.
+func isStringKeyCodec[K comparable](keyCodec KeyCodec[K]) bool {
+	_, ok := any(keyCodec).(StringKeyCodec)
+	return ok
+}
+
+// Client returns the underlying rueidis.Client.
+func (c *cache[K, V]) Client() rueidis.Client { return c.core.Client() }
+
+// Close closes the underlying engine and client.
+func (c *cache[K, V]) Close() { c.core.Close() }
 
 // Get returns the cached value for k, calling fn on a miss. Decode errors on
-// read are wrapped with ErrDecode and leave the cached entry intact. See
-// (*CacheAside).Get for stampede / lock semantics.
-func (t *Typed[K, V]) Get(
+// read are wrapped with ErrDecode and leave the cached entry intact.
+func (c *cache[K, V]) Get(
 	ctx context.Context,
 	ttl time.Duration,
 	k K,
 	fn func(ctx context.Context, k K) (V, error),
 ) (V, error) {
 	var zero V
-	encKey, err := t.keyCodec.EncodeKey(k)
+	encKey, err := c.keyCodec.EncodeKey(k)
 	if err != nil {
 		return zero, fmt.Errorf("redcache: encode key: %w", err)
 	}
 
-	raw, err := t.cache.Get(ctx, ttl, encKey, func(ctx context.Context, _ string) (string, error) {
+	raw, err := c.core.get(ctx, ttl, encKey, func(ctx context.Context, _ string) (string, error) {
 		v, ferr := fn(ctx, k)
 		if ferr != nil {
 			return "", ferr
 		}
-		b, eerr := t.valCodec.Encode(v)
+		b, eerr := c.valCodec.Encode(v)
 		if eerr != nil {
 			return "", fmt.Errorf("redcache: encode value: %w", eerr)
 		}
@@ -61,7 +167,7 @@ func (t *Typed[K, V]) Get(
 		return zero, err
 	}
 
-	v, derr := t.valCodec.Decode(stringToBytes(raw))
+	v, derr := c.valCodec.Decode(stringToBytes(raw))
 	if derr != nil {
 		return zero, fmt.Errorf("redcache: decode key %q: %w: %w", encKey, ErrDecode, derr)
 	}
@@ -69,27 +175,26 @@ func (t *Typed[K, V]) Get(
 }
 
 // Del removes a key, triggering invalidation on all subscribed clients.
-func (t *Typed[K, V]) Del(ctx context.Context, k K) error {
-	encKey, err := t.keyCodec.EncodeKey(k)
+func (c *cache[K, V]) Del(ctx context.Context, k K) error {
+	encKey, err := c.keyCodec.EncodeKey(k)
 	if err != nil {
 		return fmt.Errorf("redcache: encode key: %w", err)
 	}
-	return t.cache.Del(ctx, encKey)
+	return c.core.del(ctx, encKey)
 }
 
-// Touch sets the TTL of a cached value. See (*CacheAside).Touch.
-func (t *Typed[K, V]) Touch(ctx context.Context, ttl time.Duration, k K) error {
-	encKey, err := t.keyCodec.EncodeKey(k)
+// Touch sets the TTL of a cached value.
+func (c *cache[K, V]) Touch(ctx context.Context, ttl time.Duration, k K) error {
+	encKey, err := c.keyCodec.EncodeKey(k)
 	if err != nil {
 		return fmt.Errorf("redcache: encode key: %w", err)
 	}
-	return t.cache.Touch(ctx, ttl, encKey)
+	return c.core.touch(ctx, ttl, encKey)
 }
 
 // GetMulti returns cached values for keys, calling fn for misses. A decode
-// error on any read returns wrapped with ErrDecode and aborts the batch. See
-// (*CacheAside).GetMulti for slot-batching and stampede semantics.
-func (t *Typed[K, V]) GetMulti(
+// error on any read returns wrapped with ErrDecode and aborts the batch.
+func (c *cache[K, V]) GetMulti(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []K,
@@ -98,14 +203,14 @@ func (t *Typed[K, V]) GetMulti(
 	if len(keys) == 0 {
 		return map[K]V{}, nil
 	}
-	if t.keyIsString {
-		return t.getMultiString(ctx, ttl, keys, fn)
+	if c.keyIsString {
+		return c.getMultiString(ctx, ttl, keys, fn)
 	}
-	return t.getMultiKeyed(ctx, ttl, keys, fn)
+	return c.getMultiKeyed(ctx, ttl, keys, fn)
 }
 
 // K=string fast path: aliases keys to []string, skips the reverse-lookup map.
-func (t *Typed[K, V]) getMultiString(
+func (c *cache[K, V]) getMultiString(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []K,
@@ -113,12 +218,12 @@ func (t *Typed[K, V]) getMultiString(
 ) (map[K]V, error) {
 	encKeys := asStringSlice(keys)
 
-	raw, err := t.cache.GetMulti(ctx, ttl, encKeys, func(ctx context.Context, missingEnc []string) (map[string]string, error) {
+	raw, err := c.core.getMulti(ctx, ttl, encKeys, func(ctx context.Context, missingEnc []string) (map[string]string, error) {
 		result, ferr := fn(ctx, asKSlice[K](missingEnc))
 		if ferr != nil {
 			return nil, ferr
 		}
-		return t.encodeMultiResult(result)
+		return c.encodeMultiResult(result)
 	})
 	if err != nil {
 		return nil, err
@@ -126,7 +231,7 @@ func (t *Typed[K, V]) getMultiString(
 
 	out := make(map[K]V, len(raw))
 	for s, payload := range raw {
-		v, derr := t.valCodec.Decode(stringToBytes(payload))
+		v, derr := c.valCodec.Decode(stringToBytes(payload))
 		if derr != nil {
 			return nil, fmt.Errorf("redcache: decode key %q: %w: %w", s, ErrDecode, derr)
 		}
@@ -135,7 +240,7 @@ func (t *Typed[K, V]) getMultiString(
 	return out, nil
 }
 
-func (t *Typed[K, V]) getMultiKeyed(
+func (c *cache[K, V]) getMultiKeyed(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []K,
@@ -144,7 +249,7 @@ func (t *Typed[K, V]) getMultiKeyed(
 	encKeys := make([]string, len(keys))
 	byEnc := make(map[string]K, len(keys))
 	for i, k := range keys {
-		s, err := t.keyCodec.EncodeKey(k)
+		s, err := c.keyCodec.EncodeKey(k)
 		if err != nil {
 			return nil, fmt.Errorf("redcache: encode key: %w", err)
 		}
@@ -152,7 +257,7 @@ func (t *Typed[K, V]) getMultiKeyed(
 		byEnc[s] = k
 	}
 
-	raw, err := t.cache.GetMulti(ctx, ttl, encKeys, func(ctx context.Context, missingEnc []string) (map[string]string, error) {
+	raw, err := c.core.getMulti(ctx, ttl, encKeys, func(ctx context.Context, missingEnc []string) (map[string]string, error) {
 		missingK := make([]K, len(missingEnc))
 		for i, s := range missingEnc {
 			missingK[i] = byEnc[s]
@@ -161,7 +266,7 @@ func (t *Typed[K, V]) getMultiKeyed(
 		if ferr != nil {
 			return nil, ferr
 		}
-		return t.encodeMultiResult(result)
+		return c.encodeMultiResult(result)
 	})
 	if err != nil {
 		return nil, err
@@ -173,7 +278,7 @@ func (t *Typed[K, V]) getMultiKeyed(
 		if !ok {
 			continue
 		}
-		v, derr := t.valCodec.Decode(stringToBytes(payload))
+		v, derr := c.valCodec.Decode(stringToBytes(payload))
 		if derr != nil {
 			return nil, fmt.Errorf("redcache: decode key %q: %w: %w", s, ErrDecode, derr)
 		}
@@ -182,37 +287,37 @@ func (t *Typed[K, V]) getMultiKeyed(
 	return out, nil
 }
 
-// DelMulti removes keys, triggering invalidation. See (*CacheAside).DelMulti.
-func (t *Typed[K, V]) DelMulti(ctx context.Context, keys ...K) error {
+// DelMulti removes keys, triggering invalidation.
+func (c *cache[K, V]) DelMulti(ctx context.Context, keys ...K) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	encKeys, err := t.encodeKeys(keys)
+	encKeys, err := c.encodeKeys(keys)
 	if err != nil {
 		return err
 	}
-	return t.cache.DelMulti(ctx, encKeys...)
+	return c.core.delMulti(ctx, encKeys...)
 }
 
-// TouchMulti extends the TTL of cached values. See (*CacheAside).TouchMulti.
-func (t *Typed[K, V]) TouchMulti(ctx context.Context, ttl time.Duration, keys ...K) error {
+// TouchMulti extends the TTL of cached values.
+func (c *cache[K, V]) TouchMulti(ctx context.Context, ttl time.Duration, keys ...K) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	encKeys, err := t.encodeKeys(keys)
+	encKeys, err := c.encodeKeys(keys)
 	if err != nil {
 		return err
 	}
-	return t.cache.TouchMulti(ctx, ttl, encKeys...)
+	return c.core.touchMulti(ctx, ttl, encKeys...)
 }
 
-func (t *Typed[K, V]) encodeKeys(keys []K) ([]string, error) {
-	if t.keyIsString {
+func (c *cache[K, V]) encodeKeys(keys []K) ([]string, error) {
+	if c.keyIsString {
 		return asStringSlice(keys), nil
 	}
 	encKeys := make([]string, len(keys))
 	for i, k := range keys {
-		s, err := t.keyCodec.EncodeKey(k)
+		s, err := c.keyCodec.EncodeKey(k)
 		if err != nil {
 			return nil, fmt.Errorf("redcache: encode key: %w", err)
 		}
@@ -221,20 +326,20 @@ func (t *Typed[K, V]) encodeKeys(keys []K) ([]string, error) {
 	return encKeys, nil
 }
 
-func (t *Typed[K, V]) encodeMultiResult(result map[K]V) (map[string]string, error) {
+func (c *cache[K, V]) encodeMultiResult(result map[K]V) (map[string]string, error) {
 	out := make(map[string]string, len(result))
 	for k, v := range result {
 		var s string
-		if t.keyIsString {
+		if c.keyIsString {
 			s = asString(k)
 		} else {
-			ks, kerr := t.keyCodec.EncodeKey(k)
+			ks, kerr := c.keyCodec.EncodeKey(k)
 			if kerr != nil {
 				return nil, fmt.Errorf("redcache: encode key: %w", kerr)
 			}
 			s = ks
 		}
-		b, eerr := t.valCodec.Encode(v)
+		b, eerr := c.valCodec.Encode(v)
 		if eerr != nil {
 			return nil, fmt.Errorf("redcache: encode value for key %q: %w", s, eerr)
 		}
@@ -243,8 +348,295 @@ func (t *Typed[K, V]) encodeMultiResult(result map[K]V) (map[string]string, erro
 	return out, nil
 }
 
+// Set populates the cache via fn under a write lock.
+func (c *cache[K, V]) Set(
+	ctx context.Context,
+	ttl time.Duration,
+	k K,
+	fn func(ctx context.Context, k K) (V, error),
+) error {
+	encKey, err := c.keyCodec.EncodeKey(k)
+	if err != nil {
+		return fmt.Errorf("redcache: encode key: %w", err)
+	}
+	return c.core.set(ctx, ttl, encKey, func(ctx context.Context, _ string) (string, error) {
+		v, ferr := fn(ctx, k)
+		if ferr != nil {
+			return "", ferr
+		}
+		b, eerr := c.valCodec.Encode(v)
+		if eerr != nil {
+			return "", fmt.Errorf("redcache: encode value: %w", eerr)
+		}
+		return bytesToString(b), nil
+	})
+}
+
+// ForceSet writes v unconditionally.
+func (c *cache[K, V]) ForceSet(ctx context.Context, ttl time.Duration, k K, v V) error {
+	encKey, err := c.keyCodec.EncodeKey(k)
+	if err != nil {
+		return fmt.Errorf("redcache: encode key: %w", err)
+	}
+	b, err := c.valCodec.Encode(v)
+	if err != nil {
+		return fmt.Errorf("redcache: encode value: %w", err)
+	}
+	return c.core.forceSet(ctx, ttl, encKey, bytesToString(b))
+}
+
+// SetMulti populates the cache via fn under write locks. Partial failures
+// surface as *BatchKeyError[K].
+func (c *cache[K, V]) SetMulti(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []K,
+	fn func(ctx context.Context, keys []K) (map[K]V, error),
+) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if c.keyIsString {
+		return c.setMultiString(ctx, ttl, keys, fn)
+	}
+	return c.setMultiKeyed(ctx, ttl, keys, fn)
+}
+
+// K=string fast path: aliases keys to []string, skips the reverse-lookup map.
+func (c *cache[K, V]) setMultiString(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []K,
+	fn func(ctx context.Context, keys []K) (map[K]V, error),
+) error {
+	encKeys := asStringSlice(keys)
+
+	err := c.core.setMulti(ctx, ttl, encKeys, func(ctx context.Context, encArg []string) (map[string]string, error) {
+		result, ferr := fn(ctx, asKSlice[K](encArg))
+		if ferr != nil {
+			return nil, ferr
+		}
+		return c.encodeMultiResult(result)
+	})
+	if err == nil {
+		return nil
+	}
+	var be *batchError
+	if !errors.As(err, &be) {
+		return err
+	}
+	return convertBatchErrorToTypedString[K](be)
+}
+
+func (c *cache[K, V]) setMultiKeyed(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []K,
+	fn func(ctx context.Context, keys []K) (map[K]V, error),
+) error {
+	encKeys := make([]string, len(keys))
+	byEnc := make(map[string]K, len(keys))
+	for i, k := range keys {
+		s, err := c.keyCodec.EncodeKey(k)
+		if err != nil {
+			return fmt.Errorf("redcache: encode key: %w", err)
+		}
+		encKeys[i] = s
+		byEnc[s] = k
+	}
+
+	err := c.core.setMulti(ctx, ttl, encKeys, func(ctx context.Context, encArg []string) (map[string]string, error) {
+		argK := make([]K, len(encArg))
+		for i, s := range encArg {
+			argK[i] = byEnc[s]
+		}
+		result, ferr := fn(ctx, argK)
+		if ferr != nil {
+			return nil, ferr
+		}
+		return c.encodeMultiResult(result)
+	})
+	if err == nil {
+		return nil
+	}
+	var be *batchError
+	if !errors.As(err, &be) {
+		return err
+	}
+	return convertBatchErrorToTyped(be, byEnc)
+}
+
+// ForceSetMulti writes values unconditionally. Encode failures are collected
+// per-key; successfully-encoded entries are still written. Partial failures
+// (encode or write) surface as *BatchKeyError[K].
+func (c *cache[K, V]) ForceSetMulti(
+	ctx context.Context,
+	ttl time.Duration,
+	values map[K]V,
+) error {
+	if len(values) == 0 {
+		return nil
+	}
+	if c.keyIsString {
+		return c.forceSetMultiString(ctx, ttl, values)
+	}
+	return c.forceSetMultiKeyed(ctx, ttl, values)
+}
+
+// K=string fast path: aliases each K to string, skips the reverse-lookup map.
+func (c *cache[K, V]) forceSetMultiString(
+	ctx context.Context,
+	ttl time.Duration,
+	values map[K]V,
+) error {
+	encVals := make(map[string]string, len(values))
+	failed := make(map[K]error)
+	for k, v := range values {
+		s := asString(k)
+		b, err := c.valCodec.Encode(v)
+		if err != nil {
+			failed[k] = fmt.Errorf("redcache: encode value: %w", err)
+			continue
+		}
+		encVals[s] = bytesToString(b)
+	}
+	if len(encVals) == 0 {
+		return newBatchKeyError(failed, nil)
+	}
+	err := c.core.forceSetMulti(ctx, ttl, encVals)
+	if err == nil && len(failed) == 0 {
+		return nil
+	}
+	succeeded := mergeForceSetResultString[K](err, encVals, failed)
+	return newBatchKeyError(failed, succeeded)
+}
+
+func (c *cache[K, V]) forceSetMultiKeyed(
+	ctx context.Context,
+	ttl time.Duration,
+	values map[K]V,
+) error {
+	encVals := make(map[string]string, len(values))
+	failed := make(map[K]error)
+	byEnc := make(map[string]K, len(values))
+	for k, v := range values {
+		s, err := c.keyCodec.EncodeKey(k)
+		if err != nil {
+			failed[k] = fmt.Errorf("redcache: encode key: %w", err)
+			continue
+		}
+		b, err := c.valCodec.Encode(v)
+		if err != nil {
+			failed[k] = fmt.Errorf("redcache: encode value: %w", err)
+			continue
+		}
+		encVals[s] = bytesToString(b)
+		byEnc[s] = k
+	}
+	if len(encVals) == 0 {
+		return newBatchKeyError(failed, nil)
+	}
+	err := c.core.forceSetMulti(ctx, ttl, encVals)
+	if err == nil && len(failed) == 0 {
+		return nil
+	}
+	succeeded := mergeForceSetResult(err, byEnc, failed)
+	return newBatchKeyError(failed, succeeded)
+}
+
+// mergeForceSetResult merges per-key outcomes from forceSetMulti into failed
+// (encode errors are preserved) and returns the succeeded slice. A non-*batchError
+// err is treated as a total failure.
+func mergeForceSetResult[K comparable](err error, byEnc map[string]K, failed map[K]error) []K {
+	succeeded := make([]K, 0, len(byEnc))
+	if err == nil {
+		for _, k := range byEnc {
+			succeeded = append(succeeded, k)
+		}
+		return succeeded
+	}
+	var be *batchError
+	if !errors.As(err, &be) {
+		for _, k := range byEnc {
+			failed[k] = err
+		}
+		return succeeded
+	}
+	for s, ferr := range be.Failed {
+		if k, ok := byEnc[s]; ok {
+			failed[k] = ferr
+		}
+	}
+	for _, s := range be.Succeeded {
+		if k, ok := byEnc[s]; ok {
+			succeeded = append(succeeded, k)
+		}
+	}
+	return succeeded
+}
+
+// convertBatchErrorToTyped maps a *batchError's string keys back to typed K
+// using byEnc. Keys not in byEnc are silently skipped — surfacing a partial
+// BatchKeyError is safer than panicking on an invariant violation.
+func convertBatchErrorToTyped[K comparable](be *batchError, byEnc map[string]K) error {
+	failedK := make(map[K]error, len(be.Failed))
+	for s, ferr := range be.Failed {
+		if k, ok := byEnc[s]; ok {
+			failedK[k] = ferr
+		}
+	}
+	succeededK := make([]K, 0, len(be.Succeeded))
+	for _, s := range be.Succeeded {
+		if k, ok := byEnc[s]; ok {
+			succeededK = append(succeededK, k)
+		}
+	}
+	return newBatchKeyError(failedK, succeededK)
+}
+
+// convertBatchErrorToTypedString is the K=string fast path: cast each encoded
+// key directly to K via asK.
+func convertBatchErrorToTypedString[K comparable](be *batchError) error {
+	failedK := make(map[K]error, len(be.Failed))
+	for s, ferr := range be.Failed {
+		failedK[asK[K](s)] = ferr
+	}
+	succeededK := make([]K, 0, len(be.Succeeded))
+	for _, s := range be.Succeeded {
+		succeededK = append(succeededK, asK[K](s))
+	}
+	return newBatchKeyError(failedK, succeededK)
+}
+
+// mergeForceSetResultString is the K=string fast path of mergeForceSetResult.
+// encVals provides the successfully-encoded set (its keys are encoded keys, K
+// is the same string).
+func mergeForceSetResultString[K comparable](err error, encVals map[string]string, failed map[K]error) []K {
+	succeeded := make([]K, 0, len(encVals))
+	if err == nil {
+		for s := range encVals {
+			succeeded = append(succeeded, asK[K](s))
+		}
+		return succeeded
+	}
+	var be *batchError
+	if !errors.As(err, &be) {
+		for s := range encVals {
+			failed[asK[K](s)] = err
+		}
+		return succeeded
+	}
+	for s, ferr := range be.Failed {
+		failed[asK[K](s)] = ferr
+	}
+	for _, s := range be.Succeeded {
+		succeeded = append(succeeded, asK[K](s))
+	}
+	return succeeded
+}
+
 // The asK / asString family aliases between K and string under the invariant
-// that K=string — callers (gated on Typed.keyIsString) must guarantee that.
+// that K=string — callers (gated on cache.keyIsString) must guarantee that.
 
 func asStringSlice[K comparable](keys []K) []string {
 	return *(*[]string)(unsafe.Pointer(&keys))

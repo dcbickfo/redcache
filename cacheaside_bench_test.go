@@ -12,15 +12,14 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-func makeBenchClient(b *testing.B) *redcache.CacheAside {
+func makeBenchClient(b *testing.B) redcache.Cache[string, string] {
 	b.Helper()
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{
 			InitAddress: []string{"127.0.0.1:6379"},
 		},
-		redcache.CacheAsideOption{
-			LockTTL: 5 * time.Second,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(5*time.Second),
 	)
 	if err != nil {
 		b.Fatal(err)
@@ -167,15 +166,14 @@ func BenchmarkCacheAside_DelMulti(b *testing.B) {
 	}
 }
 
-func makePrimeableBenchClient(b *testing.B) *redcache.PrimeableCacheAside {
+func makePrimeableBenchClient(b *testing.B) redcache.Cache[string, string] {
 	b.Helper()
-	client, err := redcache.NewPrimeableCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{
 			InitAddress: []string{"127.0.0.1:6379"},
 		},
-		redcache.CacheAsideOption{
-			LockTTL: 5 * time.Second,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(5*time.Second),
 	)
 	if err != nil {
 		b.Fatal(err)
@@ -254,14 +252,13 @@ func BenchmarkPrimeable_ForceSetMulti(b *testing.B) {
 
 // BenchmarkCacheAside_Get_Refresh measures the refresh-ahead-triggering path.
 func BenchmarkCacheAside_Get_Refresh(b *testing.B) {
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.CacheAsideOption{
-			LockTTL:              5 * time.Second,
-			RefreshAfterFraction: 0.001, // any TTL elapsed → trigger refresh
-			RefreshWorkers:       8,
-			RefreshQueueSize:     1024,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(5*time.Second),
+		redcache.WithRefreshAfterFraction(0.001), // any TTL elapsed → trigger refresh
+		redcache.WithRefreshWorkers(8),
+		redcache.WithRefreshQueueSize(1024),
 	)
 	if err != nil {
 		b.Fatal(err)
@@ -287,14 +284,13 @@ func BenchmarkCacheAside_Get_Refresh(b *testing.B) {
 
 // BenchmarkCacheAside_GetMulti_Refresh measures the multi-key refresh-ahead path.
 func BenchmarkCacheAside_GetMulti_Refresh(b *testing.B) {
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.CacheAsideOption{
-			LockTTL:              5 * time.Second,
-			RefreshAfterFraction: 0.001, // any TTL elapsed → trigger refresh
-			RefreshWorkers:       8,
-			RefreshQueueSize:     1024,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(5*time.Second),
+		redcache.WithRefreshAfterFraction(0.001), // any TTL elapsed → trigger refresh
+		redcache.WithRefreshWorkers(8),
+		redcache.WithRefreshQueueSize(1024),
 	)
 	if err != nil {
 		b.Fatal(err)

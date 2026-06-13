@@ -13,42 +13,21 @@ import (
 	"github.com/dcbickfo/redcache/internal/syncx"
 )
 
-// PrimeableCacheAside extends CacheAside with Set/SetMulti (write-locked) and
-// ForceSet/ForceSetMulti (unconditional) for cache priming and coordinated
-// updates.
-type PrimeableCacheAside struct {
-	*CacheAside
-}
-
-// NewPrimeableCacheAside builds a PrimeableCacheAside wrapping a fresh CacheAside.
-func NewPrimeableCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOption) (*PrimeableCacheAside, error) {
-	rca, err := NewRedCacheAside(clientOption, caOption)
-	if err != nil {
-		return nil, err
-	}
-	return &PrimeableCacheAside{CacheAside: rca}, nil
-}
-
-// Close cancels pending lock entries; the underlying Redis client is left open.
-func (pca *PrimeableCacheAside) Close() {
-	pca.CacheAside.Close()
-}
-
-// Set acquires a write lock on key, calls fn, and atomically writes the
+// set acquires a write lock on key, calls fn, and atomically writes the
 // returned value. Waits when another operation holds the lock. On callback
-// error the prior value is restored only if Set still holds the lock; a
-// concurrent ForceSet's value is preserved. The post-callback CAS may return
+// error the prior value is restored only if set still holds the lock; a
+// concurrent forceSet's value is preserved. The post-callback CAS may return
 // ErrLockLost under the same race.
-func (pca *PrimeableCacheAside) Set(
+func (rca *cacheAside) set(
 	ctx context.Context,
 	ttl time.Duration,
 	key string,
 	fn func(ctx context.Context, key string) (string, error),
 ) error {
-	lockVal := pca.lockPool.Generate()
+	lockVal := rca.lockPool.Generate()
 
 	for {
-		saved, retry, err := pca.acquireSingleWriteLock(ctx, key, lockVal, pca.lockTTLMs)
+		saved, retry, err := rca.acquireSingleWriteLock(ctx, key, lockVal, rca.lockTTLMs)
 		if err != nil {
 			return err
 		}
@@ -61,27 +40,27 @@ func (pca *PrimeableCacheAside) Set(
 		if err != nil {
 			// bestEffortRestore so a cancelled request still rolls back the
 			// lock instead of letting it linger until lockTTL expires.
-			pca.bestEffortRestore(ctx, key, lockVal, saved)
+			rca.bestEffortRestore(ctx, key, lockVal, saved)
 			return err
 		}
 		wrapped := wrapEnvelope(newVal, time.Since(start))
 
-		resp := setWithWriteLockScript.Exec(ctx, pca.client, []string{key}, []string{wrapped, strconv.FormatInt(ttl.Milliseconds(), 10), lockVal})
+		resp := setWithWriteLockScript.Exec(ctx, rca.client, []string{key}, []string{wrapped, strconv.FormatInt(ttl.Milliseconds(), 10), lockVal})
 		if err := resp.Error(); err != nil {
 			// CAS Lua errored mid-call; we may still hold the lock. Restore
 			// the prior value (DEL if none) — bestEffortUnlock would wipe a
 			// real prior value captured during acquire.
-			pca.bestEffortRestore(ctx, key, lockVal, saved)
+			rca.bestEffortRestore(ctx, key, lockVal, saved)
 			return fmt.Errorf("set key %q: %w", key, err)
 		}
 		casResult, ierr := resp.AsInt64()
 		if ierr != nil {
-			pca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
-			pca.bestEffortRestore(ctx, key, lockVal, saved)
+			rca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
+			rca.bestEffortRestore(ctx, key, lockVal, saved)
 			return fmt.Errorf("set key %q: parse response: %w", key, ierr)
 		}
 		if casResult == 0 {
-			pca.emitLockLost(key)
+			rca.emitLockLost(key)
 			return fmt.Errorf("key %q: %w", key, ErrLockLost)
 		}
 		return nil
@@ -93,40 +72,40 @@ func (pca *PrimeableCacheAside) Set(
 //   - saved: previous real value (for callback-error rollback), if any
 //   - retry: true when the caller should loop
 //   - err: terminal error (context cancellation or Redis failure)
-func (pca *PrimeableCacheAside) acquireSingleWriteLock(
+func (rca *cacheAside) acquireSingleWriteLock(
 	ctx context.Context,
 	key, lockVal, lockTTLMs string,
 ) (saved savedValue, retry bool, err error) {
-	waitChan, _ := pca.register(key)
+	waitChan, _ := rca.register(key)
 
-	resp := pca.client.DoCache(ctx, pca.client.B().Get().Key(key).Cache(), pca.lockTTL)
+	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), rca.lockTTL)
 	val, rerr := resp.ToString()
 	if rerr != nil && !rueidis.IsRedisNil(rerr) {
 		return savedValue{}, false, fmt.Errorf("read key %q: %w", key, rerr)
 	}
 
-	if !rueidis.IsRedisNil(rerr) && strings.HasPrefix(val, pca.lockPrefix) {
-		pca.emitLockContended(1)
-		return savedValue{}, true, pca.awaitLock(ctx, waitChan)
+	if !rueidis.IsRedisNil(rerr) && strings.HasPrefix(val, rca.lockPrefix) {
+		rca.emitLockContended(1)
+		return savedValue{}, true, rca.awaitLock(ctx, waitChan)
 	}
 
-	acquired, saved, err := pca.tryAcquireWriteLock(ctx, key, lockVal, lockTTLMs)
+	acquired, saved, err := rca.tryAcquireWriteLock(ctx, key, lockVal, lockTTLMs)
 	if err != nil {
 		return savedValue{}, false, err
 	}
 	if !acquired {
 		// Another lock appeared between DoCache and Exec.
-		pca.emitLockContended(1)
-		return savedValue{}, true, pca.awaitLock(ctx, waitChan)
+		rca.emitLockContended(1)
+		return savedValue{}, true, rca.awaitLock(ctx, waitChan)
 	}
 	return saved, false, nil
 }
 
-// SetMulti acquires write locks for all keys (in sorted order to avoid
+// setMulti acquires write locks for all keys (in sorted order to avoid
 // deadlocks), calls fn once with the held keys (order is undefined; sort if
 // you need stability), and atomically writes the returned values. Returns a
-// *BatchError on partial CAS failure.
-func (pca *PrimeableCacheAside) SetMulti(
+// *batchError on partial CAS failure.
+func (rca *cacheAside) setMulti(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []string,
@@ -136,11 +115,11 @@ func (pca *PrimeableCacheAside) SetMulti(
 		return nil
 	}
 
-	if err := pca.waitForReadLocks(ctx, keys); err != nil {
+	if err := rca.waitForReadLocks(ctx, keys); err != nil {
 		return err
 	}
 
-	lockValues, savedValues, err := pca.acquireMultiWriteLocks(ctx, keys)
+	lockValues, savedValues, err := rca.acquireMultiWriteLocks(ctx, keys)
 	if err != nil {
 		return err
 	}
@@ -148,7 +127,7 @@ func (pca *PrimeableCacheAside) SetMulti(
 	start := time.Now()
 	vals, err := fn(ctx, mapsx.Keys(lockValues))
 	if err != nil {
-		pca.restoreMultiValues(ctx, lockValues, savedValues)
+		rca.restoreMultiValues(ctx, lockValues, savedValues)
 		return err
 	}
 	delta := perValueDelta(time.Since(start), len(vals))
@@ -157,7 +136,7 @@ func (pca *PrimeableCacheAside) SetMulti(
 		wrappedVals[k] = wrapEnvelope(v, delta)
 	}
 
-	succeeded, failed := pca.setMultiValuesWithCAS(ctx, ttl, wrappedVals, lockValues)
+	succeeded, failed := rca.setMultiValuesWithCAS(ctx, ttl, wrappedVals, lockValues)
 
 	if len(succeeded) == len(lockValues) {
 		return nil
@@ -177,25 +156,25 @@ func (pca *PrimeableCacheAside) SetMulti(
 		}
 	}
 	if len(toRestore) > 0 {
-		pca.restoreMultiValues(ctx, toRestore, savedValues)
+		rca.restoreMultiValues(ctx, toRestore, savedValues)
 	}
 
-	return NewBatchError(failed, succeeded)
+	return newBatchError(failed, succeeded)
 }
 
-// ForceSet unconditionally writes value, bypassing locks. In-progress Get/Set
+// forceSet unconditionally writes value, bypassing locks. In-progress Get/Set
 // callers on the same key will see ErrLockLost and retry. ttl must be > 0
 // (Redis rejects PX 0); use Del to remove. The value is envelope-wrapped with
-// delta=0, so refresh-ahead falls back to the simple floor check. Prefer Set
+// delta=0, so refresh-ahead falls back to the simple floor check. Prefer set
 // when you need callback-error rollback.
-func (pca *PrimeableCacheAside) ForceSet(ctx context.Context, ttl time.Duration, key, value string) error {
-	return pca.client.Do(ctx, pca.client.B().Set().Key(key).Value(wrapEnvelope(value, 0)).Px(ttl).Build()).Error()
+func (rca *cacheAside) forceSet(ctx context.Context, ttl time.Duration, key, value string) error {
+	return rca.client.Do(ctx, rca.client.B().Set().Key(key).Value(wrapEnvelope(value, 0)).Px(ttl).Build()).Error()
 }
 
-// ForceSetMulti unconditionally writes values, bypassing locks. In-progress
+// forceSetMulti unconditionally writes values, bypassing locks. In-progress
 // Get/Set callers on the same keys will see ErrLockLost and retry. ttl must
-// be > 0. Returns a *BatchError on partial failure.
-func (pca *PrimeableCacheAside) ForceSetMulti(ctx context.Context, ttl time.Duration, values map[string]string) error {
+// be > 0. Returns a *batchError on partial failure.
+func (rca *cacheAside) forceSetMulti(ctx context.Context, ttl time.Duration, values map[string]string) error {
 	if len(values) == 0 {
 		return nil
 	}
@@ -204,14 +183,14 @@ func (pca *PrimeableCacheAside) ForceSetMulti(ctx context.Context, ttl time.Dura
 	keyOrder := make([]string, 0, len(values))
 	for key, val := range values {
 		keyOrder = append(keyOrder, key)
-		*cmdsP = append(*cmdsP, pca.client.B().Set().Key(key).Value(wrapEnvelope(val, 0)).Px(ttl).Build())
+		*cmdsP = append(*cmdsP, rca.client.B().Set().Key(key).Value(wrapEnvelope(val, 0)).Px(ttl).Build())
 	}
-	resps := pca.client.DoMulti(ctx, *cmdsP...)
+	resps := rca.client.DoMulti(ctx, *cmdsP...)
 	var failed map[string]error
 	succeeded := make([]string, 0, len(resps))
 	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
-			pca.logger.Error("ForceSetMulti key failed", "key", keyOrder[i], "error", err)
+			rca.logger.Error("ForceSetMulti key failed", "key", keyOrder[i], "error", err)
 			if failed == nil {
 				failed = make(map[string]error)
 			}
@@ -220,18 +199,18 @@ func (pca *PrimeableCacheAside) ForceSetMulti(ctx context.Context, ttl time.Dura
 		}
 		succeeded = append(succeeded, keyOrder[i])
 	}
-	return NewBatchError(failed, succeeded)
+	return newBatchError(failed, succeeded)
 }
 
 // waitForReadLocks batch-reads keys and waits out any that currently hold a
 // lock value. Registration must precede DoCache so onInvalidate can find the
 // lockEntries.
-func (pca *PrimeableCacheAside) waitForReadLocks(ctx context.Context, keys []string) error {
+func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string) error {
 	waitChansP := chanPool.Get(len(keys))
 	defer chanPool.Put(waitChansP)
 	waitChans := *waitChansP
 	for i, key := range keys {
-		waitChans[i], _ = pca.register(key)
+		waitChans[i], _ = rca.register(key)
 	}
 
 	multiP := cacheableTTLPool.Get(len(keys))
@@ -239,11 +218,11 @@ func (pca *PrimeableCacheAside) waitForReadLocks(ctx context.Context, keys []str
 	multi := *multiP
 	for i, key := range keys {
 		multi[i] = rueidis.CacheableTTL{
-			Cmd: pca.client.B().Get().Key(key).Cache(),
-			TTL: pca.lockTTL,
+			Cmd: rca.client.B().Get().Key(key).Cache(),
+			TTL: rca.lockTTL,
 		}
 	}
-	resps := pca.client.DoMultiCache(ctx, multi...)
+	resps := rca.client.DoMultiCache(ctx, multi...)
 
 	// Distinguish redis-nil (no lock) from real Redis errors so the latter
 	// surface to the caller instead of silently advancing against a broken cluster.
@@ -260,14 +239,14 @@ func (pca *PrimeableCacheAside) waitForReadLocks(ctx context.Context, keys []str
 			continue
 		}
 		if err != nil {
-			pca.logger.Error("waitForReadLocks read failed", "key", keys[i], "error", err)
+			rca.logger.Error("waitForReadLocks read failed", "key", keys[i], "error", err)
 			if firstErr == nil {
 				firstErr = err
 				firstErrKey = keys[i]
 			}
 			continue
 		}
-		if strings.HasPrefix(val, pca.lockPrefix) {
+		if strings.HasPrefix(val, rca.lockPrefix) {
 			*lockedChansP = append(*lockedChansP, waitChans[i])
 		}
 	}

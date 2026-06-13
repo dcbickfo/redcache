@@ -20,22 +20,8 @@ type tUser struct {
 	Name string `json:"name"`
 }
 
-func newTestCacheAside(t *testing.T) *redcache.CacheAside {
-	t.Helper()
-	c, err := redcache.NewRedCacheAside(
-		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.CacheAsideOption{LockTTL: 2 * time.Second},
-	)
-	if err != nil {
-		t.Fatalf("new cache: %v", err)
-	}
-	t.Cleanup(c.Close)
-	return c
-}
-
 func TestTyped_Get_LoadsAndCaches(t *testing.T) {
-	cache := newTestCacheAside(t)
-	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	key := "u:" + uuid.NewString()
 
 	var calls int
@@ -64,15 +50,13 @@ func TestTyped_Get_LoadsAndCaches(t *testing.T) {
 }
 
 func TestTyped_Get_DecodeErrorIsWrapped(t *testing.T) {
-	cache := newTestCacheAside(t)
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	// Seed garbage so the typed Get's decode call surfaces ErrDecode.
 	key := "decode:" + uuid.NewString()
-	if err := cache.Client().Do(context.Background(),
-		cache.Client().B().Set().Key(key).Value("not json").Px(time.Second).Build()).Error(); err != nil {
+	if err := users.Client().Do(context.Background(),
+		users.Client().B().Set().Key(key).Value("not json").Px(time.Second).Build()).Error(); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-
-	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
 
 	_, err := users.Get(context.Background(), time.Second, key, func(context.Context, string) (tUser, error) {
 		return tUser{}, errors.New("loader should not be called on decode failure of cache hit")
@@ -83,13 +67,12 @@ func TestTyped_Get_DecodeErrorIsWrapped(t *testing.T) {
 }
 
 func TestTyped_Get_DecodeErrorPreservesUnderlying(t *testing.T) {
-	cache := newTestCacheAside(t)
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	key := "decode-chain:" + uuid.NewString()
-	if err := cache.Client().Do(context.Background(),
-		cache.Client().B().Set().Key(key).Value("not json").Px(time.Second).Build()).Error(); err != nil {
+	if err := users.Client().Do(context.Background(),
+		users.Client().B().Set().Key(key).Value("not json").Px(time.Second).Build()).Error(); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
 	_, err := users.Get(context.Background(), time.Second, key,
 		func(context.Context, string) (tUser, error) { return tUser{}, nil },
 	)
@@ -106,8 +89,7 @@ func TestTyped_Get_DecodeErrorPreservesUnderlying(t *testing.T) {
 }
 
 func TestTyped_Del_RemovesEntry(t *testing.T) {
-	cache := newTestCacheAside(t)
-	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	key := "del:" + uuid.NewString()
 
 	loader := func(context.Context, string) (tUser, error) { return tUser{ID: 9, Name: "x"}, nil }
@@ -131,8 +113,7 @@ func TestTyped_Del_RemovesEntry(t *testing.T) {
 }
 
 func TestTyped_Touch_ExtendsTTL(t *testing.T) {
-	cache := newTestCacheAside(t)
-	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	key := "touch:" + uuid.NewString()
 
 	loader := func(context.Context, string) (tUser, error) { return tUser{ID: 9, Name: "x"}, nil }
@@ -158,21 +139,19 @@ func TestTyped_Touch_ExtendsTTL(t *testing.T) {
 }
 
 func TestTyped_RefreshAhead_FiresThroughTypedView(t *testing.T) {
-	c, err := redcache.NewRedCacheAside(
+	users, err := redcache.NewString[tUser](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.CacheAsideOption{
-			LockTTL:              500 * time.Millisecond,
-			RefreshAfterFraction: 0.1,
-			RefreshWorkers:       1,
-			RefreshQueueSize:     8,
-		},
+		redcache.JSONCodec[tUser]{},
+		redcache.WithLockTTL(500*time.Millisecond),
+		redcache.WithRefreshAfterFraction(0.1),
+		redcache.WithRefreshWorkers(1),
+		redcache.WithRefreshQueueSize(8),
 	)
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	defer c.Close()
+	defer users.Close()
 
-	users := redcache.NewStringTyped[tUser](c, redcache.JSONCodec[tUser]{})
 	key := "refresh:" + uuid.NewString()
 
 	var calls int32
@@ -207,8 +186,7 @@ func TestTyped_RefreshAhead_FiresThroughTypedView(t *testing.T) {
 }
 
 func TestTyped_GetMulti_LoadsAndCaches(t *testing.T) {
-	cache := newTestCacheAside(t)
-	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	prefix := uuid.NewString() + ":"
 	keys := []string{prefix + "a", prefix + "b", prefix + "c"}
 
@@ -246,12 +224,20 @@ func TestTyped_GetMulti_LoadsAndCaches(t *testing.T) {
 }
 
 func TestTyped_GetMulti_IntKeys(t *testing.T) {
-	cache := newTestCacheAside(t)
 	prefix := uuid.NewString() + ":"
 	codec := redcache.KeyCodecFunc[int](func(i int) (string, error) {
 		return prefix + strconv.Itoa(i), nil
 	})
-	users := redcache.NewTyped[int, tUser](cache, codec, redcache.JSONCodec[tUser]{})
+	users, err := redcache.New[int, tUser](
+		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+		codec,
+		redcache.JSONCodec[tUser]{},
+		redcache.WithLockTTL(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	t.Cleanup(users.Close)
 
 	loader := func(_ context.Context, missing []int) (map[int]tUser, error) {
 		out := make(map[int]tUser, len(missing))
@@ -270,8 +256,7 @@ func TestTyped_GetMulti_IntKeys(t *testing.T) {
 }
 
 func TestTyped_DelMulti_RemovesAll(t *testing.T) {
-	cache := newTestCacheAside(t)
-	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	prefix := uuid.NewString() + ":"
 	keys := []string{prefix + "a", prefix + "b"}
 
@@ -302,8 +287,7 @@ func TestTyped_DelMulti_RemovesAll(t *testing.T) {
 }
 
 func TestTyped_TouchMulti_ExtendsTTL(t *testing.T) {
-	cache := newTestCacheAside(t)
-	users := redcache.NewStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	prefix := uuid.NewString() + ":"
 	keys := []string{prefix + "a", prefix + "b"}
 

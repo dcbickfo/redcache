@@ -10,14 +10,13 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-func ExampleCacheAside_Get() {
-	client, err := redcache.NewRedCacheAside(
+func ExampleNewString() {
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{
 			InitAddress: []string{"127.0.0.1:6379"},
 		},
-		redcache.CacheAsideOption{
-			LockTTL: 5 * time.Second,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(5*time.Second),
 	)
 	if err != nil {
 		panic(err)
@@ -35,14 +34,13 @@ func ExampleCacheAside_Get() {
 	// Output: hello
 }
 
-func ExampleCacheAside_GetMulti() {
-	client, err := redcache.NewRedCacheAside(
+func ExampleNewString_getMulti() {
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{
 			InitAddress: []string{"127.0.0.1:6379"},
 		},
-		redcache.CacheAsideOption{
-			LockTTL: 5 * time.Second,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(5*time.Second),
 	)
 	if err != nil {
 		panic(err)

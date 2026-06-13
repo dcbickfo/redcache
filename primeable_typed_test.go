@@ -12,22 +12,22 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-func newTestPrimeable(t *testing.T) *redcache.PrimeableCacheAside {
+func newTypedCache[V any](t *testing.T, valCodec redcache.Codec[V]) redcache.Cache[string, V] {
 	t.Helper()
-	c, err := redcache.NewPrimeableCacheAside(
+	c, err := redcache.NewString[V](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.CacheAsideOption{LockTTL: 2 * time.Second},
+		valCodec,
+		redcache.WithLockTTL(2*time.Second),
 	)
 	if err != nil {
-		t.Fatalf("new primeable: %v", err)
+		t.Fatalf("new cache: %v", err)
 	}
 	t.Cleanup(c.Close)
 	return c
 }
 
 func TestPrimeableTyped_Set_PopulatesAndCaches(t *testing.T) {
-	pca := newTestPrimeable(t)
-	users := redcache.NewPrimeableStringTyped[tUser](pca, redcache.JSONCodec[tUser]{})
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	key := "set:" + uuid.NewString()
 
 	if err := users.Set(context.Background(), time.Second, key,
@@ -51,8 +51,7 @@ func TestPrimeableTyped_Set_PopulatesAndCaches(t *testing.T) {
 }
 
 func TestPrimeableTyped_ForceSet_OverwritesUnconditionally(t *testing.T) {
-	pca := newTestPrimeable(t)
-	users := redcache.NewPrimeableStringTyped[tUser](pca, redcache.JSONCodec[tUser]{})
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	key := "force:" + uuid.NewString()
 
 	if err := users.ForceSet(context.Background(), time.Second, key, tUser{ID: 1, Name: "a"}); err != nil {
@@ -74,8 +73,7 @@ func TestPrimeableTyped_ForceSet_OverwritesUnconditionally(t *testing.T) {
 }
 
 func TestPrimeableTyped_Set_EncodeFailureReleasesLock(t *testing.T) {
-	pca := newTestPrimeable(t)
-	users := redcache.NewPrimeableStringTyped[badEncode](pca, badEncodeCodec{})
+	users := newTypedCache[badEncode](t, badEncodeCodec{})
 	key := "encfail:" + uuid.NewString()
 
 	want := errors.New("nope")
@@ -104,8 +102,7 @@ func (badEncodeCodec) Encode(b badEncode) ([]byte, error) {
 func (badEncodeCodec) Decode(b []byte) (badEncode, error) { return badEncode{}, nil }
 
 func TestPrimeableTyped_SetMulti_PopulatesAll(t *testing.T) {
-	pca := newTestPrimeable(t)
-	users := redcache.NewPrimeableStringTyped[tUser](pca, redcache.JSONCodec[tUser]{})
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	prefix := uuid.NewString() + ":"
 	keys := []string{prefix + "a", prefix + "b"}
 
@@ -138,15 +135,14 @@ func TestPrimeableTyped_SetMulti_PopulatesAll(t *testing.T) {
 // TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces verifies the typed
 // wrapper converts *BatchError to *BatchKeyError[string] on partial CAS failure.
 func TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
-	pca := newTestPrimeable(t)
-	users := redcache.NewPrimeableStringTyped[tUser](pca, redcache.JSONCodec[tUser]{})
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	prefix := uuid.NewString() + ":"
 	keys := []string{prefix + "a", prefix + "b"}
 
 	err := users.SetMulti(context.Background(), time.Second, keys,
 		func(_ context.Context, gotKeys []string) (map[string]tUser, error) {
 			// Steal the lock on keys[1] before our CAS-set runs.
-			if serr := pca.ForceSet(context.Background(), time.Second, keys[1], "stolen"); serr != nil {
+			if serr := users.ForceSet(context.Background(), time.Second, keys[1], tUser{Name: "stolen"}); serr != nil {
 				t.Fatalf("steal force set: %v", serr)
 			}
 			out := make(map[string]tUser, len(gotKeys))
@@ -172,8 +168,7 @@ func TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
 }
 
 func TestPrimeableTyped_ForceSetMulti_OverwritesAll(t *testing.T) {
-	pca := newTestPrimeable(t)
-	users := redcache.NewPrimeableStringTyped[tUser](pca, redcache.JSONCodec[tUser]{})
+	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	prefix := uuid.NewString() + ":"
 	in := map[string]tUser{
 		prefix + "a": {ID: 1, Name: "a"},

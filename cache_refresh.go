@@ -24,7 +24,7 @@ type refreshJob struct {
 // startRefreshWorkers launches n workers that drain refreshQueue, exiting when
 // refreshDone is closed. The data channel is never closed because concurrent
 // send + close races even with recover.
-func (rca *CacheAside) startRefreshWorkers(n int) {
+func (rca *cacheAside) startRefreshWorkers(n int) {
 	for range n {
 		rca.refreshWg.Add(1)
 		go func() {
@@ -44,8 +44,19 @@ func (rca *CacheAside) startRefreshWorkers(n int) {
 // refreshKeyFor returns the distributed refresh-lock key for a data key.
 // The data key is wrapped in a hash tag ("{key}") so the refresh lock hashes
 // to the same cluster slot as the data key.
-func (rca *CacheAside) refreshKeyFor(key string) string {
+func (rca *cacheAside) refreshKeyFor(key string) string {
 	return rca.refreshPrefix + "{" + key + "}"
+}
+
+// refreshFnTimeout returns the timeout bounding a refresh-ahead callback. It
+// defaults to the data ttl (so a slow value gets the same compute budget as a
+// cold Get) rather than lockTTL, which would silently cancel any fn slower than
+// the lock. WithRefreshTimeout overrides it.
+func (rca *cacheAside) refreshFnTimeout(ttl time.Duration) time.Duration {
+	if rca.refreshTimeout > 0 {
+		return rca.refreshTimeout
+	}
+	return ttl
 }
 
 // runRefreshJob runs a refresh-ahead job, recovering from any panic so a
@@ -54,7 +65,7 @@ func (rca *CacheAside) refreshKeyFor(key string) string {
 //
 // Defer order is LIFO: refreshing-map cleanup runs before panic recovery, so
 // in-flight markers are released even when the callback panics.
-func (rca *CacheAside) runRefreshJob(job refreshJob) {
+func (rca *cacheAside) runRefreshJob(job refreshJob) {
 	defer func() {
 		if r := recover(); r != nil {
 			rca.logger.Error("refresh worker panic recovered", "keys", job.keys, "panic", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
@@ -81,7 +92,7 @@ func (rca *CacheAside) runRefreshJob(job refreshJob) {
 // al. (VLDB 2015): refresh when remaining_pttl <= delta * beta * Exp(1). Falls
 // back to "always refresh below floor" when delta=0 (legacy values) or
 // RefreshBeta=0 (XFetch disabled).
-func (rca *CacheAside) shouldRefresh(cachePTTL int64, ttl time.Duration, delta time.Duration) bool {
+func (rca *cacheAside) shouldRefresh(cachePTTL int64, ttl time.Duration, delta time.Duration) bool {
 	if rca.refreshAfter == 0 || cachePTTL <= 0 {
 		return false
 	}
@@ -103,7 +114,7 @@ func (rca *CacheAside) shouldRefresh(cachePTTL int64, ttl time.Duration, delta t
 //
 // Safe against concurrent Close: the closing flag is a fast-exit optimization;
 // correctness comes from enqueueRefresh's select on refreshDone.
-func (rca *CacheAside) triggerRefresh(
+func (rca *cacheAside) triggerRefresh(
 	ctx context.Context,
 	ttl time.Duration,
 	key string,
@@ -129,7 +140,7 @@ func (rca *CacheAside) triggerRefresh(
 // enqueueRefresh sends a job to the refresh queue. The select includes a
 // refreshDone case so a concurrent Close unblocks senders without ever
 // closing the data channel (sends on closed channels panic).
-func (rca *CacheAside) enqueueRefresh(job refreshJob, keys []string) {
+func (rca *cacheAside) enqueueRefresh(job refreshJob, keys []string) {
 	select {
 	case rca.refreshQueue <- job:
 		rca.emitRefreshTriggered(len(keys))
@@ -146,21 +157,24 @@ func (rca *CacheAside) enqueueRefresh(job refreshJob, keys []string) {
 	}
 }
 
-// doSingleRefresh acquires a distributed refresh lock, calls fn, and writes the result.
-func (rca *CacheAside) doSingleRefresh(
+// doSingleRefresh acquires a distributed refresh lock, calls fn, and writes the
+// result. The fn runs under refreshFnTimeout (default = data ttl); the refresh
+// lock SET NX uses lockTTL; the back-write and lock cleanup use cleanupCtx so a
+// slow-but-successful fn still records its value.
+func (rca *cacheAside) doSingleRefresh(
 	ctx context.Context,
 	ttl time.Duration,
 	key string,
 	fn func(ctx context.Context, key string) (string, error),
 ) {
-	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rca.lockTTL)
-	defer cancel()
+	lockCtx, lockCancel := rca.cleanupCtx(ctx)
+	defer lockCancel()
 
 	// Distributed dedup: SET NX on a separate refresh lock key. IsRedisNil =
 	// "another node is refreshing" (healthy); other errors = real Redis
 	// problems, reported separately so operators can distinguish them.
 	refreshKey := rca.refreshKeyFor(key)
-	err := rca.client.Do(refreshCtx, rca.client.B().Set().Key(refreshKey).Value("1").Nx().Px(rca.lockTTL).Build()).Error()
+	err := rca.client.Do(lockCtx, rca.client.B().Set().Key(refreshKey).Value("1").Nx().Px(rca.lockTTL).Build()).Error()
 	if err != nil {
 		if rueidis.IsRedisNil(err) {
 			rca.emitRefreshSkipped(1)
@@ -178,8 +192,13 @@ func (rca *CacheAside) doSingleRefresh(
 		}
 	}()
 
+	// The fn runs under its own timeout, decoupled from the back-write below so
+	// a fn that runs longer than lockTTL still has its result written.
+	fnCtx, fnCancel := context.WithTimeout(context.WithoutCancel(ctx), rca.refreshFnTimeout(ttl))
+	defer fnCancel()
+
 	start := time.Now()
-	val, err := fn(refreshCtx, key)
+	val, err := fn(fnCtx, key)
 	if err != nil {
 		rca.logger.Error("refresh-ahead callback failed", "key", key, "error", err)
 		rca.emitRefreshError(key)
@@ -187,8 +206,10 @@ func (rca *CacheAside) doSingleRefresh(
 	}
 	wrapped := wrapEnvelope(val, time.Since(start))
 
+	setCtx, setCancel := rca.cleanupCtx(ctx)
+	defer setCancel()
 	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
-	if err := refreshAheadSetScript.Exec(refreshCtx, rca.client, []string{key}, []string{wrapped, ttlMs, rca.lockPrefix}).Error(); err != nil {
+	if err := refreshAheadSetScript.Exec(setCtx, rca.client, []string{key}, []string{wrapped, ttlMs, rca.lockPrefix}).Error(); err != nil {
 		rca.logger.Error("refresh-ahead set failed", "key", key, "error", err)
 		rca.emitRefreshError(key)
 	}
@@ -197,7 +218,7 @@ func (rca *CacheAside) doSingleRefresh(
 // triggerMultiRefresh enqueues a multi-key refresh job. Two-level dedup: local
 // syncx.Map + distributed SET NX on separate refresh keys. Drops silently when
 // the queue is full. Safe against concurrent Close (see triggerRefresh).
-func (rca *CacheAside) triggerMultiRefresh(
+func (rca *cacheAside) triggerMultiRefresh(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []string,
@@ -228,24 +249,30 @@ func (rca *CacheAside) triggerMultiRefresh(
 	}, toRefresh)
 }
 
-// doMultiRefresh acquires distributed refresh locks, calls fn, and writes results.
-func (rca *CacheAside) doMultiRefresh(
+// doMultiRefresh acquires distributed refresh locks, calls fn, and writes
+// results. The fn runs under refreshFnTimeout (default = data ttl); the locks
+// use lockTTL and the back-write uses cleanupCtx so a slow-but-successful fn
+// still records its values.
+func (rca *cacheAside) doMultiRefresh(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []string,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
 ) {
-	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rca.lockTTL)
-	defer cancel()
+	lockCtx, lockCancel := rca.cleanupCtx(ctx)
+	defer lockCancel()
 
-	lockedKeys := rca.acquireRefreshLocks(refreshCtx, keys)
+	lockedKeys := rca.acquireRefreshLocks(lockCtx, keys)
 	if len(lockedKeys) == 0 {
 		return
 	}
 	defer rca.deleteRefreshLocks(ctx, lockedKeys)
 
+	fnCtx, fnCancel := context.WithTimeout(context.WithoutCancel(ctx), rca.refreshFnTimeout(ttl))
+	defer fnCancel()
+
 	start := time.Now()
-	vals, err := fn(refreshCtx, lockedKeys)
+	vals, err := fn(fnCtx, lockedKeys)
 	if err != nil {
 		rca.logger.Error("refresh-ahead multi callback failed", "error", err)
 		for _, key := range lockedKeys {
@@ -254,12 +281,14 @@ func (rca *CacheAside) doMultiRefresh(
 		return
 	}
 
-	rca.setRefreshedValues(refreshCtx, ttl, vals, perValueDelta(time.Since(start), len(vals)))
+	setCtx, setCancel := rca.cleanupCtx(ctx)
+	defer setCancel()
+	rca.setRefreshedValues(setCtx, ttl, vals, perValueDelta(time.Since(start), len(vals)))
 }
 
 // acquireRefreshLocks batch-acquires distributed SET NX locks for refresh keys,
 // distinguishing IsRedisNil (healthy dedup) from real Redis errors.
-func (rca *CacheAside) acquireRefreshLocks(ctx context.Context, keys []string) []string {
+func (rca *cacheAside) acquireRefreshLocks(ctx context.Context, keys []string) []string {
 	cmdsP := commandsPool.Get(len(keys))
 	defer commandsPool.Put(cmdsP)
 	cmds := *cmdsP
@@ -288,7 +317,7 @@ func (rca *CacheAside) acquireRefreshLocks(ctx context.Context, keys []string) [
 
 // deleteRefreshLocks removes distributed refresh lock keys (best effort).
 // A stuck refresh lock disables refresh-ahead for that key for one lockTTL.
-func (rca *CacheAside) deleteRefreshLocks(ctx context.Context, keys []string) {
+func (rca *cacheAside) deleteRefreshLocks(ctx context.Context, keys []string) {
 	cleanupCtx, cleanupCancel := rca.cleanupCtx(ctx)
 	defer cleanupCancel()
 	delCmdsP := commandsPool.Get(len(keys))
@@ -308,7 +337,7 @@ func (rca *CacheAside) deleteRefreshLocks(ctx context.Context, keys []string) {
 // setRefreshedValues writes refreshed values via a CAS-style Lua script that
 // skips keys currently holding a lock value (so concurrent Get/Set is not
 // stomped) or missing entirely (let Get-on-miss handle population).
-func (rca *CacheAside) setRefreshedValues(ctx context.Context, ttl time.Duration, vals map[string]string, delta time.Duration) {
+func (rca *cacheAside) setRefreshedValues(ctx context.Context, ttl time.Duration, vals map[string]string, delta time.Duration) {
 	if len(vals) == 0 {
 		return
 	}

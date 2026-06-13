@@ -31,7 +31,7 @@ func TestShouldRefresh_Deterministic(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			rca := &CacheAside{refreshAfter: tt.refreshAfter, refreshBeta: tt.refreshBeta}
+			rca := &cacheAside{refreshAfter: tt.refreshAfter, refreshBeta: tt.refreshBeta}
 			got := rca.shouldRefresh(tt.cachePTTL, tt.ttl, tt.delta)
 			if got != tt.want {
 				t.Errorf("shouldRefresh(pttl=%d ttl=%v delta=%v) = %v, want %v",
@@ -46,7 +46,7 @@ func TestShouldRefresh_Deterministic(t *testing.T) {
 func TestShouldRefresh_XFetch(t *testing.T) {
 	t.Parallel()
 	const trials = 5000
-	rca := &CacheAside{refreshAfter: 0.8, refreshBeta: 1.0}
+	rca := &cacheAside{refreshAfter: 0.8, refreshBeta: 1.0}
 	ttl := time.Second
 
 	t.Run("near expiry refreshes almost always", func(t *testing.T) {
@@ -80,8 +80,8 @@ func TestShouldRefresh_XFetch(t *testing.T) {
 
 	t.Run("higher beta increases refresh rate", func(t *testing.T) {
 		t.Parallel()
-		low := &CacheAside{refreshAfter: 0.8, refreshBeta: 1.0}
-		high := &CacheAside{refreshAfter: 0.8, refreshBeta: 10.0}
+		low := &cacheAside{refreshAfter: 0.8, refreshBeta: 1.0}
+		high := &cacheAside{refreshAfter: 0.8, refreshBeta: 10.0}
 		var lowHits, highHits int
 		for range trials {
 			if low.shouldRefresh(50, ttl, 10*time.Millisecond) {
@@ -101,58 +101,58 @@ func TestValidateRefreshDefaults(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
-		opt         CacheAsideOption
+		cfg         config
 		wantErr     bool
 		wantWorkers int
 		wantQSize   int
 	}{
 		{
-			name:    "disabled (RefreshAfterFraction=0)",
-			opt:     CacheAsideOption{RefreshAfterFraction: 0},
+			name:    "disabled (refreshAfterFraction=0)",
+			cfg:     config{refreshAfterFraction: 0},
 			wantErr: false,
 		},
 		{
 			name:    "negative fraction rejected",
-			opt:     CacheAsideOption{RefreshAfterFraction: -0.1},
+			cfg:     config{refreshAfterFraction: -0.1},
 			wantErr: true,
 		},
 		{
 			name:    "fraction of 1.0 rejected",
-			opt:     CacheAsideOption{RefreshAfterFraction: 1.0},
+			cfg:     config{refreshAfterFraction: 1.0},
 			wantErr: true,
 		},
 		{
 			name:    "fraction above 1.0 rejected",
-			opt:     CacheAsideOption{RefreshAfterFraction: 1.5},
+			cfg:     config{refreshAfterFraction: 1.5},
 			wantErr: true,
 		},
 		{
 			name:        "fraction near upper bound",
-			opt:         CacheAsideOption{RefreshAfterFraction: 0.999},
+			cfg:         config{refreshAfterFraction: 0.999},
 			wantErr:     false,
 			wantWorkers: 4,
 			wantQSize:   64,
 		},
 		{
 			name:    "negative workers rejected",
-			opt:     CacheAsideOption{RefreshAfterFraction: 0.8, RefreshWorkers: -1},
+			cfg:     config{refreshAfterFraction: 0.8, refreshWorkers: -1},
 			wantErr: true,
 		},
 		{
 			name:    "negative queue size rejected",
-			opt:     CacheAsideOption{RefreshAfterFraction: 0.8, RefreshQueueSize: -1},
+			cfg:     config{refreshAfterFraction: 0.8, refreshQueueSize: -1},
 			wantErr: true,
 		},
 		{
 			name:        "defaults applied when enabled",
-			opt:         CacheAsideOption{RefreshAfterFraction: 0.8},
+			cfg:         config{refreshAfterFraction: 0.8},
 			wantErr:     false,
 			wantWorkers: 4,
 			wantQSize:   64,
 		},
 		{
 			name:        "explicit workers/queue size honored",
-			opt:         CacheAsideOption{RefreshAfterFraction: 0.8, RefreshWorkers: 8, RefreshQueueSize: 128},
+			cfg:         config{refreshAfterFraction: 0.8, refreshWorkers: 8, refreshQueueSize: 128},
 			wantErr:     false,
 			wantWorkers: 8,
 			wantQSize:   128,
@@ -162,19 +162,19 @@ func TestValidateRefreshDefaults(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			opt := tt.opt
-			err := validateRefreshDefaults(&opt)
+			cfg := tt.cfg
+			err := cfg.applyRefreshDefaults()
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("validateRefreshDefaults() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf("applyRefreshDefaults() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if tt.wantErr {
 				return
 			}
-			if opt.RefreshWorkers != tt.wantWorkers {
-				t.Errorf("RefreshWorkers = %d, want %d", opt.RefreshWorkers, tt.wantWorkers)
+			if cfg.refreshWorkers != tt.wantWorkers {
+				t.Errorf("refreshWorkers = %d, want %d", cfg.refreshWorkers, tt.wantWorkers)
 			}
-			if opt.RefreshQueueSize != tt.wantQSize {
-				t.Errorf("RefreshQueueSize = %d, want %d", opt.RefreshQueueSize, tt.wantQSize)
+			if cfg.refreshQueueSize != tt.wantQSize {
+				t.Errorf("refreshQueueSize = %d, want %d", cfg.refreshQueueSize, tt.wantQSize)
 			}
 		})
 	}
@@ -197,7 +197,7 @@ func TestRefreshKeyFor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			rca := &CacheAside{refreshPrefix: tt.prefix}
+			rca := &cacheAside{refreshPrefix: tt.prefix}
 			got := rca.refreshKeyFor(tt.key)
 			if got != tt.want {
 				t.Errorf("refreshKeyFor(%q) = %q, want %q", tt.key, got, tt.want)

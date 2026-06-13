@@ -20,15 +20,14 @@ import (
 // closing-flag/recover guard or Close's closeOnce would surface as a panic.
 func TestCacheAside_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	t.Parallel()
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{
-			LockTTL:              2 * time.Second,
-			RefreshAfterFraction: 0.01, // refresh on virtually every Get
-			RefreshBeta:          0,
-			RefreshWorkers:       2,
-			RefreshQueueSize:     4, // small queue maximizes the close-during-send window
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(2*time.Second),
+		redcache.WithRefreshAfterFraction(0.01), // refresh on virtually every Get
+		redcache.WithRefreshBeta(0),
+		redcache.WithRefreshWorkers(2),
+		redcache.WithRefreshQueueSize(4), // small queue maximizes the close-during-send window
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Client().Close() })
@@ -85,9 +84,11 @@ func TestCacheAside_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 func TestCacheAside_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{LockTTL: 2 * time.Second, Metrics: metrics},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(2*time.Second),
+		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -114,9 +115,11 @@ func TestCacheAside_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 func TestCacheAside_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{LockTTL: 2 * time.Second, Metrics: metrics},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(2*time.Second),
+		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -147,9 +150,11 @@ func TestCacheAside_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 func TestCacheAside_EmptyValueIsCacheHit(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
-	pca, err := redcache.NewPrimeableCacheAside(
+	pca, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{LockTTL: 2 * time.Second, Metrics: metrics},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(2*time.Second),
+		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -238,9 +243,11 @@ func TestPrimeableCacheAside_Set_RollbackPreservesPTTL(t *testing.T) {
 func TestCacheAside_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
-	pca, err := redcache.NewPrimeableCacheAside(
+	pca, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{LockTTL: 2 * time.Second, Metrics: metrics},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(2*time.Second),
+		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -275,9 +282,10 @@ func TestCacheAside_GetMulti_CASMismatchDropsKey(t *testing.T) {
 // completes under a cancelled caller ctx (bestEffortRestore uses cleanupCtx).
 func TestPrimeableCacheAside_Set_RollbackSurvivesContextCancel(t *testing.T) {
 	t.Parallel()
-	client, err := redcache.NewPrimeableCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{LockTTL: 5 * time.Second},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(5*time.Second),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

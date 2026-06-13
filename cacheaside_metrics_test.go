@@ -56,12 +56,11 @@ func (m *capturingMetrics) RefreshError(key string) {
 func TestMetrics_HitAndMiss(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{
-			LockTTL: time.Second,
-			Metrics: metrics,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(time.Second),
+		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Client().Close() })
@@ -86,14 +85,13 @@ func TestMetrics_HitAndMiss(t *testing.T) {
 func TestMetrics_RefreshTriggered(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{
-			LockTTL:              time.Second * 2,
-			RefreshAfterFraction: 0.01, // refresh almost immediately
-			RefreshBeta:          0,    // disable XFetch for determinism
-			Metrics:              metrics,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(time.Second*2),
+		redcache.WithRefreshAfterFraction(0.01), // refresh almost immediately
+		redcache.WithRefreshBeta(0),             // disable XFetch for determinism
+		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -124,14 +122,13 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{
-			LockTTL:              time.Second * 2,
-			RefreshAfterFraction: 0.01,
-			RefreshBeta:          0,
-			Metrics:              metrics,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(time.Second*2),
+		redcache.WithRefreshAfterFraction(0.01),
+		redcache.WithRefreshBeta(0),
+		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -173,14 +170,13 @@ func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
 func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{
-			LockTTL:              time.Second * 2,
-			RefreshAfterFraction: 0.01,
-			RefreshBeta:          0,
-			Metrics:              metrics,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(time.Second*2),
+		redcache.WithRefreshAfterFraction(0.01),
+		redcache.WithRefreshBeta(0),
+		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -222,16 +218,15 @@ func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{
-			LockTTL:              time.Second * 3,
-			RefreshAfterFraction: 0.01, // refresh almost immediately
-			RefreshBeta:          0,
-			RefreshWorkers:       1,
-			RefreshQueueSize:     1,
-			Metrics:              metrics,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(time.Second*3),
+		redcache.WithRefreshAfterFraction(0.01), // refresh almost immediately
+		redcache.WithRefreshBeta(0),
+		redcache.WithRefreshWorkers(1),
+		redcache.WithRefreshQueueSize(1),
+		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -281,12 +276,11 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 func TestMetrics_LockWaitDuration(t *testing.T) {
 	t.Parallel()
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{
-			LockTTL: 2 * time.Second,
-			Metrics: metrics,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(2*time.Second),
+		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

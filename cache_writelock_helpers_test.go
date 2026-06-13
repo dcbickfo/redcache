@@ -12,11 +12,11 @@ import (
 
 var helperAddr = []string{"127.0.0.1:6379"}
 
-func newHelperPCA(t *testing.T) *PrimeableCacheAside {
+func newHelperPCA(t *testing.T) *cacheAside {
 	t.Helper()
-	pca, err := NewPrimeableCacheAside(
+	pca, err := newCacheAside(
 		rueidis.ClientOption{InitAddress: helperAddr},
-		CacheAsideOption{LockTTL: 2 * time.Second},
+		newConfig(WithLockTTL(2*time.Second)),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

@@ -37,7 +37,7 @@ func TestJSONCodec_DecodeInvalidJSON(t *testing.T) {
 }
 
 func TestBytesCodec_Identity(t *testing.T) {
-	c := redcache.BytesCodec{}
+	c := redcache.UnsafeBytesCodec{}
 	in := []byte("hello \x00 world")
 	b, err := c.Encode(in)
 	if err != nil || !bytes.Equal(b, in) {

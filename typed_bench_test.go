@@ -182,8 +182,7 @@ func BenchmarkTypedGet_Codec(b *testing.B) {
 	payload := `{"id":1,"name":"alice"}`
 
 	b.Run("json", func(b *testing.B) {
-		cache := newBenchPrimeable(b)
-		users := redcache.NewPrimeableStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+		users := newBenchBase(b)
 		key := "bench:typed:codec:json:" + uuid.NewString()
 		if err := users.ForceSet(ctx, time.Minute, key, benchTUser); err != nil {
 			b.Fatal(err)
@@ -197,8 +196,11 @@ func BenchmarkTypedGet_Codec(b *testing.B) {
 	})
 
 	b.Run("bytes", func(b *testing.B) {
-		cache := newBenchPrimeable(b)
-		users := redcache.NewPrimeableTyped[string, []byte](cache, redcache.StringKeyCodec{}, redcache.BytesCodec{})
+		users, err := redcache.NewBytes(rueidisOptForBench(), redcache.WithLockTTL(2*time.Second))
+		if err != nil {
+			b.Fatalf("new cache: %v", err)
+		}
+		b.Cleanup(users.Close)
 		key := "bench:typed:codec:bytes:" + uuid.NewString()
 		if err := users.ForceSet(ctx, time.Minute, key, []byte(payload)); err != nil {
 			b.Fatal(err)
@@ -215,8 +217,11 @@ func BenchmarkTypedGet_Codec(b *testing.B) {
 	})
 
 	b.Run("string", func(b *testing.B) {
-		cache := newBenchPrimeable(b)
-		users := redcache.NewPrimeableStringTyped[string](cache, redcache.StringCodec{})
+		users, err := redcache.NewString[string](rueidisOptForBench(), redcache.StringCodec{}, redcache.WithLockTTL(2*time.Second))
+		if err != nil {
+			b.Fatalf("new cache: %v", err)
+		}
+		b.Cleanup(users.Close)
 		key := "bench:typed:codec:string:" + uuid.NewString()
 		if err := users.ForceSet(ctx, time.Minute, key, payload); err != nil {
 			b.Fatal(err)
@@ -233,20 +238,20 @@ func BenchmarkTypedGet_Codec(b *testing.B) {
 	})
 }
 
-func newBenchTypedJSON(b *testing.B) *redcache.PrimeableTyped[string, tUser] {
+func newBenchTypedJSON(b *testing.B) redcache.Cache[string, tUser] {
 	b.Helper()
-	cache := newBenchPrimeable(b)
-	return redcache.NewPrimeableStringTyped[tUser](cache, redcache.JSONCodec[tUser]{})
+	return newBenchBase(b)
 }
 
-func newBenchPrimeable(b *testing.B) *redcache.PrimeableCacheAside {
+func newBenchBase(b *testing.B) redcache.Cache[string, tUser] {
 	b.Helper()
-	c, err := redcache.NewPrimeableCacheAside(
+	c, err := redcache.NewString[tUser](
 		rueidisOptForBench(),
-		redcache.CacheAsideOption{LockTTL: 2 * time.Second},
+		redcache.JSONCodec[tUser]{},
+		redcache.WithLockTTL(2*time.Second),
 	)
 	if err != nil {
-		b.Fatalf("new primeable: %v", err)
+		b.Fatalf("new cache: %v", err)
 	}
 	b.Cleanup(c.Close)
 	return c

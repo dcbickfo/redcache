@@ -14,7 +14,7 @@ import (
 	"github.com/dcbickfo/redcache/internal/cmdx"
 )
 
-// savedValue captures a key's previous value for rollback after a Set callback
+// savedValue captures a key's previous value for rollback after a set callback
 // failure. The pttl is preserved so a restored value keeps its original TTL.
 type savedValue struct {
 	val     string
@@ -24,8 +24,8 @@ type savedValue struct {
 
 // tryAcquireWriteLock attempts to acquire a write lock on a single key,
 // returning the previous value (with PTTL) for rollback.
-func (pca *PrimeableCacheAside) tryAcquireWriteLock(ctx context.Context, key, lockVal, lockTTLMs string) (bool, savedValue, error) {
-	resp := acquireWriteLockWithBackupScript.Exec(ctx, pca.client, []string{key}, []string{lockVal, lockTTLMs, pca.lockPrefix})
+func (rca *cacheAside) tryAcquireWriteLock(ctx context.Context, key, lockVal, lockTTLMs string) (bool, savedValue, error) {
+	resp := acquireWriteLockWithBackupScript.Exec(ctx, rca.client, []string{key}, []string{lockVal, lockTTLMs, rca.lockPrefix})
 	arr, err := resp.ToArray()
 	if err != nil {
 		return false, savedValue{}, fmt.Errorf("write lock for key %q: %w", key, err)
@@ -35,18 +35,18 @@ func (pca *PrimeableCacheAside) tryAcquireWriteLock(ctx context.Context, key, lo
 	}
 	success, ierr := arr[0].AsInt64()
 	if ierr != nil {
-		pca.logger.Error("unexpected non-integer in lock-acquire response", "key", key, "error", ierr)
+		rca.logger.Error("unexpected non-integer in lock-acquire response", "key", key, "error", ierr)
 		return false, savedValue{}, fmt.Errorf("write lock for key %q: parse success: %w", key, ierr)
 	}
 	if success == 0 {
 		return false, savedValue{}, nil
 	}
-	saved := parseBackup(pca.logger, key, arr[1], arr[2])
+	saved := parseBackup(rca.logger, key, arr[1], arr[2])
 	return true, saved, nil
 }
 
 // parseBackup converts the (value, pttl) pair from the acquire script into a
-// savedValue. Redis-nil and parse errors both surface as present=false, so Set
+// savedValue. Redis-nil and parse errors both surface as present=false, so set
 // will DEL on rollback rather than restoring an indeterminate value.
 func parseBackup(logger Logger, key string, valMsg, pttlMsg rueidis.RedisMessage) savedValue {
 	backupVal, bErr := valMsg.ToString()
@@ -68,7 +68,7 @@ func parseBackup(logger Logger, key string, valMsg, pttlMsg rueidis.RedisMessage
 
 // acquireMultiWriteLocks acquires write locks on all keys in sorted order with
 // rollback. savedValues is lazy-allocated; callers must treat it as nil-safe.
-func (pca *PrimeableCacheAside) acquireMultiWriteLocks(
+func (rca *cacheAside) acquireMultiWriteLocks(
 	ctx context.Context,
 	keys []string,
 ) (lockValues map[string]string, savedValues map[string]savedValue, err error) {
@@ -82,11 +82,11 @@ func (pca *PrimeableCacheAside) acquireMultiWriteLocks(
 	remaining := sorted
 
 	for len(remaining) > 0 {
-		firstFailed, err := pca.tryAcquireRemaining(ctx, remaining, lockValues, &savedValues)
+		firstFailed, err := rca.tryAcquireRemaining(ctx, remaining, lockValues, &savedValues)
 		if err != nil {
 			// lockValues holds successes from PRIOR iterations only — the
 			// current iteration's acquires were rolled back inside execSlotAcquire.
-			pca.restoreMultiValues(ctx, lockValues, savedValues)
+			rca.restoreMultiValues(ctx, lockValues, savedValues)
 			return nil, nil, err
 		}
 
@@ -94,11 +94,11 @@ func (pca *PrimeableCacheAside) acquireMultiWriteLocks(
 			break
 		}
 
-		if err := pca.waitForFailedKey(ctx, firstFailed, lockValues, savedValues); err != nil {
+		if err := rca.waitForFailedKey(ctx, firstFailed, lockValues, savedValues); err != nil {
 			return nil, nil, err
 		}
 
-		remaining = pca.computeRemaining(sorted, lockValues)
+		remaining = rca.computeRemaining(sorted, lockValues)
 	}
 
 	return lockValues, savedValues, nil
@@ -108,7 +108,7 @@ func (pca *PrimeableCacheAside) acquireMultiWriteLocks(
 // remaining keys. On partial failure, rolls back locks after the first failed
 // key and returns firstFailed. savedValues is a pointer so the caller's map
 // can be lazy-allocated on first prior-value capture.
-func (pca *PrimeableCacheAside) tryAcquireRemaining(
+func (rca *cacheAside) tryAcquireRemaining(
 	ctx context.Context,
 	remaining []string,
 	lockValues map[string]string,
@@ -118,10 +118,10 @@ func (pca *PrimeableCacheAside) tryAcquireRemaining(
 	// a freshly-generated lock value.
 	entries := make([]lockAcquireEntry, len(remaining))
 	for i, key := range remaining {
-		entries[i] = lockAcquireEntry{key: key, lockVal: pca.lockPool.Generate()}
+		entries[i] = lockAcquireEntry{key: key, lockVal: rca.lockPool.Generate()}
 	}
 
-	acquired, backups, firstFailed, err := pca.batchAcquireWithBackup(ctx, entries, pca.lockTTLMs)
+	acquired, backups, firstFailed, err := rca.batchAcquireWithBackup(ctx, entries, rca.lockTTLMs)
 	if err != nil {
 		return "", err
 	}
@@ -137,8 +137,8 @@ func (pca *PrimeableCacheAside) tryAcquireRemaining(
 	}
 
 	if firstFailed != "" {
-		pca.rollbackAfterFirstFailure(ctx, remaining, firstFailed, lockValues, *savedValues, acquired)
-		pca.touchMultiLocks(ctx, lockValues)
+		rca.rollbackAfterFirstFailure(ctx, remaining, firstFailed, lockValues, *savedValues, acquired)
+		rca.touchMultiLocks(ctx, lockValues)
 	}
 
 	return firstFailed, nil
@@ -148,14 +148,14 @@ func (pca *PrimeableCacheAside) tryAcquireRemaining(
 // to release. If DoCache shows a non-lock value (or absent), the lock is gone
 // and the caller retries immediately rather than blocking on a wait channel
 // for a missed invalidation.
-func (pca *PrimeableCacheAside) waitForFailedKey(
+func (rca *cacheAside) waitForFailedKey(
 	ctx context.Context,
 	firstFailed string,
 	lockValues map[string]string,
 	savedValues map[string]savedValue,
 ) error {
-	waitChan, _ := pca.register(firstFailed)
-	resp := pca.client.DoCache(ctx, pca.client.B().Get().Key(firstFailed).Cache(), pca.lockTTL)
+	waitChan, _ := rca.register(firstFailed)
+	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(firstFailed).Cache(), rca.lockTTL)
 	val, rerr := resp.ToString()
 	if rueidis.IsRedisNil(rerr) {
 		return nil
@@ -163,10 +163,10 @@ func (pca *PrimeableCacheAside) waitForFailedKey(
 	if rerr != nil {
 		// Real Redis error — fail fast rather than blocking on a wait channel
 		// for the full lockTTL.
-		pca.restoreMultiValues(ctx, lockValues, savedValues)
+		rca.restoreMultiValues(ctx, lockValues, savedValues)
 		return fmt.Errorf("read key %q: %w", firstFailed, rerr)
 	}
-	if !strings.HasPrefix(val, pca.lockPrefix) {
+	if !strings.HasPrefix(val, rca.lockPrefix) {
 		return nil
 	}
 
@@ -174,13 +174,13 @@ func (pca *PrimeableCacheAside) waitForFailedKey(
 	case <-waitChan:
 		return nil
 	case <-ctx.Done():
-		pca.restoreMultiValues(ctx, lockValues, savedValues)
+		rca.restoreMultiValues(ctx, lockValues, savedValues)
 		return ctx.Err()
 	}
 }
 
 // computeRemaining returns the sorted keys that haven't been locked yet.
-func (pca *PrimeableCacheAside) computeRemaining(sorted []string, lockValues map[string]string) []string {
+func (rca *cacheAside) computeRemaining(sorted []string, lockValues map[string]string) []string {
 	remaining := make([]string, 0, len(sorted))
 	for _, key := range sorted {
 		if _, ok := lockValues[key]; !ok {
@@ -198,7 +198,7 @@ type lockAcquireEntry struct {
 // batchAcquireWithBackup attempts to acquire write locks on entries, grouped
 // by slot. Returns acquired locks, saved backups, the first failed key (in
 // entry order), and any error.
-func (pca *PrimeableCacheAside) batchAcquireWithBackup(
+func (rca *cacheAside) batchAcquireWithBackup(
 	ctx context.Context,
 	entries []lockAcquireEntry,
 	lockTTLMs string,
@@ -209,7 +209,7 @@ func (pca *PrimeableCacheAside) batchAcquireWithBackup(
 
 	for _, group := range slotGroups {
 		var slotErr error
-		backups, slotErr = pca.execSlotAcquire(ctx, group, lockTTLMs, acquired, backups)
+		backups, slotErr = rca.execSlotAcquire(ctx, group, lockTTLMs, acquired, backups)
 		if slotErr != nil {
 			return nil, nil, "", slotErr
 		}
@@ -226,7 +226,7 @@ func (pca *PrimeableCacheAside) batchAcquireWithBackup(
 
 // execSlotAcquire executes lock acquisitions for a single slot group. backups
 // is lazy-initialized via the returned map; callers must use the return value.
-func (pca *PrimeableCacheAside) execSlotAcquire(
+func (rca *cacheAside) execSlotAcquire(
 	ctx context.Context,
 	group []lockAcquireEntry,
 	lockTTLMs string,
@@ -249,17 +249,17 @@ func (pca *PrimeableCacheAside) execSlotAcquire(
 		keysBuf[i] = entry.key
 		argsBuf[i*3] = entry.lockVal
 		argsBuf[i*3+1] = lockTTLMs
-		argsBuf[i*3+2] = pca.lockPrefix
+		argsBuf[i*3+2] = rca.lockPrefix
 		stmts[i] = rueidis.LuaExec{
 			Keys: keysBuf[i : i+1 : i+1],
 			Args: argsBuf[i*3 : i*3+3 : i*3+3],
 		}
 	}
-	resps := acquireWriteLockWithBackupScript.ExecMulti(ctx, pca.client, stmts...)
+	resps := acquireWriteLockWithBackupScript.ExecMulti(ctx, rca.client, stmts...)
 	// ExecMulti is a pipeline: every script has already executed in Redis.
 	// Drain all responses so successes can be released before bailing — an
 	// early return would leak later-index acquires for the full lockTTL.
-	backups, firstErrKey, firstErr := pca.drainSlotAcquireResponses(group, resps, acquired, backups)
+	backups, firstErrKey, firstErr := rca.drainSlotAcquireResponses(group, resps, acquired, backups)
 	if firstErr != nil {
 		// Restore prior values where the acquire captured one (plain unlock
 		// would DEL and drop a real cached entry the acquire just overwrote).
@@ -267,10 +267,10 @@ func (pca *PrimeableCacheAside) execSlotAcquire(
 		// this batch have already populated the shared map.
 		for k, v := range acquired {
 			if saved, ok := backups[k]; ok {
-				pca.bestEffortRestore(ctx, k, v, saved)
+				rca.bestEffortRestore(ctx, k, v, saved)
 				delete(backups, k)
 			} else {
-				pca.bestEffortUnlock(ctx, k, v)
+				rca.bestEffortUnlock(ctx, k, v)
 			}
 			delete(acquired, k)
 		}
@@ -282,7 +282,7 @@ func (pca *PrimeableCacheAside) execSlotAcquire(
 // drainSlotAcquireResponses parses all responses from a pipelined slot
 // acquire, recording successes and returning the first error. Every response
 // must be inspected so already-applied script side-effects can be reconciled.
-func (pca *PrimeableCacheAside) drainSlotAcquireResponses(
+func (rca *cacheAside) drainSlotAcquireResponses(
 	group []lockAcquireEntry,
 	resps []rueidis.RedisResult,
 	acquired map[string]string,
@@ -296,7 +296,7 @@ func (pca *PrimeableCacheAside) drainSlotAcquireResponses(
 			firstErrKey = key
 			return
 		}
-		pca.logger.Error("additional execSlotAcquire error", "key", key, "error", err)
+		rca.logger.Error("additional execSlotAcquire error", "key", key, "error", err)
 	}
 	for i, resp := range resps {
 		arr, err := resp.ToArray()
@@ -309,7 +309,7 @@ func (pca *PrimeableCacheAside) drainSlotAcquireResponses(
 			continue
 		}
 		var rerr error
-		backups, rerr = pca.recordSlotAcquireResult(group[i], arr, acquired, backups)
+		backups, rerr = rca.recordSlotAcquireResult(group[i], arr, acquired, backups)
 		if rerr != nil {
 			capture(group[i].key, rerr)
 		}
@@ -321,7 +321,7 @@ func (pca *PrimeableCacheAside) drainSlotAcquireResponses(
 // Returns an error on parse failure so the caller surfaces it via firstErr —
 // otherwise a script drift would silently make acquireMultiWriteLocks loop
 // forever against the same broken response.
-func (pca *PrimeableCacheAside) recordSlotAcquireResult(
+func (rca *cacheAside) recordSlotAcquireResult(
 	entry lockAcquireEntry,
 	arr []rueidis.RedisMessage,
 	acquired map[string]string,
@@ -329,14 +329,14 @@ func (pca *PrimeableCacheAside) recordSlotAcquireResult(
 ) (map[string]savedValue, error) {
 	success, ierr := arr[0].AsInt64()
 	if ierr != nil {
-		pca.logger.Error("unexpected non-integer in lock-acquire response", "key", entry.key, "error", ierr)
+		rca.logger.Error("unexpected non-integer in lock-acquire response", "key", entry.key, "error", ierr)
 		return backups, fmt.Errorf("parse success: %w", ierr)
 	}
 	if success != 1 {
 		return backups, nil
 	}
 	acquired[entry.key] = entry.lockVal
-	saved := parseBackup(pca.logger, entry.key, arr[1], arr[2])
+	saved := parseBackup(rca.logger, entry.key, arr[1], arr[2])
 	if saved.present {
 		if backups == nil {
 			backups = make(map[string]savedValue)
@@ -349,7 +349,7 @@ func (pca *PrimeableCacheAside) recordSlotAcquireResult(
 // rollbackAfterFirstFailure releases locks acquired AFTER the first failed
 // key (in sorted order), keeping locks before it. Uses cleanupCtx so a
 // cancelled caller still rolls back.
-func (pca *PrimeableCacheAside) rollbackAfterFirstFailure(
+func (rca *cacheAside) rollbackAfterFirstFailure(
 	ctx context.Context,
 	sorted []string,
 	firstFailed string,
@@ -357,7 +357,7 @@ func (pca *PrimeableCacheAside) rollbackAfterFirstFailure(
 	savedValues map[string]savedValue,
 	justAcquired map[string]string,
 ) {
-	cleanupCtx, cancel := pca.cleanupCtx(ctx)
+	cleanupCtx, cancel := rca.cleanupCtx(ctx)
 	defer cancel()
 	// firstFailed itself is skipped (never acquired). Entries before remain
 	// held — the retry loop re-attempts only firstFailed and beyond, preserving
@@ -373,10 +373,10 @@ func (pca *PrimeableCacheAside) rollbackAfterFirstFailure(
 		}
 		if lockVal, ok := justAcquired[key]; ok {
 			if saved, hasSaved := savedValues[key]; hasSaved {
-				pca.restoreValue(cleanupCtx, key, lockVal, saved)
+				rca.restoreValue(cleanupCtx, key, lockVal, saved)
 				delete(savedValues, key)
 			} else {
-				pca.bestEffortUnlock(cleanupCtx, key, lockVal)
+				rca.bestEffortUnlock(cleanupCtx, key, lockVal)
 			}
 			delete(lockValues, key)
 		}
@@ -389,18 +389,18 @@ func (pca *PrimeableCacheAside) rollbackAfterFirstFailure(
 // lockValues so the eventual CAS-set returns ErrLockLost / surfaces the
 // failure rather than letting a re-acquire overwrite the stealer's value.
 // Uses cleanupCtx so a near-expiry caller context doesn't race the refresh.
-func (pca *PrimeableCacheAside) touchMultiLocks(ctx context.Context, lockValues map[string]string) {
-	cleanCtx, cancel := pca.cleanupCtx(ctx)
+func (rca *cacheAside) touchMultiLocks(ctx context.Context, lockValues map[string]string) {
+	cleanCtx, cancel := rca.cleanupCtx(ctx)
 	defer cancel()
 	for key, lockVal := range lockValues {
-		result, err := refreshLockScript.Exec(cleanCtx, pca.client, []string{key}, []string{lockVal, pca.lockTTLMs}).AsInt64()
+		result, err := refreshLockScript.Exec(cleanCtx, rca.client, []string{key}, []string{lockVal, rca.lockTTLMs}).AsInt64()
 		if err != nil {
-			pca.logger.Error("lock refresh script error", "key", key, "error", err)
+			rca.logger.Error("lock refresh script error", "key", key, "error", err)
 			continue
 		}
 		if result == 0 {
-			pca.logger.Debug("lock lost during refresh", "key", key)
-			pca.emitLockLost(key)
+			rca.logger.Debug("lock lost during refresh", "key", key)
+			rca.emitLockLost(key)
 		}
 	}
 }
@@ -419,7 +419,7 @@ type casSlotResult struct {
 
 // setMultiValuesWithCAS batch-sets values using CAS, grouped by cluster slot.
 // Returns succeeded keys and a (lazily-allocated) map of failed keys to errors.
-func (pca *PrimeableCacheAside) setMultiValuesWithCAS(
+func (rca *cacheAside) setMultiValuesWithCAS(
 	ctx context.Context,
 	ttl time.Duration,
 	values map[string]string,
@@ -437,19 +437,19 @@ func (pca *PrimeableCacheAside) setMultiValuesWithCAS(
 	succeeded = make([]string, 0, len(entries))
 	slotGroups := cmdx.GroupBySlot(entries, func(e casSetEntry) string { return e.key })
 
-	for _, sr := range pca.runCASSlots(ctx, slotGroups, ttlMs) {
-		pca.collectCASResults(sr.entries, sr.resps, &succeeded, &failed)
+	for _, sr := range rca.runCASSlots(ctx, slotGroups, ttlMs) {
+		rca.collectCASResults(sr.entries, sr.resps, &succeeded, &failed)
 	}
 	return succeeded, failed
 }
 
 // runCASSlots executes each slot's CAS-set script, fanning out to goroutines
-// only when there's real parallelism. Mirrors CacheAside.runSlotSets.
-func (pca *PrimeableCacheAside) runCASSlots(ctx context.Context, slotGroups map[uint16][]casSetEntry, ttlMs string) []casSlotResult {
+// only when there's real parallelism. Mirrors cacheAside.runSlotSets.
+func (rca *cacheAside) runCASSlots(ctx context.Context, slotGroups map[uint16][]casSetEntry, ttlMs string) []casSlotResult {
 	results := make([]casSlotResult, 0, len(slotGroups))
 	if len(slotGroups) <= 1 {
 		for _, group := range slotGroups {
-			results = append(results, casSlotResult{entries: group, resps: pca.execSlotGroup(ctx, group, ttlMs)})
+			results = append(results, casSlotResult{entries: group, resps: rca.execSlotGroup(ctx, group, ttlMs)})
 		}
 		return results
 	}
@@ -461,7 +461,7 @@ func (pca *PrimeableCacheAside) runCASSlots(ctx context.Context, slotGroups map[
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sr := casSlotResult{entries: group, resps: pca.execSlotGroup(ctx, group, ttlMs)}
+			sr := casSlotResult{entries: group, resps: rca.execSlotGroup(ctx, group, ttlMs)}
 			mu.Lock()
 			results = append(results, sr)
 			mu.Unlock()
@@ -473,7 +473,7 @@ func (pca *PrimeableCacheAside) runCASSlots(ctx context.Context, slotGroups map[
 
 // execSlotGroup pipelines the CAS-set Lua script for one slot's entries.
 // Per-entry Keys/Args share two pooled backing arrays.
-func (pca *PrimeableCacheAside) execSlotGroup(ctx context.Context, group []casSetEntry, ttlMs string) []rueidis.RedisResult {
+func (rca *cacheAside) execSlotGroup(ctx context.Context, group []casSetEntry, ttlMs string) []rueidis.RedisResult {
 	n := len(group)
 	stmtsP := luaExecPool.Get(n)
 	defer luaExecPool.Put(stmtsP)
@@ -494,11 +494,11 @@ func (pca *PrimeableCacheAside) execSlotGroup(ctx context.Context, group []casSe
 			Args: argsBuf[i*3 : i*3+3 : i*3+3],
 		}
 	}
-	return setWithWriteLockScript.ExecMulti(ctx, pca.client, stmts...)
+	return setWithWriteLockScript.ExecMulti(ctx, rca.client, stmts...)
 }
 
 // collectCASResults processes CAS responses, populating succeeded/failed.
-func (pca *PrimeableCacheAside) collectCASResults(
+func (rca *cacheAside) collectCASResults(
 	entries []casSetEntry,
 	resps []rueidis.RedisResult,
 	succeeded *[]string,
@@ -518,13 +518,13 @@ func (pca *PrimeableCacheAside) collectCASResults(
 		}
 		val, ierr := resp.AsInt64()
 		if ierr != nil {
-			pca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
+			rca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
 			addFail(key, fmt.Errorf("CAS set key %q: %w", key, ierr))
 			continue
 		}
 		if val == 0 {
 			addFail(key, ErrLockLost)
-			pca.emitLockLost(key)
+			rca.emitLockLost(key)
 			continue
 		}
 		*succeeded = append(*succeeded, key)
@@ -532,42 +532,42 @@ func (pca *PrimeableCacheAside) collectCASResults(
 }
 
 // restoreMultiValues restores saved values or deletes keys for all held locks.
-func (pca *PrimeableCacheAside) restoreMultiValues(ctx context.Context, lockValues map[string]string, savedValues map[string]savedValue) {
-	toCtx, cancel := pca.cleanupCtx(ctx)
+func (rca *cacheAside) restoreMultiValues(ctx context.Context, lockValues map[string]string, savedValues map[string]savedValue) {
+	toCtx, cancel := rca.cleanupCtx(ctx)
 	defer cancel()
 
 	for key, lockVal := range lockValues {
-		pca.restoreValue(toCtx, key, lockVal, savedValues[key])
+		rca.restoreValue(toCtx, key, lockVal, savedValues[key])
 	}
 }
 
 // restoreValue restores a single key's previous value (with original TTL) or
 // deletes the key if saved.present is false. Empty values with present=true
 // are restored as-is.
-func (pca *PrimeableCacheAside) restoreValue(ctx context.Context, key, lockVal string, saved savedValue) {
+func (rca *cacheAside) restoreValue(ctx context.Context, key, lockVal string, saved savedValue) {
 	hadSaved := "0"
 	if saved.present {
 		hadSaved = "1"
 	}
 	pttlStr := strconv.FormatInt(saved.pttl, 10)
-	err := restoreValueOrDeleteScript.Exec(ctx, pca.client, []string{key}, []string{lockVal, hadSaved, saved.val, pttlStr}).Error()
+	err := restoreValueOrDeleteScript.Exec(ctx, rca.client, []string{key}, []string{lockVal, hadSaved, saved.val, pttlStr}).Error()
 	if err != nil {
-		pca.logger.Error("failed to restore value", "key", key, "error", err)
+		rca.logger.Error("failed to restore value", "key", key, "error", err)
 	}
 }
 
 // bestEffortUnlock releases a lock using delKeyLua.
-func (pca *PrimeableCacheAside) bestEffortUnlock(ctx context.Context, key, lockVal string) {
-	toCtx, cancel := pca.cleanupCtx(ctx)
+func (rca *cacheAside) bestEffortUnlock(ctx context.Context, key, lockVal string) {
+	toCtx, cancel := rca.cleanupCtx(ctx)
 	defer cancel()
-	if err := pca.unlock(toCtx, key, lockVal); err != nil {
-		pca.logger.Error("failed to unlock key", "key", key, "error", err)
+	if err := rca.unlock(toCtx, key, lockVal); err != nil {
+		rca.logger.Error("failed to unlock key", "key", key, "error", err)
 	}
 }
 
 // bestEffortRestore wraps restoreValue with cleanupCtx + deferred cancel.
-func (pca *PrimeableCacheAside) bestEffortRestore(ctx context.Context, key, lockVal string, saved savedValue) {
-	toCtx, cancel := pca.cleanupCtx(ctx)
+func (rca *cacheAside) bestEffortRestore(ctx context.Context, key, lockVal string, saved savedValue) {
+	toCtx, cancel := rca.cleanupCtx(ctx)
 	defer cancel()
-	pca.restoreValue(toCtx, key, lockVal, saved)
+	rca.restoreValue(toCtx, key, lockVal, saved)
 }

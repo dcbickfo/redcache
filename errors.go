@@ -11,15 +11,16 @@ import (
 // before the value could be written.
 var ErrLockLost = errors.New("lock was lost or expired before value could be set")
 
-// BatchError carries per-key results of a multi-key operation. All accessors
-// are nil-safe.
-type BatchError struct {
+// batchError carries per-key results of a multi-key engine operation, keyed by
+// the encoded Redis key. It is engine-internal: the typed layer converts it to
+// the exported *BatchKeyError[K]. All accessors are nil-safe.
+type batchError struct {
 	Failed    map[string]error
 	Succeeded []string
 }
 
 // Error formats the batch outcome with failed keys in sorted order.
-func (e *BatchError) Error() string {
+func (e *batchError) Error() string {
 	if e == nil {
 		return ""
 	}
@@ -37,7 +38,7 @@ func (e *BatchError) Error() string {
 }
 
 // HasFailures reports whether any key failed.
-func (e *BatchError) HasFailures() bool {
+func (e *batchError) HasFailures() bool {
 	if e == nil {
 		return false
 	}
@@ -45,7 +46,7 @@ func (e *BatchError) HasFailures() bool {
 }
 
 // ErrorFor returns the error for key, or nil.
-func (e *BatchError) ErrorFor(key string) error {
+func (e *batchError) ErrorFor(key string) error {
 	if e == nil {
 		return nil
 	}
@@ -53,7 +54,7 @@ func (e *BatchError) ErrorFor(key string) error {
 }
 
 // HasError reports whether key failed.
-func (e *BatchError) HasError(key string) bool {
+func (e *batchError) HasError(key string) bool {
 	if e == nil {
 		return false
 	}
@@ -61,13 +62,13 @@ func (e *BatchError) HasError(key string) bool {
 	return ok
 }
 
-// NewBatchError returns a *BatchError as error, or untyped nil when failed
+// newBatchError returns a *batchError as error, or untyped nil when failed
 // is empty (so call sites can return it directly).
-func NewBatchError(failed map[string]error, succeeded []string) error {
+func newBatchError(failed map[string]error, succeeded []string) error {
 	if len(failed) == 0 {
 		return nil
 	}
-	return &BatchError{
+	return &batchError{
 		Failed:    failed,
 		Succeeded: succeeded,
 	}
@@ -78,9 +79,9 @@ func NewBatchError(failed map[string]error, succeeded []string) error {
 // whether to log, Del, or retry.
 var ErrDecode = errors.New("redcache: decode failed")
 
-// BatchKeyError is the typed counterpart of BatchError, returned via errors.As
-// from PrimeableTyped multi-set methods on partial failure. All accessors are
-// nil-safe.
+// BatchKeyError is the typed, key-preserving error returned via errors.As from
+// the multi-key write methods (SetMulti, ForceSetMulti) on partial failure. K
+// is the cache's key type. All accessors are nil-safe.
 type BatchKeyError[K comparable] struct {
 	Failed    map[K]error
 	Succeeded []K
@@ -134,9 +135,9 @@ func (e *BatchKeyError[K]) HasError(k K) bool {
 	return ok
 }
 
-// NewBatchKeyError returns a *BatchKeyError as error, or untyped nil when
+// newBatchKeyError returns a *BatchKeyError as error, or untyped nil when
 // failed is empty (so call sites can return it directly).
-func NewBatchKeyError[K comparable](failed map[K]error, succeeded []K) error {
+func newBatchKeyError[K comparable](failed map[K]error, succeeded []K) error {
 	if len(failed) == 0 {
 		return nil
 	}

@@ -26,16 +26,16 @@ func TestNoopMetrics_AllMethodsSafe(t *testing.T) {
 
 func TestValidateAndApplyDefaults_DefaultsToNoopMetrics(t *testing.T) {
 	t.Parallel()
-	opt := CacheAsideOption{}
+	cfg := config{}
 	clientOpt := rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}
-	if err := validateAndApplyDefaults(clientOpt, &opt); err != nil {
-		t.Fatalf("validateAndApplyDefaults: %v", err)
+	if err := cfg.applyDefaults(clientOpt); err != nil {
+		t.Fatalf("applyDefaults: %v", err)
 	}
-	if opt.Metrics == nil {
-		t.Fatal("Metrics not defaulted")
+	if cfg.metrics == nil {
+		t.Fatal("metrics not defaulted")
 	}
-	if _, ok := opt.Metrics.(NoopMetrics); !ok {
-		t.Fatalf("default Metrics is %T, want NoopMetrics", opt.Metrics)
+	if _, ok := cfg.metrics.(NoopMetrics); !ok {
+		t.Fatalf("default metrics is %T, want NoopMetrics", cfg.metrics)
 	}
 }
 

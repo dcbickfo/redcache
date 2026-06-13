@@ -23,14 +23,13 @@ import (
 
 var addr = []string{"127.0.0.1:6379"}
 
-func makeClient(t *testing.T, addr []string) *redcache.CacheAside {
-	client, err := redcache.NewRedCacheAside(
+func makeClient(t *testing.T, addr []string) redcache.Cache[string, string] {
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{
 			InitAddress: addr,
 		},
-		redcache.CacheAsideOption{
-			LockTTL: time.Second * 1,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(time.Second),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -756,13 +755,12 @@ func TestCacheAside_GetParentContextCancellation(t *testing.T) {
 func TestConcurrentRegisterRace(t *testing.T) {
 	t.Parallel()
 	// Minimum lock TTL forces expirations under contention.
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{
 			InitAddress: addr,
 		},
-		redcache.CacheAsideOption{
-			LockTTL: 100 * time.Millisecond,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(100*time.Millisecond),
 	)
 	require.NoError(t, err)
 	defer client.Client().Close()
@@ -1078,25 +1076,27 @@ func TestCacheAside_Close(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Get did not return after Close")
 	case err := <-errCh:
-		// Close wakes the waiter; the persistent lock then forces a deadline timeout.
+		// Close cancels the pending lock entry and tears down the client, so the
+		// waiter wakes and returns promptly instead of hanging on the persistent
+		// lock until its 30s TTL. The exact error is teardown-ordering dependent:
+		// the deadline (2s) may fire first, or the now-closing client surfaces on
+		// retry — either proves Close unblocked the waiter.
 		require.Error(t, err)
-		require.ErrorIs(t, err, context.DeadlineExceeded)
 	}
 }
 
-func makeRefreshClient(t *testing.T, addr []string, fraction float64) *redcache.CacheAside {
+func makeRefreshClient(t *testing.T, addr []string, fraction float64) redcache.Cache[string, string] {
 	t.Helper()
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{
 			InitAddress: addr,
 		},
-		redcache.CacheAsideOption{
-			LockTTL:              time.Second * 2,
-			RefreshAfterFraction: fraction,
-			// Disable XFetch sampling so tests assert exact refresh-vs-no-refresh
-			// outcomes; sampling is exercised by TestShouldRefresh_XFetch.
-			RefreshBeta: 0,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(time.Second*2),
+		redcache.WithRefreshAfterFraction(fraction),
+		// Disable XFetch sampling so tests assert exact refresh-vs-no-refresh
+		// outcomes; sampling is exercised by TestShouldRefresh_XFetch.
+		redcache.WithRefreshBeta(0),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1379,11 +1379,17 @@ func TestRefreshAhead_DoesNotStompLockValue(t *testing.T) {
 
 	close(callbackProceed)
 
+	// Independent client for the post-Close read: Close tears down client's own
+	// connection, so we verify the stored value through a separate one.
+	verify, vErr := rueidis.NewClient(rueidis.ClientOption{InitAddress: addr})
+	require.NoError(t, vErr)
+	defer verify.Close()
+
 	// Drain the refresh worker so its post-callback Lua-CAS has either run or
 	// definitively skipped before we assert. Avoids a wall-clock race on slow CI.
 	client.Close()
 
-	got, gErr := client.Client().Do(ctx, client.Client().B().Get().Key(key).Build()).ToString()
+	got, gErr := verify.Do(ctx, verify.B().Get().Key(key).Build()).ToString()
 	require.NoError(t, gErr)
 	assert.Equal(t, lockVal, got, "refresh-ahead must skip the SET when a lock value is present")
 }
@@ -1449,15 +1455,14 @@ func TestRefreshAhead_GetMulti(t *testing.T) {
 func TestRefreshAhead_Backpressure(t *testing.T) {
 	t.Parallel()
 	// Tiny pool (1 worker, queue size 1) plus a sleeping callback so the queue fills fast.
-	client, err := redcache.NewRedCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{
-			LockTTL:              time.Second * 3,
-			RefreshAfterFraction: 0.5,
-			RefreshBeta:          0,
-			RefreshWorkers:       1,
-			RefreshQueueSize:     1,
-		},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(time.Second*3),
+		redcache.WithRefreshAfterFraction(0.5),
+		redcache.WithRefreshBeta(0),
+		redcache.WithRefreshWorkers(1),
+		redcache.WithRefreshQueueSize(1),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1520,36 +1525,40 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	t.Parallel()
 	t.Run("negative fraction", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.NewString[string](
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: -0.1},
+			redcache.StringCodec{},
+			redcache.WithRefreshAfterFraction(-0.1),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "RefreshAfterFraction")
 	})
 	t.Run("fraction equals 1", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.NewString[string](
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: 1.0},
+			redcache.StringCodec{},
+			redcache.WithRefreshAfterFraction(1.0),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "RefreshAfterFraction")
 	})
 	t.Run("fraction greater than 1", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.NewString[string](
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: 1.5},
+			redcache.StringCodec{},
+			redcache.WithRefreshAfterFraction(1.5),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "RefreshAfterFraction")
 	})
 	t.Run("valid fraction", func(t *testing.T) {
 		t.Parallel()
-		client, err := redcache.NewRedCacheAside(
+		client, err := redcache.NewString[string](
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: 0.8},
+			redcache.StringCodec{},
+			redcache.WithRefreshAfterFraction(0.8),
 		)
 		require.NoError(t, err)
 		client.Close()
@@ -1557,27 +1566,34 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	})
 	t.Run("negative RefreshWorkers", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.NewString[string](
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: 0.8, RefreshWorkers: -1},
+			redcache.StringCodec{},
+			redcache.WithRefreshAfterFraction(0.8),
+			redcache.WithRefreshWorkers(-1),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "RefreshWorkers")
 	})
 	t.Run("negative RefreshQueueSize", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.NewString[string](
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: 0.8, RefreshQueueSize: -1},
+			redcache.StringCodec{},
+			redcache.WithRefreshAfterFraction(0.8),
+			redcache.WithRefreshQueueSize(-1),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "RefreshQueueSize")
 	})
 	t.Run("custom workers and queue", func(t *testing.T) {
 		t.Parallel()
-		client, err := redcache.NewRedCacheAside(
+		client, err := redcache.NewString[string](
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: 0.8, RefreshWorkers: 2, RefreshQueueSize: 16},
+			redcache.StringCodec{},
+			redcache.WithRefreshAfterFraction(0.8),
+			redcache.WithRefreshWorkers(2),
+			redcache.WithRefreshQueueSize(16),
 		)
 		require.NoError(t, err)
 		client.Close()
@@ -1589,9 +1605,9 @@ func TestNewRedCacheAside_Validation(t *testing.T) {
 	t.Parallel()
 	t.Run("empty InitAddress", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.NewString[string](
 			rueidis.ClientOption{},
-			redcache.CacheAsideOption{},
+			redcache.StringCodec{},
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "InitAddress")
@@ -1599,9 +1615,10 @@ func TestNewRedCacheAside_Validation(t *testing.T) {
 
 	t.Run("negative LockTTL", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.NewString[string](
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{LockTTL: -1 * time.Second},
+			redcache.StringCodec{},
+			redcache.WithLockTTL(-1*time.Second),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "negative")
@@ -1609,9 +1626,10 @@ func TestNewRedCacheAside_Validation(t *testing.T) {
 
 	t.Run("too small LockTTL", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.NewString[string](
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{LockTTL: 10 * time.Millisecond},
+			redcache.StringCodec{},
+			redcache.WithLockTTL(10*time.Millisecond),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "100ms")
@@ -1622,9 +1640,10 @@ func TestNewRedCacheAside_Validation(t *testing.T) {
 // causes Get's CAS-set to fail and a subsequent read returns the forced value.
 func TestCacheAside_Get_ErrLockLostRetry(t *testing.T) {
 	t.Parallel()
-	client, err := redcache.NewPrimeableCacheAside(
+	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{LockTTL: time.Second * 2},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(time.Second*2),
 	)
 	require.NoError(t, err)
 	defer client.Client().Close()

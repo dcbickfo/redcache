@@ -2,9 +2,20 @@ package redcache
 
 import "encoding/json"
 
-// Codec encodes and decodes V into the envelope payload. Implementations
-// must be concurrent-safe. Encode's returned slice is owned by the library;
-// Decode's input is borrowed and must not be retained.
+// Codec encodes and decodes V into the envelope payload. Implementations must
+// be concurrent-safe.
+//
+// Ownership of return values:
+//   - Encode's returned slice is handed to the library and must not be mutated
+//     by the caller afterward. The library may alias it without copying, so the
+//     codec must not retain or later modify it either.
+//   - Decode's input slice is borrowed from library-internal memory and is only
+//     valid for the duration of the call; it must not be retained.
+//
+// Identity codecs (UnsafeBytesCodec) alias this borrowed memory directly and so
+// trade safety for zero copies — the decoded []byte must not outlive the call or
+// be mutated. JSON/string codecs (JSONCodec, StringCodec) instead return fresh,
+// caller-owned copies and are safe to retain.
 type Codec[V any] interface {
 	Encode(V) ([]byte, error)
 	Decode([]byte) (V, error)
@@ -38,14 +49,18 @@ func (JSONCodec[V]) Decode(b []byte) (V, error) {
 	return v, nil
 }
 
-// BytesCodec is the identity codec for []byte.
-type BytesCodec struct{}
+// UnsafeBytesCodec is the zero-copy identity codec for []byte. It aliases
+// library-internal memory in both directions: Encode hands its input straight
+// to the library (which may alias it), and Decode returns a []byte backed by
+// the cache's borrowed read buffer. The decoded slice must not be mutated or
+// retained past the call. Use a copying codec if you need an owned value.
+type UnsafeBytesCodec struct{}
 
-// Encode returns v.
-func (BytesCodec) Encode(v []byte) ([]byte, error) { return v, nil }
+// Encode returns v unchanged (no copy).
+func (UnsafeBytesCodec) Encode(v []byte) ([]byte, error) { return v, nil }
 
-// Decode returns b.
-func (BytesCodec) Decode(b []byte) ([]byte, error) { return b, nil }
+// Decode returns b unchanged (no copy); the result aliases borrowed memory.
+func (UnsafeBytesCodec) Decode(b []byte) ([]byte, error) { return b, nil }
 
 // StringCodec is the identity codec for string.
 type StringCodec struct{}
