@@ -13,18 +13,14 @@ import (
 	"github.com/dcbickfo/redcache/internal/syncx"
 )
 
-// PrimeableCacheAside extends CacheAside with explicit Set operations for
-// cache priming and coordinated updates.
-//
-// Adds:
-//   - Set/SetMulti for coordinated updates with write locking
-//   - ForceSet/ForceSetMulti for unconditional writes bypassing locks
+// PrimeableCacheAside extends CacheAside with Set/SetMulti (write-locked) and
+// ForceSet/ForceSetMulti (unconditional) for cache priming and coordinated
+// updates.
 type PrimeableCacheAside struct {
 	*CacheAside
 }
 
-// NewPrimeableCacheAside creates a PrimeableCacheAside that wraps a CacheAside
-// with additional Set operations.
+// NewPrimeableCacheAside builds a PrimeableCacheAside wrapping a fresh CacheAside.
 func NewPrimeableCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOption) (*PrimeableCacheAside, error) {
 	rca, err := NewRedCacheAside(clientOption, caOption)
 	if err != nil {
@@ -33,17 +29,16 @@ func NewPrimeableCacheAside(clientOption rueidis.ClientOption, caOption CacheAsi
 	return &PrimeableCacheAside{CacheAside: rca}, nil
 }
 
-// Close cancels all pending lock entries. It does NOT close the underlying Redis client.
+// Close cancels pending lock entries; the underlying Redis client is left open.
 func (pca *PrimeableCacheAside) Close() {
 	pca.CacheAside.Close()
 }
 
-// Set acquires a write lock on key, calls fn to produce the value, and
-// atomically sets it. If another operation holds a lock, Set waits.
-//
-// On callback error, the previous value is restored only if Set still holds
-// the lock; a concurrent ForceSet's value is preserved otherwise. The
-// post-callback CAS-set may return ErrLockLost under the same race.
+// Set acquires a write lock on key, calls fn, and atomically writes the
+// returned value. Waits when another operation holds the lock. On callback
+// error the prior value is restored only if Set still holds the lock; a
+// concurrent ForceSet's value is preserved. The post-callback CAS may return
+// ErrLockLost under the same race.
 func (pca *PrimeableCacheAside) Set(
 	ctx context.Context,
 	ttl time.Duration,
@@ -127,14 +122,10 @@ func (pca *PrimeableCacheAside) acquireSingleWriteLock(
 	return saved, false, nil
 }
 
-// SetMulti acquires write locks on all keys (in sorted order to prevent
-// deadlocks), calls fn once with all keys, and atomically sets the returned
-// values.
-//
-// The callback receives held keys in undefined order. Callers needing stable
-// order should sort before use.
-//
-// On partial CAS failure, returns a *BatchError listing succeeded and failed keys.
+// SetMulti acquires write locks for all keys (in sorted order to avoid
+// deadlocks), calls fn once with the held keys (order is undefined; sort if
+// you need stability), and atomically writes the returned values. Returns a
+// *BatchError on partial CAS failure.
 func (pca *PrimeableCacheAside) SetMulti(
 	ctx context.Context,
 	ttl time.Duration,
@@ -192,25 +183,18 @@ func (pca *PrimeableCacheAside) SetMulti(
 	return NewBatchError(failed, succeeded)
 }
 
-// ForceSet unconditionally writes a value to Redis, bypassing all locks.
-// Any in-progress Get or Set on this key will see ErrLockLost and retry.
-//
-// ttl must be > 0 (Redis rejects PX 0). Use Del to remove a key.
-//
-// Prefer Set when you need rollback semantics on callback failure.
-//
-// The value is envelope-wrapped with delta=0, so refresh-ahead falls back to
-// the simple floor check.
+// ForceSet unconditionally writes value, bypassing locks. In-progress Get/Set
+// callers on the same key will see ErrLockLost and retry. ttl must be > 0
+// (Redis rejects PX 0); use Del to remove. The value is envelope-wrapped with
+// delta=0, so refresh-ahead falls back to the simple floor check. Prefer Set
+// when you need callback-error rollback.
 func (pca *PrimeableCacheAside) ForceSet(ctx context.Context, ttl time.Duration, key, value string) error {
 	return pca.client.Do(ctx, pca.client.B().Set().Key(key).Value(wrapEnvelope(value, 0)).Px(ttl).Build()).Error()
 }
 
-// ForceSetMulti unconditionally writes multiple values, bypassing all locks.
-// Any in-progress Get or Set on these keys will see ErrLockLost and retry.
-//
-// ttl must be > 0 (Redis rejects PX 0).
-//
-// On partial failure, returns a *BatchError listing succeeded and failed keys.
+// ForceSetMulti unconditionally writes values, bypassing locks. In-progress
+// Get/Set callers on the same keys will see ErrLockLost and retry. ttl must
+// be > 0. Returns a *BatchError on partial failure.
 func (pca *PrimeableCacheAside) ForceSetMulti(ctx context.Context, ttl time.Duration, values map[string]string) error {
 	if len(values) == 0 {
 		return nil
@@ -239,8 +223,8 @@ func (pca *PrimeableCacheAside) ForceSetMulti(ctx context.Context, ttl time.Dura
 	return NewBatchError(failed, succeeded)
 }
 
-// waitForReadLocks registers all keys, batch-reads them, and waits on any
-// holding a lock value. Register before DoCache so onInvalidate can find the
+// waitForReadLocks batch-reads keys and waits out any that currently hold a
+// lock value. Registration must precede DoCache so onInvalidate can find the
 // lockEntries.
 func (pca *PrimeableCacheAside) waitForReadLocks(ctx context.Context, keys []string) error {
 	waitChansP := chanPool.Get(len(keys))

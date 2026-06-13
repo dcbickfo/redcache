@@ -1,61 +1,7 @@
-// Package redcache provides a cache-aside implementation for Redis with distributed locking.
-//
-// This library builds on the rueidis Redis client to provide:
-//   - Cache-aside pattern with automatic cache population
-//   - Distributed locking to prevent thundering herd
-//   - Client-side caching to reduce Redis round trips
-//   - Redis cluster support with slot-aware batching
-//   - Automatic cleanup of expired lock entries
-//
-// # Basic Usage
-//
-//	client, err := redcache.NewRedCacheAside(
-//	    rueidis.ClientOption{InitAddress: []string{"localhost:6379"}},
-//	    redcache.CacheAsideOption{LockTTL: 10 * time.Second},
-//	)
-//	if err != nil {
-//	    return err
-//	}
-//	defer client.Client().Close()
-//
-//	// Get a single value with automatic cache population
-//	value, err := client.Get(ctx, time.Minute, "user:123", func(ctx context.Context, key string) (string, error) {
-//	    return fetchFromDatabase(ctx, key)
-//	})
-//
-//	// Get multiple values with batched cache population
-//	values, err := client.GetMulti(ctx, time.Minute, []string{"user:1", "user:2"}, func(ctx context.Context, keys []string) (map[string]string, error) {
-//	    return fetchMultipleFromDatabase(ctx, keys)
-//	})
-//
-// # Distributed Locking
-//
-// The library ensures that only one goroutine (across all instances of your application)
-// executes the callback function for a given key at a time. Other goroutines will wait
-// for the lock to be released and then return the cached value.
-//
-// Locks are implemented using Redis SET NX with a configurable TTL. Lock values use
-// UUIDv7 for uniqueness and are prefixed (default: "__redcache:lock:") to avoid
-// collisions with application data.
-//
-// # Context and Timeouts
-//
-// All operations respect context cancellation. The LockTTL option controls:
-//   - Maximum time a lock can be held before automatic expiration
-//   - Timeout for waiting on locks when handling invalidation messages
-//   - Context timeout for cleanup operations
-//
-// Use context deadlines to control overall operation timeout:
-//
-//	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-//	defer cancel()
-//	value, err := client.Get(ctx, time.Minute, key, callback)
-//
-// # Client-Side Caching
-//
-// The library uses rueidis client-side caching with Redis invalidation messages.
-// When a key is modified in Redis, invalidation messages automatically clear the
-// local cache, ensuring consistency across distributed instances.
+// Package redcache implements a Redis cache-aside built on rueidis. It uses
+// rueidis client-side caching plus Redis SET NX locking so only one goroutine
+// (across all processes) populates a missing key, with the rest waiting on the
+// invalidation push for the populated value.
 package redcache
 
 import (
@@ -78,7 +24,6 @@ import (
 	"github.com/dcbickfo/redcache/internal/syncx"
 )
 
-// Pools for slice headers reused across multi-key call paths.
 var (
 	cacheableTTLPool = poolx.NewSlice(func() []rueidis.CacheableTTL { return make([]rueidis.CacheableTTL, 0, 16) })
 	commandsPool     = poolx.NewSlice(func() []rueidis.Completed { return make([]rueidis.Completed, 0, 16) })
@@ -87,26 +32,20 @@ var (
 	chanPool         = poolx.NewSlice(func() []<-chan struct{} { return make([]<-chan struct{}, 0, 16) })
 )
 
-// Default prefixes used by CacheAside. Overridable via CacheAsideOption.LockPrefix
-// and CacheAsideOption.RefreshLockPrefix.
 const (
 	DefaultLockPrefix    = "__redcache:lock:"
 	DefaultRefreshPrefix = "__redcache:refresh:"
 )
 
-// lockEntry tracks a key's wait channel and TTL timer.
-//
-// cancel() and the timer's fire path both close done idempotently via sync.Once.
-// Only the external cancel path reads le.timer; the timer-fire path does not,
-// avoiding a data race against the write in register().
+// lockEntry tracks a key's wait channel and its TTL timer. cancel and
+// timerExpired close done idempotently; timerExpired skips reading le.timer
+// because doing so would race the write in register's slow path.
 type lockEntry struct {
 	done  chan struct{}
 	once  sync.Once
 	timer *time.Timer
 }
 
-// cancel stops the timer and closes done. Safe across concurrent invocations.
-// Used by onInvalidate, Close, and register's race-loss path.
 func (le *lockEntry) cancel() {
 	le.once.Do(func() {
 		if le.timer != nil {
@@ -116,25 +55,19 @@ func (le *lockEntry) cancel() {
 	})
 }
 
-// timerExpired is the timer-fire path. It must not read le.timer: the timer is
-// firing, so reading the field would race with the assignment in register's slow path.
 func (le *lockEntry) timerExpired() {
 	le.once.Do(func() {
 		close(le.done)
 	})
 }
 
-// Logger defines the logging interface used by CacheAside.
-// Implementations must be safe for concurrent use and handle log levels internally.
+// Logger is the slog-shaped subset CacheAside calls into. *slog.Logger satisfies it.
 type Logger interface {
-	// Error logs unexpected failures or critical issues.
 	Error(msg string, args ...any)
-	// Debug logs verbose diagnostic information about internal state.
 	Debug(msg string, args ...any)
 }
 
-// CacheAside provides a cache-aside pattern backed by Redis with distributed locking
-// and client-side caching via rueidis invalidation messages.
+// CacheAside is a cache-aside view over a rueidis.Client.
 type CacheAside struct {
 	client         rueidis.Client
 	locks          syncx.Map[string, *lockEntry]
@@ -156,60 +89,39 @@ type CacheAside struct {
 	closeOnce      sync.Once
 }
 
-// CacheAsideOption configures a CacheAside instance.
+// CacheAsideOption configures a CacheAside.
 type CacheAsideOption struct {
-	// LockTTL is the maximum time a lock can be held, and the timeout for waiting
-	// on locks when an invalidation message is lost. Defaults to 10 seconds.
+	// LockTTL bounds both how long a Redis lock survives and how long callers
+	// wait for one. Defaults to 10s; values below 100ms are rejected.
 	LockTTL time.Duration
-	// ClientBuilder optionally overrides how the rueidis.Client is created.
-	// When nil, rueidis.NewClient is used.
+	// ClientBuilder overrides rueidis.NewClient. Useful for tests.
 	ClientBuilder func(option rueidis.ClientOption) (rueidis.Client, error)
-	// Logger for errors and debug output. Defaults to slog.Default().
+	// Logger defaults to slog.Default().
 	Logger Logger
-	// Metrics receives observability events. Defaults to NoopMetrics.
-	// Implementations must be concurrent-safe; methods run on the hot path.
+	// Metrics defaults to NoopMetrics. Methods run on the hot path; impls must
+	// be concurrent-safe.
 	Metrics Metrics
-	// LockPrefix for distributed locks. Defaults to DefaultLockPrefix.
-	// Choose a prefix unlikely to conflict with your data keys.
+	// LockPrefix is the in-Redis prefix tagged onto lock values so tryGet can
+	// recognise a lock as a miss. Defaults to DefaultLockPrefix.
 	LockPrefix string
-	// RefreshLockPrefix is the key prefix used for distributed refresh-ahead locks.
-	// Defaults to DefaultRefreshPrefix. Refresh keys include a hash tag wrapping
-	// the data key so they hash to the same cluster slot as the data key
-	// (e.g. "__redcache:refresh:{user:123}").
+	// RefreshLockPrefix is the prefix for refresh-ahead dedup keys. Defaults
+	// to DefaultRefreshPrefix. The data key is wrapped in a hash tag so the
+	// refresh lock hashes to the same cluster slot.
 	RefreshLockPrefix string
-	// RefreshAfterFraction enables refresh-ahead caching. When a cached value
-	// is returned and more than this fraction of its TTL has elapsed, a
-	// background worker refreshes the value while the stale one is returned
-	// immediately. For example, 0.8 means "refresh after 80% of TTL has passed".
-	// Set to 0 (default) to disable. Must be in [0, 1).
-	//
-	// The threshold uses the client-side cache TTL (CachePTTL), which closely
-	// approximates the server-side TTL when the same ttl is used consistently
-	// for a key across Get calls.
-	//
-	// While remaining TTL is above (1 - RefreshAfterFraction) * ttl, refresh
-	// never fires. Below that floor, XFetch sampling decides whether each
-	// individual read triggers refresh (see RefreshBeta).
+	// RefreshAfterFraction enables refresh-ahead. Reads with remaining TTL
+	// below (1 - RefreshAfterFraction) * ttl may trigger a background refresh
+	// while still returning the cached value. Must be in [0, 1); 0 disables.
 	RefreshAfterFraction float64
-	// RefreshBeta scales the XFetch probabilistic-refresh window. Higher values
-	// trigger refresh earlier within the floor; the per-read probability climbs
-	// as the value approaches expiry, weighted by compute time (delta) so
-	// slow-to-recompute values get more headroom. Default 0 (XFetch disabled,
-	// always refresh below floor); 1.0 matches canonical XFetch from Vattani
-	// et al. Only applies to envelope-wrapped values; legacy values (no delta
-	// recorded) always use the simple floor-based behaviour.
-	//
-	// In multi-key writes the recorded delta is the total fn duration divided
-	// evenly across returned values. Batches dominated by one slow key will
-	// under-refresh it relative to a serial path.
+	// RefreshBeta enables XFetch-style probabilistic sampling within the
+	// refresh window, weighting by recorded compute time so slow values get
+	// more headroom. 0 (default) = always refresh below the floor; 1.0 matches
+	// canonical XFetch (Vattani et al). Multi-key writes record fn duration
+	// divided evenly across returned values.
 	RefreshBeta float64
-	// RefreshWorkers is the number of background workers that process refresh
-	// jobs. Defaults to 4 when RefreshAfterFraction > 0. Must be > 0 when refresh
-	// is enabled.
+	// RefreshWorkers is the size of the refresh worker pool. Defaults to 4.
 	RefreshWorkers int
-	// RefreshQueueSize is the maximum number of pending refresh jobs. When full,
-	// new requests are silently dropped (stale value continues to be served).
-	// Defaults to 64 when RefreshAfterFraction > 0. Must be > 0 when refresh is enabled.
+	// RefreshQueueSize bounds pending refresh jobs; over-full drops silently.
+	// Defaults to 64.
 	RefreshQueueSize int
 }
 
@@ -272,7 +184,7 @@ func validateRefreshDefaults(caOption *CacheAsideOption) error {
 	return nil
 }
 
-// NewRedCacheAside creates a CacheAside with the given Redis client and cache-aside options.
+// NewRedCacheAside builds a CacheAside.
 func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOption) (*CacheAside, error) {
 	if err := validateAndApplyDefaults(clientOption, &caOption); err != nil {
 		return nil, err
@@ -295,10 +207,8 @@ func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOpti
 		refreshBeta:    caOption.RefreshBeta,
 		refreshPrefix:  caOption.RefreshLockPrefix,
 	}
-	// Force a single connection per node so client-side cache reads and the
-	// invalidation stream share the same pipe. Avoids cross-connection
-	// invalidation routing. Users needing different behavior can override via
-	// CacheAsideOption.ClientBuilder.
+	// PipelineMultiplex=-1: single connection per node so cache reads and the
+	// invalidation stream share a pipe. ClientBuilder can override.
 	clientOption.PipelineMultiplex = -1
 	clientOption.OnInvalidations = rca.onInvalidate
 
@@ -320,20 +230,16 @@ func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOpti
 	return rca, nil
 }
 
-// Client returns the underlying rueidis.Client for advanced operations.
-// Most users should not need direct client access. Use with caution as
-// direct operations bypass the cache-aside pattern and distributed locking.
+// Client returns the underlying rueidis.Client. Bypasses cache-aside semantics.
 func (rca *CacheAside) Client() rueidis.Client {
 	return rca.client
 }
 
-// Close cancels all pending lock entries and shuts down refresh workers.
-// It does NOT close the underlying Redis client — that is the caller's responsibility.
-// If refresh-ahead is enabled, Close waits for in-flight refresh jobs (bounded
-// by LockTTL). Safe to call multiple times.
+// Close cancels pending lock entries and drains refresh workers (bounded by
+// LockTTL). The underlying rueidis.Client is the caller's to close. Idempotent.
 //
-// Shutdown signals workers via refreshDone rather than closing refreshQueue:
-// concurrent send + close on the same channel is a data race even with recover.
+// Shutdown signals workers via refreshDone; closing refreshQueue would race
+// concurrent senders.
 func (rca *CacheAside) Close() {
 	rca.closeOnce.Do(func() {
 		rca.closing.Store(true)
@@ -348,15 +254,12 @@ func (rca *CacheAside) Close() {
 	})
 }
 
-// cleanupCtx returns a context derived from ctx with cancellation/deadline
-// stripped (so cleanup runs even after the original request completes) but
-// bounded at lockTTL. Callers MUST defer the returned cancel.
+// cleanupCtx returns ctx with cancellation/deadline stripped but bounded at
+// lockTTL — so cleanup outlives a cancelled request without leaking forever.
+// Callers must defer the returned cancel.
 func (rca *CacheAside) cleanupCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), rca.lockTTL)
 }
-
-// Metric emit helpers. Each gates on rca.metricsEnabled; count-based helpers
-// short-circuit on n <= 0 to avoid emitting zeros.
 
 func (rca *CacheAside) emitCacheHits(n int) {
 	if rca.metricsEnabled && n > 0 {
@@ -370,8 +273,7 @@ func (rca *CacheAside) emitCacheMisses(n int) {
 	}
 }
 
-// awaitLock blocks until waitChan closes or ctx is done, then emits the
-// resolved-wait duration. Returns nil on lock release, ctx.Err() on cancellation.
+// awaitLock blocks on waitChan or ctx. Emits the wait duration regardless.
 func (rca *CacheAside) awaitLock(ctx context.Context, waitChan <-chan struct{}) error {
 	start := time.Now()
 	select {
@@ -384,8 +286,7 @@ func (rca *CacheAside) awaitLock(ctx context.Context, waitChan <-chan struct{}) 
 	}
 }
 
-// awaitLockMulti waits for every channel to close (or ctx to cancel) and emits
-// the elapsed wait time once.
+// awaitLockMulti is awaitLock for many channels.
 func (rca *CacheAside) awaitLockMulti(ctx context.Context, chans []<-chan struct{}) error {
 	start := time.Now()
 	err := syncx.WaitForAll(ctx, chans)
@@ -462,17 +363,14 @@ func (rca *CacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 	}
 }
 
-// register publishes a per-key lockEntry and returns its done channel and a
-// leader flag. leader=true: this caller created the entry and must drive
-// Redis-side work (tryLock + fn + setWithLock). leader=false: another in-process
-// caller owns that work and the follower waits on done instead of re-issuing
-// SET NX, saving N-1 round trips when many goroutines miss the same key.
+// register publishes a per-key lockEntry. leader=true means the caller drives
+// Redis-side work (SET NX + fn + setWithLock); followers wait on the returned
+// channel, saving N-1 round trips on a shared miss.
 func (rca *CacheAside) register(key string) (<-chan struct{}, bool) {
 retry:
 	if actual, ok := rca.locks.Load(key); ok {
 		select {
 		case <-actual.done:
-			// Stale entry — try to atomically delete and retry.
 			rca.locks.CompareAndDelete(key, actual)
 			goto retry
 		default:
@@ -480,9 +378,8 @@ retry:
 		}
 	}
 
-	// The timer must be assigned BEFORE LoadOrStore publishes newEntry, otherwise
-	// a concurrent cancel() could observe a partial struct (timer field not yet
-	// written).
+	// timer must be assigned before LoadOrStore publishes newEntry — otherwise
+	// a concurrent cancel could see the field still nil.
 	newEntry := &lockEntry{done: make(chan struct{})}
 	newEntry.timer = time.AfterFunc(rca.lockTTL, func() {
 		newEntry.timerExpired()
@@ -493,7 +390,7 @@ retry:
 		return newEntry.done, true
 	}
 
-	// Lost the race — release our timer so it doesn't keep the closure alive.
+	// Lost the race — release our timer so the closure can be GCd.
 	newEntry.cancel()
 
 	select {
@@ -505,11 +402,9 @@ retry:
 	}
 }
 
-// Get returns the cached value for key, populating the cache by calling fn on a miss.
-// Only one goroutine across all instances executes fn for a given key at a time;
-// others wait for the result via Redis invalidation messages.
-//
-// Empty-string values are valid hits.
+// Get returns the cached value for key, calling fn on a miss. Only one
+// goroutine across all processes runs fn for a given key; others wait on the
+// resulting invalidation. Empty strings are valid hits.
 func (rca *CacheAside) Get(
 	ctx context.Context,
 	ttl time.Duration,
@@ -534,8 +429,6 @@ retry:
 	rca.emitCacheMisses(1)
 
 	if !leader {
-		// Follower: leader will drive Redis population. Skip our SET NX and
-		// wait for the leader's invalidation.
 		rca.emitLockContended(1)
 		if werr := rca.awaitLock(ctx, wait); werr != nil {
 			return "", werr
@@ -549,11 +442,9 @@ retry:
 	}
 
 	if errors.Is(err, errLockFailed) || errors.Is(err, ErrLockLost) {
-		// errLockFailed: another process holds the Redis lock. Don't cancel our
-		// local lockEntry — that would wake followers prematurely and they would
-		// each become a new leader racing the same Redis NX. Wait alongside them
-		// for the actual Redis holder's invalidation.
-		// ErrLockLost: a ForceSet stole our lock — retry to read it.
+		// errLockFailed: another process holds the Redis lock — wait alongside
+		// followers (cancelling our entry would wake them to race the same NX).
+		// ErrLockLost: a ForceSet stole our lock; retry to read its value.
 		rca.emitLockContended(1)
 		if werr := rca.awaitLock(ctx, wait); werr != nil {
 			return "", werr
@@ -564,15 +455,12 @@ retry:
 	return "", err
 }
 
-// Del removes a key from Redis, triggering invalidation on all clients.
+// Del removes a key, triggering invalidation on all subscribed clients.
 func (rca *CacheAside) Del(ctx context.Context, key string) error {
 	return rca.client.Do(ctx, rca.client.B().Del().Key(key).Build()).Error()
 }
 
-// DelMulti removes multiple keys from Redis, triggering invalidation on all clients.
-//
-// All commands are issued; on partial failure each per-key error is logged and
-// the first is returned wrapped with key context.
+// DelMulti deletes keys. Per-key errors are logged; the first is returned.
 func (rca *CacheAside) DelMulti(ctx context.Context, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
@@ -600,12 +488,9 @@ func (rca *CacheAside) DelMulti(ctx context.Context, keys ...string) error {
 	return nil
 }
 
-// Touch sets the TTL of a cached value to ttl. No-op when the key is missing
-// or holds a lock value, so it cannot accidentally extend an in-flight lock.
-// PEXPIRE does not trigger client-side invalidation, so existing readers
-// continue to serve from their local copy.
-//
-// Use Touch for sliding-TTL semantics (sessions, tokens) without re-running fn.
+// Touch extends a cached value's TTL via PEXPIRE. No-ops on missing key or
+// lock value (so it can't extend an in-flight lock). PEXPIRE doesn't push
+// invalidations, so existing readers keep serving from their local copy.
 func (rca *CacheAside) Touch(ctx context.Context, ttl time.Duration, key string) error {
 	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
 	if err := touchScript.Exec(ctx, rca.client, []string{key}, []string{ttlMs, rca.lockPrefix}).Error(); err != nil {
@@ -614,9 +499,8 @@ func (rca *CacheAside) Touch(ctx context.Context, ttl time.Duration, key string)
 	return nil
 }
 
-// TouchMulti sets the TTL of multiple cached values to ttl. Per-key extension
-// is a no-op on missing or lock-held keys. Per-key errors are logged and the
-// first is returned wrapped with key context.
+// TouchMulti is Touch over many keys. Per-key errors are logged; the first
+// is returned.
 func (rca *CacheAside) TouchMulti(ctx context.Context, ttl time.Duration, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
@@ -649,7 +533,6 @@ func (rca *CacheAside) groupTouchExecs(ttl time.Duration, keys []string) map[uin
 	return stmtsBySlot
 }
 
-// runTouchSlots executes the touch script per slot in parallel.
 func (rca *CacheAside) runTouchSlots(ctx context.Context, slots map[uint16][]touchExec) (string, error) {
 	var (
 		mu          sync.Mutex
@@ -676,8 +559,6 @@ func (rca *CacheAside) runTouchSlots(ctx context.Context, slots map[uint16][]tou
 	return firstErrKey, firstErr
 }
 
-// touchSlot runs the touch script for one slot's keys, returning the first
-// error and its key.
 func (rca *CacheAside) touchSlot(ctx context.Context, stmts []touchExec) (string, error) {
 	execsP := luaExecPool.Get(len(stmts))
 	defer luaExecPool.Put(execsP)
@@ -704,8 +585,8 @@ var (
 	errLockFailed = errors.New("lock failed")
 )
 
-// cacheReadResult is the return type of tryGet: cached value, client-side
-// cache PTTL, and the envelope's recorded compute delta (0 for legacy values).
+// cacheReadResult is tryGet's return: value, client-side PTTL, recorded
+// compute delta (0 for legacy values).
 type cacheReadResult struct {
 	val   string
 	pttl  int64
@@ -735,7 +616,6 @@ func (rca *CacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key
 		if !setVal {
 			toCtx, cancel := rca.cleanupCtx(ctx)
 			defer cancel()
-			// Best effort: lock TTL will clear it if unlock fails.
 			if err := rca.unlock(toCtx, key, lockVal); err != nil {
 				rca.logger.Error("failed to unlock key", "key", key, "error", err)
 			}
@@ -743,8 +623,6 @@ func (rca *CacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key
 	}()
 	start := time.Now()
 	if val, err = fn(ctx, key); err == nil {
-		// XFetch metadata: record fn duration so future reads can probabilistically
-		// refresh slow-to-recompute values earlier.
 		wrapped := wrapEnvelope(val, time.Since(start))
 		if _, err = rca.setWithLock(ctx, ttl, key, valAndLock{wrapped, lockVal}); err == nil {
 			setVal = true
@@ -757,11 +635,9 @@ func (rca *CacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key
 func (rca *CacheAside) tryLock(ctx context.Context, key string) (string, error) {
 	lockVal := rca.lockPool.Generate()
 	err := rca.client.Do(ctx, rca.client.B().Set().Key(key).Value(lockVal).Nx().Get().Px(rca.lockTTL).Build()).Error()
-	// SET NX GET reply semantics:
-	//   IsRedisNil: NX fired, lock acquired.
-	//   nil error:  key existed; NX rejected.
-	//   other err:  real Redis error — propagate so the caller can fail fast
-	//               instead of waiting on a contention channel that will never close.
+	// SET NX GET: IsRedisNil = lock acquired; nil = NX rejected; other = real
+	// error — propagate so callers fail fast instead of waiting on a channel
+	// that never closes.
 	if rueidis.IsRedisNil(err) {
 		return lockVal, nil
 	}
@@ -780,8 +656,7 @@ func (rca *CacheAside) setWithLock(ctx context.Context, ttl time.Duration, key s
 		rca.emitLockLost(key)
 		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
 	}
-	// Lua returns 0 on CAS mismatch (lock lost), 1 on success. A non-integer
-	// response means the script drifted.
+	// 0 = CAS lost; 1 = success. Anything else = script drift.
 	val, ierr := resp.AsInt64()
 	if ierr != nil {
 		rca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
@@ -798,8 +673,8 @@ func (rca *CacheAside) unlock(ctx context.Context, key string, lock string) erro
 	return delKeyLua.Exec(ctx, rca.client, []string{key}, []string{lock}).Error()
 }
 
-// GetMulti returns cached values for the given keys, populating misses via fn.
-// SET operations are grouped by Redis cluster slot for efficient batching.
+// GetMulti returns cached values for keys, calling fn for misses. SETs are
+// grouped by cluster slot.
 func (rca *CacheAside) GetMulti(
 	ctx context.Context,
 	ttl time.Duration,
@@ -811,9 +686,7 @@ func (rca *CacheAside) GetMulti(
 	}
 	res := make(map[string]string, len(keys))
 
-	// Parallel slices: pending[i] is an unresolved key, chans[i] its wait
-	// channel from register(). Pooled so the dominant cache-hit path stays
-	// alloc-free for these two slice headers.
+	// pending[i] / chans[i] are index-aligned: unresolved key + its wait channel.
 	pendingP := stringPool.Get(len(keys))
 	defer stringPool.Put(pendingP)
 	pending := *pendingP
@@ -823,13 +696,12 @@ func (rca *CacheAside) GetMulti(
 	defer chanPool.Put(chansP)
 	chans := *chansP
 
-	// Pooled scratch slice for refresh-ahead candidates. triggerMultiRefresh
-	// copies into its own slice, so reusing the buffer across retries is safe.
+	// triggerMultiRefresh copies into its own slice, so we can reuse the buffer.
 	needRefreshP := stringPool.GetCap(len(keys))
 	defer stringPool.Put(needRefreshP)
 
-	// Leader keys: this caller created the lockEntry; followers stay out and
-	// skip the Redis SET NX, waiting on chans[i] instead. Rebuilt each retry.
+	// Leader keys are rebuilt each retry: a leader created the lockEntry and
+	// drives Redis-side work; followers skip SET NX and wait on chans[i].
 	leaderKeysP := stringPool.GetCap(len(keys))
 	defer stringPool.Put(leaderKeysP)
 
@@ -869,8 +741,8 @@ retry:
 	}
 
 	if len(pending) > 0 {
-		// Followers plus leaders whose Redis NX lost — both wait for the actual
-		// Redis lock holder's invalidation (or the lockTTL fallback).
+		// Followers + leaders whose NX lost: wait for the holder's invalidation
+		// (or lockTTL).
 		rca.emitLockContended(len(pending))
 		if err = rca.awaitLockMulti(ctx, chans); err != nil {
 			return nil, err
@@ -880,8 +752,8 @@ retry:
 	return res, nil
 }
 
-// runLeaderSets drops leaderKeys already populated by tryGetMulti (e.g. via a
-// CSC invalidation mid-call) then drives trySetMultiKeyFn for the rest.
+// runLeaderSets filters out leaderKeys that tryGetMulti already populated
+// (CSC invalidation can land mid-call), then SETs the rest.
 func (rca *CacheAside) runLeaderSets(
 	ctx context.Context,
 	ttl time.Duration,
@@ -903,8 +775,8 @@ func (rca *CacheAside) runLeaderSets(
 	return rca.trySetMultiKeyFn(ctx, ttl, leaderKeys, fn, res)
 }
 
-// filterResolved drops keys present in resolved from pending+chans in-place,
-// keeping the two slices index-aligned so each remaining key keeps its wait channel.
+// filterResolved drops keys present in resolved from pending+chans in place,
+// keeping the slices index-aligned.
 func filterResolved(pending []string, chans []<-chan struct{}, resolved map[string]string) ([]string, []<-chan struct{}) {
 	n := 0
 	for i, k := range pending {
@@ -918,8 +790,8 @@ func filterResolved(pending []string, chans []<-chan struct{}, resolved map[stri
 }
 
 // tryGetMulti reads keys via DoMultiCache, writes non-lock values into res,
-// and appends refresh-ahead candidates onto needRefresh (caller-supplied empty
-// slice). Returns the appended slice so the caller can update its pool handle.
+// and appends refresh-ahead candidates onto needRefresh (returned so callers
+// can update their pool handle).
 func (rca *CacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string, res map[string]string, needRefresh []string) ([]string, error) {
 	multiP := cacheableTTLPool.Get(len(keys))
 	defer cacheableTTLPool.Put(multiP)
@@ -951,8 +823,8 @@ func (rca *CacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys 
 	return needRefresh, nil
 }
 
-// trySetMultiKeyFn locks each pending key, calls fn, sets values in Redis,
-// and writes successfully-set entries into res.
+// trySetMultiKeyFn locks each pending key, calls fn, writes the values, and
+// records successes in res.
 func (rca *CacheAside) trySetMultiKeyFn(
 	ctx context.Context,
 	ttl time.Duration,
@@ -988,9 +860,8 @@ func (rca *CacheAside) trySetMultiKeyFn(
 	if err != nil {
 		return err
 	}
-	// XFetch metadata: amortise fn time across the values produced. Skewed
-	// (parallel batches report the same per-key delta as serial), but better
-	// than 0 — slow batches get proportionally more refresh headroom.
+	// Amortise fn time across returned values for XFetch sampling. Skewed but
+	// better than 0 — slow batches get proportionally more refresh headroom.
 	delta := perValueDelta(time.Since(start), len(vals))
 
 	vL := make(map[string]valAndLock, len(vals))
@@ -1010,9 +881,8 @@ func (rca *CacheAside) trySetMultiKeyFn(
 	return nil
 }
 
-// perValueDelta amortises a multi-key fn's total compute time across the
-// values it produced. Returns 0 when n <= 0, which makes shouldRefresh fall
-// back to the floor.
+// perValueDelta divides total by n. Returns 0 when n<=0 (shouldRefresh then
+// falls back to the floor check).
 func perValueDelta(total time.Duration, n int) time.Duration {
 	if n <= 0 {
 		return 0
@@ -1029,14 +899,9 @@ func (rca *CacheAside) tryLockMulti(ctx context.Context, keys []string) (map[str
 		*cmdsP = append(*cmdsP, rca.client.B().Set().Key(k).Value(lockVals[k]).Nx().Get().Px(rca.lockTTL).Build())
 	}
 	resps := rca.client.DoMulti(ctx, *cmdsP...)
-	// SET NX GET reply semantics (per-key, mirroring tryLock):
-	//   IsRedisNil:  NX fired, lock acquired.
-	//   nil error:   key existed; NX rejected — caller waits for release.
-	//   other err:   real Redis error — propagate so the caller fails fast.
-	//
-	// DoMulti is a pipeline: every SET NX has already executed by the time we
-	// read resps. Drain ALL responses so successes from earlier indices can be
-	// released; an early return would leak them for the full lockTTL.
+	// Drain every response: DoMulti has already executed all SET NXs in the
+	// pipeline, so an early return would leak the later acquires for lockTTL.
+	// IsRedisNil = acquired; nil = NX rejected; other = propagate.
 	var firstErr error
 	var firstErrKey string
 	for i, r := range resps {
@@ -1077,7 +942,6 @@ type keyOrderAndSet struct {
 	setStmts []rueidis.LuaExec
 }
 
-// groupBySlot groups keys by their Redis cluster slot for batched Lua execution.
 func groupBySlot(keyValLock map[string]valAndLock, ttl time.Duration) map[uint16]keyOrderAndSet {
 	stmts := make(map[uint16]keyOrderAndSet)
 	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
@@ -1101,10 +965,8 @@ type slotSetResult struct {
 	err  error
 }
 
-// runSlotSet executes the Lua statements for one slot. All responses are
-// inspected so successes in the same batch are not lost when reporting an
-// error. Lua returning 0 (or a nil response, treated defensively as the same)
-// indicates a CAS mismatch (lock lost): the key is dropped and LockLost emits.
+// runSlotSet executes one slot's CAS-set scripts. Every response is inspected
+// so successes survive a sibling error; Lua=0 (or nil) is a lock-lost.
 func (rca *CacheAside) runSlotSet(ctx context.Context, kos keyOrderAndSet) slotSetResult {
 	var keys []string
 	var firstErr error
@@ -1121,9 +983,9 @@ func (rca *CacheAside) runSlotSet(ctx context.Context, kos keyOrderAndSet) slotS
 	return slotSetResult{keys: keys, err: firstErr}
 }
 
-// inspectSlotSetResponse classifies one ExecMulti response into success /
-// silent LockLost / surfaceable error. Parse errors are surfaced so script
-// drift fails fast instead of triggering an infinite retry loop.
+// inspectSlotSetResponse classifies one CAS-set response: success, silent
+// lock-lost, or surfaceable error. Parse errors are surfaced so script drift
+// can't trigger an infinite retry loop.
 func (rca *CacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResult) (bool, error) {
 	if err := resp.Error(); err != nil {
 		if rueidis.IsRedisNil(err) {
@@ -1144,16 +1006,15 @@ func (rca *CacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResu
 	return true, nil
 }
 
-// executeSetStatements runs the per-slot Lua set scripts and reduces results
-// to (succeeded keys, first error). Slot work runs to completion before the
-// reduce so a real Redis error in one slot can't mask successes in another.
+// executeSetStatements runs the per-slot scripts then reduces to (keys, err).
+// Slot work runs to completion before the reduce so an error in one slot
+// can't mask successes in another.
 func (rca *CacheAside) executeSetStatements(ctx context.Context, stmts map[uint16]keyOrderAndSet) ([]string, error) {
 	return rca.collectSlotSetResults(rca.runSlotSets(ctx, stmts))
 }
 
-// runSlotSets executes each slot's Lua script, fanning out to goroutines only
-// when there is real parallelism. Single-slot deployments hit the inline path;
-// ExecMulti already pipelines per-slot scripts.
+// runSlotSets fans out to goroutines only when there's real parallelism;
+// single-slot deployments hit the inline path (ExecMulti pipelines per-slot).
 func (rca *CacheAside) runSlotSets(ctx context.Context, stmts map[uint16]keyOrderAndSet) []slotSetResult {
 	results := make([]slotSetResult, 0, len(stmts))
 	if len(stmts) <= 1 {
@@ -1180,8 +1041,8 @@ func (rca *CacheAside) runSlotSets(ctx context.Context, stmts map[uint16]keyOrde
 	return results
 }
 
-// collectSlotSetResults reduces per-slot outcomes to (keys, firstErr). On
-// error the successfully written keys are logged for operator reconciliation.
+// collectSlotSetResults reduces per-slot outcomes. On error, succeeded keys
+// are logged for operator reconciliation.
 func (rca *CacheAside) collectSlotSetResults(results []slotSetResult) ([]string, error) {
 	var succeeded []string
 	var firstErr error
@@ -1235,7 +1096,7 @@ func (rca *CacheAside) unlockMulti(ctx context.Context, lockVals map[string]stri
 			for i, s := range stmts {
 				execs[i] = s.exec
 			}
-			// Best effort: locks will expire if unlock fails.
+			// Best effort — locks expire on lockTTL anyway.
 			resps := delKeyLua.ExecMulti(ctx, rca.client, execs...)
 			for i, resp := range resps {
 				if err := resp.Error(); err != nil {

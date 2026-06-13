@@ -7,19 +7,17 @@ import (
 	"unsafe"
 )
 
-// Typed is a type-safe view over a *CacheAside. One *CacheAside can be shared
-// across many Typed views with different K/V instantiations and codecs.
+// Typed is a type-safe view over a *CacheAside. One *CacheAside may be shared
+// across many Typed views with different K/V and codecs.
 type Typed[K comparable, V any] struct {
 	cache    *CacheAside
 	keyCodec KeyCodec[K]
 	valCodec Codec[V]
-	// keyIsString is true iff keyCodec is StringKeyCodec, which guarantees
-	// K=string (StringKeyCodec only implements KeyCodec[string]). Multi-key
-	// paths use this to alias []K↔[]string and skip a reverse-lookup map.
+	// Set when keyCodec is StringKeyCodec; multi-key paths then alias
+	// []K↔[]string instead of building a reverse-lookup map.
 	keyIsString bool
 }
 
-// NewTyped constructs a typed view over cache.
 func NewTyped[K comparable, V any](cache *CacheAside, keyCodec KeyCodec[K], valCodec Codec[V]) *Typed[K, V] {
 	t := &Typed[K, V]{cache: cache, keyCodec: keyCodec, valCodec: valCodec}
 	if _, ok := any(keyCodec).(StringKeyCodec); ok {
@@ -28,20 +26,14 @@ func NewTyped[K comparable, V any](cache *CacheAside, keyCodec KeyCodec[K], valC
 	return t
 }
 
-// NewStringTyped is sugar for NewTyped[string, V] with StringKeyCodec{} preset.
+// NewStringTyped is NewTyped[string, V] with StringKeyCodec preset.
 func NewStringTyped[V any](cache *CacheAside, valCodec Codec[V]) *Typed[string, V] {
 	return NewTyped[string, V](cache, StringKeyCodec{}, valCodec)
 }
 
-// Get returns the cached value for k, populating the cache via fn on a miss.
-// See (*CacheAside).Get for stampede / lock semantics.
-//
-// Errors:
-//   - keyCodec.EncodeKey error: returned before any Redis I/O.
-//   - fn error: forwarded as-is (lock released, nothing cached).
-//   - valCodec.Encode error inside fn: forwarded as a callback error.
-//   - valCodec.Decode error on read: returned wrapped with ErrDecode; the
-//     cached entry is left intact.
+// Get returns the cached value for k, calling fn on a miss. Decode errors on
+// read are wrapped with ErrDecode and leave the cached entry intact. See
+// (*CacheAside).Get for stampede / lock semantics.
 func (t *Typed[K, V]) Get(
 	ctx context.Context,
 	ttl time.Duration,
@@ -76,7 +68,7 @@ func (t *Typed[K, V]) Get(
 	return v, nil
 }
 
-// Del removes a key from Redis, triggering invalidation on all clients.
+// Del removes a key, triggering invalidation on all subscribed clients.
 func (t *Typed[K, V]) Del(ctx context.Context, k K) error {
 	encKey, err := t.keyCodec.EncodeKey(k)
 	if err != nil {
@@ -85,8 +77,7 @@ func (t *Typed[K, V]) Del(ctx context.Context, k K) error {
 	return t.cache.Del(ctx, encKey)
 }
 
-// Touch sets the TTL of a cached value to ttl. See (*CacheAside).Touch for
-// no-op-on-lock and no-op-on-missing-key semantics.
+// Touch sets the TTL of a cached value. See (*CacheAside).Touch.
 func (t *Typed[K, V]) Touch(ctx context.Context, ttl time.Duration, k K) error {
 	encKey, err := t.keyCodec.EncodeKey(k)
 	if err != nil {
@@ -95,15 +86,9 @@ func (t *Typed[K, V]) Touch(ctx context.Context, ttl time.Duration, k K) error {
 	return t.cache.Touch(ctx, ttl, encKey)
 }
 
-// GetMulti returns cached values for keys, populating misses via fn.
-// See (*CacheAside).GetMulti for slot-batching and stampede semantics.
-//
-// Errors:
-//   - keyCodec.EncodeKey error: returned before any Redis I/O.
-//   - fn error: forwarded as-is.
-//   - valCodec.Encode error inside fn: forwarded as a callback error.
-//   - valCodec.Decode error on a read result: returned wrapped with ErrDecode;
-//     no successful entries are returned in that case.
+// GetMulti returns cached values for keys, calling fn for misses. A decode
+// error on any read returns wrapped with ErrDecode and aborts the batch. See
+// (*CacheAside).GetMulti for slot-batching and stampede semantics.
 func (t *Typed[K, V]) GetMulti(
 	ctx context.Context,
 	ttl time.Duration,
@@ -119,8 +104,7 @@ func (t *Typed[K, V]) GetMulti(
 	return t.getMultiKeyed(ctx, ttl, keys, fn)
 }
 
-// getMultiString is the K=string fast path. Aliases keys to []string and skips
-// the byEnc reverse-lookup map.
+// K=string fast path: aliases keys to []string, skips the reverse-lookup map.
 func (t *Typed[K, V]) getMultiString(
 	ctx context.Context,
 	ttl time.Duration,
@@ -151,8 +135,6 @@ func (t *Typed[K, V]) getMultiString(
 	return out, nil
 }
 
-// getMultiKeyed is the general path for non-string keys, building a byEnc map
-// to recover K from each encoded key.
 func (t *Typed[K, V]) getMultiKeyed(
 	ctx context.Context,
 	ttl time.Duration,
@@ -200,8 +182,7 @@ func (t *Typed[K, V]) getMultiKeyed(
 	return out, nil
 }
 
-// DelMulti removes multiple keys from Redis, triggering invalidation. See
-// (*CacheAside).DelMulti.
+// DelMulti removes keys, triggering invalidation. See (*CacheAside).DelMulti.
 func (t *Typed[K, V]) DelMulti(ctx context.Context, keys ...K) error {
 	if len(keys) == 0 {
 		return nil
@@ -213,8 +194,7 @@ func (t *Typed[K, V]) DelMulti(ctx context.Context, keys ...K) error {
 	return t.cache.DelMulti(ctx, encKeys...)
 }
 
-// TouchMulti sets the TTL of multiple cached values to ttl. See
-// (*CacheAside).TouchMulti for no-op-on-lock and no-op-on-missing-key semantics.
+// TouchMulti extends the TTL of cached values. See (*CacheAside).TouchMulti.
 func (t *Typed[K, V]) TouchMulti(ctx context.Context, ttl time.Duration, keys ...K) error {
 	if len(keys) == 0 {
 		return nil
@@ -226,8 +206,6 @@ func (t *Typed[K, V]) TouchMulti(ctx context.Context, ttl time.Duration, keys ..
 	return t.cache.TouchMulti(ctx, ttl, encKeys...)
 }
 
-// encodeKeys returns keys as []string. Aliases for the StringKeyCodec fast path,
-// otherwise allocates and runs EncodeKey per key.
 func (t *Typed[K, V]) encodeKeys(keys []K) ([]string, error) {
 	if t.keyIsString {
 		return asStringSlice(keys), nil
@@ -243,8 +221,6 @@ func (t *Typed[K, V]) encodeKeys(keys []K) ([]string, error) {
 	return encKeys, nil
 }
 
-// encodeMultiResult converts a typed map[K]V from the user's loader into the
-// map[string]string that (*CacheAside).GetMulti stores in Redis.
 func (t *Typed[K, V]) encodeMultiResult(result map[K]V) (map[string]string, error) {
 	out := make(map[string]string, len(result))
 	for k, v := range result {
@@ -267,29 +243,28 @@ func (t *Typed[K, V]) encodeMultiResult(result map[K]V) (map[string]string, erro
 	return out, nil
 }
 
-// asStringSlice reinterprets a []K as []string. Callers must guarantee K=string
-// (e.g., via Typed.keyIsString).
+// The asK / asString family aliases between K and string under the invariant
+// that K=string — callers (gated on Typed.keyIsString) must guarantee that.
+
 func asStringSlice[K comparable](keys []K) []string {
 	return *(*[]string)(unsafe.Pointer(&keys))
 }
 
-// asKSlice reinterprets a []string as []K. Callers must guarantee K=string.
 func asKSlice[K comparable](s []string) []K {
 	return *(*[]K)(unsafe.Pointer(&s))
 }
 
-// asK reinterprets a string as K. Callers must guarantee K=string.
 func asK[K comparable](s string) K {
 	return *(*K)(unsafe.Pointer(&s))
 }
 
-// asString reinterprets a K as string. Callers must guarantee K=string.
 func asString[K comparable](k K) string {
 	return *(*string)(unsafe.Pointer(&k))
 }
 
-// stringToBytes returns the bytes backing s. Callers must not mutate the
-// returned slice — codecs treat Decode input as borrowed.
+// stringToBytes / bytesToString alias without copying. The result is read-only;
+// codecs treat both Decode input and post-Encode bytes as borrowed.
+
 func stringToBytes(s string) []byte {
 	if s == "" {
 		return nil
@@ -297,8 +272,6 @@ func stringToBytes(s string) []byte {
 	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
-// bytesToString returns a string viewing the bytes of b. The library owns b
-// after Encode returns and never mutates it.
 func bytesToString(b []byte) string {
 	if len(b) == 0 {
 		return ""

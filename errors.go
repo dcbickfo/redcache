@@ -7,22 +7,18 @@ import (
 	"strings"
 )
 
-// ErrLockLost indicates the distributed lock was lost or expired before the
-// value could be set.
+// ErrLockLost is returned when the distributed lock was stolen or expired
+// before the value could be written.
 var ErrLockLost = errors.New("lock was lost or expired before value could be set")
 
-// BatchError represents partial failures in a multi-key operation. Currently
-// only PrimeableCacheAside.SetMulti returns this type via errors.As.
+// BatchError carries per-key results of a multi-key operation. All accessors
+// are nil-safe.
 type BatchError struct {
-	// Failed maps each failed key to its error.
-	Failed map[string]error
-	// Succeeded lists the keys that were set successfully.
+	Failed    map[string]error
 	Succeeded []string
 }
 
-// Error returns a human-readable summary of the batch failure. Failed keys are
-// emitted in sorted order so the string is stable across calls. Safe to call
-// on a nil receiver.
+// Error formats the batch outcome with failed keys in sorted order.
 func (e *BatchError) Error() string {
 	if e == nil {
 		return ""
@@ -40,7 +36,7 @@ func (e *BatchError) Error() string {
 	return b.String()
 }
 
-// HasFailures returns true if any keys failed. Safe to call on a nil receiver.
+// HasFailures reports whether any key failed.
 func (e *BatchError) HasFailures() bool {
 	if e == nil {
 		return false
@@ -48,8 +44,7 @@ func (e *BatchError) HasFailures() bool {
 	return len(e.Failed) > 0
 }
 
-// ErrorFor returns the error recorded for key, or nil if the key did not fail.
-// Safe to call on a nil receiver.
+// ErrorFor returns the error for key, or nil.
 func (e *BatchError) ErrorFor(key string) error {
 	if e == nil {
 		return nil
@@ -57,7 +52,7 @@ func (e *BatchError) ErrorFor(key string) error {
 	return e.Failed[key]
 }
 
-// HasError reports whether the given key failed. Safe to call on a nil receiver.
+// HasError reports whether key failed.
 func (e *BatchError) HasError(key string) bool {
 	if e == nil {
 		return false
@@ -66,9 +61,8 @@ func (e *BatchError) HasError(key string) bool {
 	return ok
 }
 
-// NewBatchError creates a BatchError from the given failures and successes.
-// Returns untyped nil when failed is empty so call sites can return it directly
-// as `error`.
+// NewBatchError returns a *BatchError as error, or untyped nil when failed
+// is empty (so call sites can return it directly).
 func NewBatchError(failed map[string]error, succeeded []string) error {
 	if len(failed) == 0 {
 		return nil
@@ -84,15 +78,16 @@ func NewBatchError(failed map[string]error, succeeded []string) error {
 // whether to log, Del, or retry.
 var ErrDecode = errors.New("redcache: decode failed")
 
-// BatchKeyError is the typed counterpart of BatchError, returned (via errors.As)
-// from PrimeableTyped's multi-set methods on partial failure.
+// BatchKeyError is the typed counterpart of BatchError, returned via errors.As
+// from PrimeableTyped multi-set methods on partial failure. All accessors are
+// nil-safe.
 type BatchKeyError[K comparable] struct {
 	Failed    map[K]error
 	Succeeded []K
 }
 
-// Error returns a human-readable summary. Failed keys are sorted by their %v
-// formatting so the output is stable. Safe to call on a nil receiver.
+// Error formats the batch outcome with failed keys sorted by their %v
+// rendering for stable output.
 func (e *BatchKeyError[K]) Error() string {
 	if e == nil {
 		return ""
@@ -114,7 +109,7 @@ func (e *BatchKeyError[K]) Error() string {
 	return b.String()
 }
 
-// HasFailures returns true if any keys failed. Safe to call on a nil receiver.
+// HasFailures reports whether any key failed.
 func (e *BatchKeyError[K]) HasFailures() bool {
 	if e == nil {
 		return false
@@ -122,8 +117,7 @@ func (e *BatchKeyError[K]) HasFailures() bool {
 	return len(e.Failed) > 0
 }
 
-// ErrorFor returns the error recorded for k, or nil if the key did not fail.
-// Safe to call on a nil receiver.
+// ErrorFor returns the error for k, or nil.
 func (e *BatchKeyError[K]) ErrorFor(k K) error {
 	if e == nil {
 		return nil
@@ -131,7 +125,7 @@ func (e *BatchKeyError[K]) ErrorFor(k K) error {
 	return e.Failed[k]
 }
 
-// HasError reports whether the given key failed. Safe to call on a nil receiver.
+// HasError reports whether k failed.
 func (e *BatchKeyError[K]) HasError(k K) bool {
 	if e == nil {
 		return false
@@ -140,8 +134,8 @@ func (e *BatchKeyError[K]) HasError(k K) bool {
 	return ok
 }
 
-// NewBatchKeyError mirrors NewBatchError. Returns untyped nil when failed is
-// empty so call sites can return it directly as `error`.
+// NewBatchKeyError returns a *BatchKeyError as error, or untyped nil when
+// failed is empty (so call sites can return it directly).
 func NewBatchKeyError[K comparable](failed map[K]error, succeeded []K) error {
 	if len(failed) == 0 {
 		return nil

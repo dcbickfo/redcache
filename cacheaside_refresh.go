@@ -76,16 +76,11 @@ func (rca *CacheAside) runRefreshJob(job refreshJob) {
 }
 
 // shouldRefresh reports whether the current read should trigger refresh-ahead.
-//
-// Two stages:
-//  1. Floor: while remaining TTL is at or above (1 - refreshAfter) * ttl, never
-//     refresh.
-//  2. Below floor: if delta and RefreshBeta are both > 0, sample probabilistically
-//     per Vattani et al. (VLDB 2015): refresh when remaining_pttl <= delta * beta
-//     * Exp(1). Per-read probability climbs to 1 at expiry.
-//
-// Falls back to "always refresh below floor" when delta is 0 (legacy values)
-// or RefreshBeta is 0 (XFetch disabled).
+// Above the floor (1-refreshAfter)*ttl, never refresh. Below the floor, if
+// delta and RefreshBeta are both > 0, sample probabilistically per Vattani et
+// al. (VLDB 2015): refresh when remaining_pttl <= delta * beta * Exp(1). Falls
+// back to "always refresh below floor" when delta=0 (legacy values) or
+// RefreshBeta=0 (XFetch disabled).
 func (rca *CacheAside) shouldRefresh(cachePTTL int64, ttl time.Duration, delta time.Duration) bool {
 	if rca.refreshAfter == 0 || cachePTTL <= 0 {
 		return false

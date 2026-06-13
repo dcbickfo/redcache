@@ -7,14 +7,12 @@ import (
 	"time"
 )
 
-// PrimeableTyped is a type-safe view over a *PrimeableCacheAside, adding
-// Set / ForceSet / SetMulti / ForceSetMulti on top of Typed.
+// PrimeableTyped extends Typed with Set/ForceSet over a *PrimeableCacheAside.
 type PrimeableTyped[K comparable, V any] struct {
 	Typed[K, V]
 	primeable *PrimeableCacheAside
 }
 
-// NewPrimeableTyped constructs a typed view over a *PrimeableCacheAside.
 func NewPrimeableTyped[K comparable, V any](
 	cache *PrimeableCacheAside,
 	keyCodec KeyCodec[K],
@@ -24,8 +22,7 @@ func NewPrimeableTyped[K comparable, V any](
 	return &PrimeableTyped[K, V]{Typed: *t, primeable: cache}
 }
 
-// NewPrimeableStringTyped is sugar for NewPrimeableTyped[string, V] with
-// StringKeyCodec{} preset.
+// NewPrimeableStringTyped is NewPrimeableTyped[string, V] with StringKeyCodec preset.
 func NewPrimeableStringTyped[V any](
 	cache *PrimeableCacheAside,
 	valCodec Codec[V],
@@ -33,8 +30,7 @@ func NewPrimeableStringTyped[V any](
 	return NewPrimeableTyped[string, V](cache, StringKeyCodec{}, valCodec)
 }
 
-// Set explicitly populates the cache via fn under a write lock.
-// See (*PrimeableCacheAside).Set.
+// Set populates the cache via fn under a write lock. See (*PrimeableCacheAside).Set.
 func (p *PrimeableTyped[K, V]) Set(
 	ctx context.Context,
 	ttl time.Duration,
@@ -58,7 +54,7 @@ func (p *PrimeableTyped[K, V]) Set(
 	})
 }
 
-// ForceSet unconditionally writes v to Redis. See (*PrimeableCacheAside).ForceSet.
+// ForceSet writes v unconditionally. See (*PrimeableCacheAside).ForceSet.
 func (p *PrimeableTyped[K, V]) ForceSet(ctx context.Context, ttl time.Duration, k K, v V) error {
 	encKey, err := p.keyCodec.EncodeKey(k)
 	if err != nil {
@@ -71,11 +67,8 @@ func (p *PrimeableTyped[K, V]) ForceSet(ctx context.Context, ttl time.Duration, 
 	return p.primeable.ForceSet(ctx, ttl, encKey, bytesToString(b))
 }
 
-// SetMulti explicitly populates the cache via fn under write locks.
-// See (*PrimeableCacheAside).SetMulti.
-//
-// On partial failure the returned error wraps a *BatchKeyError[K] (reachable
-// via errors.As) listing per-key Failed / Succeeded entries.
+// SetMulti populates the cache via fn under write locks. Partial failures
+// surface as *BatchKeyError[K]. See (*PrimeableCacheAside).SetMulti.
 func (p *PrimeableTyped[K, V]) SetMulti(
 	ctx context.Context,
 	ttl time.Duration,
@@ -91,8 +84,7 @@ func (p *PrimeableTyped[K, V]) SetMulti(
 	return p.setMultiKeyed(ctx, ttl, keys, fn)
 }
 
-// setMultiString is the K=string fast path. Aliases keys to []string and skips
-// the byEnc reverse-lookup map.
+// K=string fast path: aliases keys to []string, skips the reverse-lookup map.
 func (p *PrimeableTyped[K, V]) setMultiString(
 	ctx context.Context,
 	ttl time.Duration,
@@ -118,8 +110,6 @@ func (p *PrimeableTyped[K, V]) setMultiString(
 	return convertBatchErrorToTypedString[K](be)
 }
 
-// setMultiKeyed is the general path for non-string keys, building a byEnc map
-// to recover K from each encoded key.
 func (p *PrimeableTyped[K, V]) setMultiKeyed(
 	ctx context.Context,
 	ttl time.Duration,
@@ -158,13 +148,10 @@ func (p *PrimeableTyped[K, V]) setMultiKeyed(
 	return convertBatchErrorToTyped(be, byEnc)
 }
 
-// ForceSetMulti unconditionally writes values to Redis. See
+// ForceSetMulti writes values unconditionally. Encode failures are collected
+// per-key; successfully-encoded entries are still written. Partial failures
+// (encode or write) surface as *BatchKeyError[K]. See
 // (*PrimeableCacheAside).ForceSetMulti.
-//
-// Encode failures are collected per-key and returned as *BatchKeyError[K];
-// successfully encoded entries are still written. On partial Redis failure,
-// the per-key results from the upstream *BatchError are merged into the
-// returned *BatchKeyError[K].
 func (p *PrimeableTyped[K, V]) ForceSetMulti(
 	ctx context.Context,
 	ttl time.Duration,
@@ -179,8 +166,7 @@ func (p *PrimeableTyped[K, V]) ForceSetMulti(
 	return p.forceSetMultiKeyed(ctx, ttl, values)
 }
 
-// forceSetMultiString is the K=string fast path. Aliases each K to string and
-// skips the byEnc reverse-lookup map.
+// K=string fast path: aliases each K to string, skips the reverse-lookup map.
 func (p *PrimeableTyped[K, V]) forceSetMultiString(
 	ctx context.Context,
 	ttl time.Duration,
@@ -208,8 +194,6 @@ func (p *PrimeableTyped[K, V]) forceSetMultiString(
 	return NewBatchKeyError(failed, succeeded)
 }
 
-// forceSetMultiKeyed is the general path for non-string keys, building a byEnc
-// map to recover K from each encoded key.
 func (p *PrimeableTyped[K, V]) forceSetMultiKeyed(
 	ctx context.Context,
 	ttl time.Duration,
