@@ -16,7 +16,7 @@ A cache-aside implementation for Redis, built on the [rueidis](https://github.co
 
 ## Requirements
 
-- Go 1.23+
+- Go 1.24+
 - Redis 7+
 
 ## Installation
@@ -54,7 +54,7 @@ func run() error {
             InitAddress: []string{"127.0.0.1:6379"},
         },
         redcache.CacheAsideOption{
-            LockTTL:   time.Second * 1,
+            LockTTL: time.Second,
         },
     )
     if err != nil {
@@ -63,7 +63,7 @@ func run() error {
 
     repo := Repository{
         client: client,
-        db:     &db,
+        db:     db,
     }
 
     val, err := repo.GetByID(context.Background(), "key")
