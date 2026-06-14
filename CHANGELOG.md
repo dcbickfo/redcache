@@ -65,9 +65,12 @@ settles.
 - **Observability signals on `Metrics`**: `LoaderDuration(d)` (foreground
   origin-loader latency), `LoaderErrors(n)` (loader failures by key count), and
   `RedisError(op)` (Redis-command failures, `op` ∈ `read`/`lock`/`set`/`del`/`touch`).
-- **`redcacheotel`** submodule — a drop-in OpenTelemetry `Metrics` adapter
-  (`redcacheotel.NewMetrics(meterProvider)`). It has its own `go.mod`, so the core
-  module gains no OpenTelemetry dependency.
+- **`redcacheotel`** subpackage (`github.com/dcbickfo/redcache/redcacheotel`) — a
+  drop-in OpenTelemetry `Metrics` adapter (`redcacheotel.NewMetrics(meterProvider)`).
+  It lives in the main module, so OpenTelemetry is now a core dependency, pinned at
+  v1.41.0 to preserve the Go 1.24 floor (v1.42+ require Go 1.25). Importing redcache's
+  core does not compile OpenTelemetry into your binary — it is only built if you import
+  `redcacheotel` — though it does appear in the module graph.
 - **`redcachetest` injectable clock** — `redcachetest.NewWithClock[K, V](clk)` with
   a `Clock` (`Advance`/`Now`) for deterministic TTL/expiry tests without `time.Sleep`.
 - `WithRefreshTimeout(d)` — bounds how long a refresh-ahead callback may run,

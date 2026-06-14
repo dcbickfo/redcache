@@ -4,6 +4,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # OTel v1.42+ requires Go 1.25; hold at the latest v1.41.x to keep the Go 1.24 floor.
+      - dependency-name: "go.opentelemetry.io/otel*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

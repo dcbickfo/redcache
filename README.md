@@ -316,7 +316,7 @@ cache := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
 
 ### OpenTelemetry
 
-For OpenTelemetry, use the `redcacheotel` subpackage — a drop-in `Metrics` adapter. It lives in its own module, so the core library takes no OpenTelemetry dependency:
+For OpenTelemetry, use the `redcacheotel` subpackage — a drop-in `Metrics` adapter you import as `github.com/dcbickfo/redcache/redcacheotel`:
 
 ```go
 import "github.com/dcbickfo/redcache/redcacheotel"
@@ -335,6 +335,8 @@ cache := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
 ```
 
 It records counters (hits, misses, lock contention, refresh and error events) and histograms (`lock.wait.duration`, `loader.duration`, in seconds). High-cardinality keys are deliberately not attached as labels; `RedisError`'s bounded `op` is.
+
+Importing redcache's core does **not** pull OpenTelemetry into your binary (verified: zero otel symbols linked) — OTel is only compiled in if you import `redcacheotel`. It does appear in the module graph, since it lives in the main module. OpenTelemetry is pinned at v1.41 because it is the last release supporting Go 1.24; v1.42+ require Go 1.25.
 
 ## Testing code that depends on redcache
 
