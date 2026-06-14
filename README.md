@@ -243,7 +243,7 @@ redcache adds, on top of that shared foundation:
 - **`GetMulti` with cluster-slot batching** — multi-key reads and writes grouped by Redis cluster slot and executed concurrently per slot.
 - **Refresh-ahead + XFetch** — probabilistic early refresh of stale-but-valid entries, decoupling reload latency from request latency.
 - **Typed keys, not just values** — a `KeyCodec[K]` maps a domain key type to the Redis key, and multi-key write failures come back as a typed, per-key `*BatchKeyError[K]`.
-- **Write-through priming** — `Set` / `ForceSet` / `Touch` (and multi variants) populate or extend entries without a read-through miss.
+- **Write-through priming** — `Set` / `ForceSet` / `Touch` (and multi variants) populate or extend entries without a read-through miss. This is the hardest piece for `rueidisaside` to absorb rather than just a missing feature: `rueidisaside` claims only *missing* keys, with a single per-client placeholder and no value backup, whereas `Set` overwrites an already-live value under a per-call lock token and restores the prior value if the write fails. In-place locking, per-call lock identity, and a backup/restore path are structural to redcache's model, not a flag on the read-miss-only one.
 - **`Conn` + `New`** — open one connection and derive sibling typed caches that share its client, engine, and invalidation stream, so you can cache multiple value types over a single connection.
 
 This is an honest superset for those specific needs, not a claim that `rueidisaside` is deficient — it deliberately keeps a smaller surface.
