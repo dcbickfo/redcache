@@ -15,11 +15,12 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-// TestCacheAside_Close_SafeUnderConcurrentRefresh hammers Get while Close runs
+// TestCache_Close_SafeUnderConcurrentRefresh hammers Get while Close runs
 // concurrently and is called twice. A regression in enqueueRefresh's
 // closing-flag/recover guard or Close's closeOnce would surface as a panic.
-func TestCacheAside_Close_SafeUnderConcurrentRefresh(t *testing.T) {
+func TestCache_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
 		redcache.StringCodec{},
@@ -78,11 +79,12 @@ func TestCacheAside_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	// Reaching here without a panic is the assertion.
 }
 
-// TestCacheAside_Get_CleanMissEmitsNoFalseLockLost guards against the bug where
+// TestCache_Get_CleanMissEmitsNoFalseLockLost guards against the bug where
 // setKeyLua returned "OK" (unparseable by AsInt64), causing every successful CAS
 // to be misreported as a lost lock.
-func TestCacheAside_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
+func TestCache_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
@@ -110,10 +112,11 @@ func TestCacheAside_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	assert.Equal(t, int64(1), metrics.misses.Load(), "expected exactly one CacheMiss for a single populating Get")
 }
 
-// TestCacheAside_GetMulti_CleanMissEmitsNoFalseLockLost is the multi-key
+// TestCache_GetMulti_CleanMissEmitsNoFalseLockLost is the multi-key
 // counterpart: catches runSlotSet CAS-interpretation regressions.
-func TestCacheAside_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
+func TestCache_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
@@ -145,10 +148,11 @@ func TestCacheAside_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	assert.Zero(t, metrics.contended.Load(), "uncontended GetMulti must not emit LockContended")
 }
 
-// TestCacheAside_EmptyValueIsCacheHit verifies an empty-string cached value is
+// TestCache_EmptyValueIsCacheHit verifies an empty-string cached value is
 // returned as a hit rather than treated as a miss.
-func TestCacheAside_EmptyValueIsCacheHit(t *testing.T) {
+func TestCache_EmptyValueIsCacheHit(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	pca, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
@@ -177,11 +181,11 @@ func TestCacheAside_EmptyValueIsCacheHit(t *testing.T) {
 	assert.Zero(t, metrics.misses.Load(), "no CacheMiss should be recorded for an empty value")
 }
 
-// TestPrimeableCacheAside_Set_RollbackPreservesEmptyValue verifies a Set callback
+// TestCache_Set_RollbackPreservesEmptyValue verifies a Set callback
 // failure restores "" rather than DELing the key.
-func TestPrimeableCacheAside_Set_RollbackPreservesEmptyValue(t *testing.T) {
+func TestCache_Set_RollbackPreservesEmptyValue(t *testing.T) {
 	t.Parallel()
-	pca := makePrimeableClient(t, addr)
+	pca := makeClient(t, addr)
 	defer pca.Client().Close()
 	ctx := context.Background()
 
@@ -203,14 +207,14 @@ func TestPrimeableCacheAside_Set_RollbackPreservesEmptyValue(t *testing.T) {
 	assert.Equal(t, "", res, "rollback should preserve the empty-string value, not DEL the key")
 }
 
-// TestPrimeableCacheAside_Set_RollbackPreservesPTTL verifies the prior value's
+// TestCache_Set_RollbackPreservesPTTL verifies the prior value's
 // remaining TTL is preserved on rollback. Failure modes:
 //   - PTTL == -2: rollback DELed instead of restoring.
 //   - PTTL == -1: rollback SET without PX (now persistent).
 //   - PTTL ~= ttl arg: rollback used the new ttl, not the captured PTTL.
-func TestPrimeableCacheAside_Set_RollbackPreservesPTTL(t *testing.T) {
+func TestCache_Set_RollbackPreservesPTTL(t *testing.T) {
 	t.Parallel()
-	pca := makePrimeableClient(t, addr)
+	pca := makeClient(t, addr)
 	defer pca.Client().Close()
 	ctx := context.Background()
 
@@ -238,10 +242,11 @@ func TestPrimeableCacheAside_Set_RollbackPreservesPTTL(t *testing.T) {
 	assert.Equal(t, "__redcache:v1:0:v", val, "rollback should restore the original captured (envelope-wrapped) value")
 }
 
-// TestCacheAside_GetMulti_CASMismatchDropsKey verifies runSlotSet drops keys
+// TestCache_GetMulti_CASMismatchDropsKey verifies runSlotSet drops keys
 // with a stolen lock (CAS Lua returned 0) and emits LockLost.
-func TestCacheAside_GetMulti_CASMismatchDropsKey(t *testing.T) {
+func TestCache_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	pca, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
@@ -278,10 +283,11 @@ func TestCacheAside_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	assert.GreaterOrEqual(t, metrics.lost.Load(), int64(1), "expected LockLost metric for the stolen key")
 }
 
-// TestPrimeableCacheAside_Set_RollbackSurvivesContextCancel verifies Set's rollback
+// TestCache_Set_RollbackSurvivesContextCancel verifies Set's rollback
 // completes under a cancelled caller ctx (bestEffortRestore uses cleanupCtx).
-func TestPrimeableCacheAside_Set_RollbackSurvivesContextCancel(t *testing.T) {
+func TestCache_Set_RollbackSurvivesContextCancel(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
 		redcache.StringCodec{},

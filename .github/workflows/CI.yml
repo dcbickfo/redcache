@@ -9,28 +9,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ['1.24.x', '1.25.x']
+    runs-on: ubuntu-latest
     services:
       redis:
-        # Docker Hub image
-        image: redis
+        # Pinned to match the tag used in docker-compose.yml for local dev.
+        image: redis:7.2.4-alpine
         ports:
           - 6379:6379
-    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
-      - name: Install dependencies
-        run: go mod vendor
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.11.4
-          args: --timeout=5m
+          go-version: ${{ matrix.go-version }}
       - name: Test with Go
         run: go test -race -coverprofile=coverage.out -json ./... > TestResults.json
       - name: Coverage summary
@@ -38,10 +35,34 @@ jobs:
       - name: Upload Go test results
         uses: actions/upload-artifact@v4
         with:
-          name: Go-results
+          name: Go-results-${{ matrix.go-version }}
           path: TestResults.json
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
+          name: coverage-report-${{ matrix.go-version }}
           path: coverage.out
+      - name: Upload coverage to Codecov
+        # Upload from a single matrix leg so coverage is not double-counted.
+        if: matrix.go-version == '1.24.x'
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+          # Public repos can upload tokenlessly. If Codecov requires a token,
+          # set CODECOV_TOKEN as a repository secret and it will be picked up here.
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.11.4
+          args: --timeout=5m

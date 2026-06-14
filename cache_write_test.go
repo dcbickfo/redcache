@@ -17,22 +17,9 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-func makePrimeableClient(t *testing.T, addr []string) redcache.Cache[string, string] {
-	t.Helper()
-	client, err := redcache.NewString[string](
-		rueidis.ClientOption{
-			InitAddress: addr,
-		},
-		redcache.StringCodec{},
-		redcache.WithLockTTL(time.Second*1),
-	)
-	require.NoError(t, err)
-	return client
-}
-
-func TestPrimeableCacheAside_Set_Basic(t *testing.T) {
+func TestCache_Set_Basic(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -55,9 +42,9 @@ func TestPrimeableCacheAside_Set_Basic(t *testing.T) {
 	assert.False(t, called, "Get callback should not be invoked after Set")
 }
 
-func TestPrimeableCacheAside_Set_Overwrites(t *testing.T) {
+func TestCache_Set_Overwrites(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -84,9 +71,9 @@ func TestPrimeableCacheAside_Set_Overwrites(t *testing.T) {
 	assert.Equal(t, val2, res)
 }
 
-func TestPrimeableCacheAside_Set_WaitsForExistingReadLock(t *testing.T) {
+func TestCache_Set_WaitsForExistingReadLock(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -125,9 +112,9 @@ func TestPrimeableCacheAside_Set_WaitsForExistingReadLock(t *testing.T) {
 	assert.Equal(t, setVal, res)
 }
 
-func TestPrimeableCacheAside_Set_Concurrent(t *testing.T) {
+func TestCache_Set_Concurrent(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -158,9 +145,9 @@ func TestPrimeableCacheAside_Set_Concurrent(t *testing.T) {
 	assert.GreaterOrEqual(t, successCount.Load(), int32(1), "at least one Set must succeed (otherwise concurrent Sets are silently broken)")
 }
 
-func TestPrimeableCacheAside_SetMulti_Basic(t *testing.T) {
+func TestCache_SetMulti_Basic(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -193,9 +180,9 @@ func TestPrimeableCacheAside_SetMulti_Basic(t *testing.T) {
 	}
 }
 
-func TestPrimeableCacheAside_SetMulti_NoDeadlock(t *testing.T) {
+func TestCache_SetMulti_NoDeadlock(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -244,9 +231,9 @@ func TestPrimeableCacheAside_SetMulti_NoDeadlock(t *testing.T) {
 	wg.Wait()
 }
 
-func TestPrimeableCacheAside_ForceSet_Basic(t *testing.T) {
+func TestCache_ForceSet_Basic(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -264,9 +251,9 @@ func TestPrimeableCacheAside_ForceSet_Basic(t *testing.T) {
 	assert.Equal(t, val, res)
 }
 
-func TestPrimeableCacheAside_ForceSet_StealsLock(t *testing.T) {
+func TestCache_ForceSet_StealsLock(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -306,9 +293,9 @@ func TestPrimeableCacheAside_ForceSet_StealsLock(t *testing.T) {
 	assert.NotEmpty(t, res, "expected a value to be cached")
 }
 
-func TestPrimeableCacheAside_ForceSetMulti_Basic(t *testing.T) {
+func TestCache_ForceSetMulti_Basic(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -330,9 +317,9 @@ func TestPrimeableCacheAside_ForceSetMulti_Basic(t *testing.T) {
 	}
 }
 
-func TestPrimeableCacheAside_Set_ContextCancellation(t *testing.T) {
+func TestCache_Set_ContextCancellation(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 
 	key := "key:" + uuid.New().String()
@@ -353,9 +340,9 @@ func TestPrimeableCacheAside_Set_ContextCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
-func TestPrimeableCacheAside_Close_CancelsPendingLocks(t *testing.T) {
+func TestCache_Close_CancelsPendingLocks(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -393,9 +380,9 @@ func TestPrimeableCacheAside_Close_CancelsPendingLocks(t *testing.T) {
 	}
 }
 
-func TestPrimeableCacheAside_SetMulti_ContextCancellation(t *testing.T) {
+func TestCache_SetMulti_ContextCancellation(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 
 	keys := []string{
@@ -421,9 +408,9 @@ func TestPrimeableCacheAside_SetMulti_ContextCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
-func TestPrimeableCacheAside_Set_CallbackError(t *testing.T) {
+func TestCache_Set_CallbackError(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -450,9 +437,9 @@ func TestPrimeableCacheAside_Set_CallbackError(t *testing.T) {
 	assert.Equal(t, val, res)
 }
 
-func TestPrimeableCacheAside_Set_CallbackError_RestoresValue(t *testing.T) {
+func TestCache_Set_CallbackError_RestoresValue(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -482,9 +469,9 @@ func TestPrimeableCacheAside_Set_CallbackError_RestoresValue(t *testing.T) {
 	assert.Equal(t, originalVal, res)
 }
 
-func TestPrimeableCacheAside_SetMulti_CallbackError_RestoresValues(t *testing.T) {
+func TestCache_SetMulti_CallbackError_RestoresValues(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -528,9 +515,9 @@ func TestPrimeableCacheAside_SetMulti_CallbackError_RestoresValues(t *testing.T)
 	}
 }
 
-func TestPrimeableCacheAside_SetMulti_PartialCASFailure_BatchError(t *testing.T) {
+func TestCache_SetMulti_PartialCASFailure_BatchError(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -567,9 +554,9 @@ func TestPrimeableCacheAside_SetMulti_PartialCASFailure_BatchError(t *testing.T)
 	assert.Equal(t, forcedVal, res)
 }
 
-func TestPrimeableCacheAside_ForceSet_OverwritesExistingValue(t *testing.T) {
+func TestCache_ForceSet_OverwritesExistingValue(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -597,7 +584,7 @@ func TestPrimeableCacheAside_ForceSet_OverwritesExistingValue(t *testing.T) {
 	assert.Equal(t, forcedVal, res)
 }
 
-func TestNewPrimeableCacheAside_Validation(t *testing.T) {
+func TestNewWriteCache_Validation(t *testing.T) {
 	t.Parallel()
 	t.Run("empty InitAddress", func(t *testing.T) {
 		t.Parallel()
@@ -620,11 +607,11 @@ func TestNewPrimeableCacheAside_Validation(t *testing.T) {
 	})
 }
 
-func TestPrimeableCacheAside_MultiClient_SetGet(t *testing.T) {
+func TestCache_MultiClient_SetGet(t *testing.T) {
 	t.Parallel()
-	client1 := makePrimeableClient(t, addr)
+	client1 := makeClient(t, addr)
 	defer client1.Client().Close()
-	client2 := makePrimeableClient(t, addr)
+	client2 := makeClient(t, addr)
 	defer client2.Client().Close()
 	ctx := context.Background()
 
@@ -646,9 +633,9 @@ func TestPrimeableCacheAside_MultiClient_SetGet(t *testing.T) {
 	assert.False(t, called, "client2 Get callback should not be called")
 }
 
-func TestPrimeableCacheAside_ConcurrentSetAndGet(t *testing.T) {
+func TestCache_ConcurrentSetAndGet(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -681,9 +668,9 @@ func TestPrimeableCacheAside_ConcurrentSetAndGet(t *testing.T) {
 	assert.NotEmpty(t, res)
 }
 
-func TestPrimeableCacheAside_SetMulti_EmptyKeys(t *testing.T) {
+func TestCache_SetMulti_EmptyKeys(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 
@@ -694,9 +681,9 @@ func TestPrimeableCacheAside_SetMulti_EmptyKeys(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestPrimeableCacheAside_ForceSetMulti_EmptyMap(t *testing.T) {
+func TestCache_ForceSetMulti_EmptyMap(t *testing.T) {
 	t.Parallel()
-	client := makePrimeableClient(t, addr)
+	client := makeClient(t, addr)
 	defer client.Client().Close()
 	ctx := context.Background()
 

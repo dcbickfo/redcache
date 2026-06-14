@@ -23,7 +23,18 @@ import (
 
 var addr = []string{"127.0.0.1:6379"}
 
+// skipIfNoRedis skips integration tests that need a live Redis when run under
+// -short, so `go test -short ./...` exercises only the no-Redis unit subset.
+func skipIfNoRedis(tb testing.TB) {
+	tb.Helper()
+	if testing.Short() {
+		tb.Skip("requires Redis")
+	}
+}
+
 func makeClient(t *testing.T, addr []string) redcache.Cache[string, string] {
+	t.Helper()
+	skipIfNoRedis(t)
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{
 			InitAddress: addr,
@@ -37,7 +48,7 @@ func makeClient(t *testing.T, addr []string) redcache.Cache[string, string] {
 	return client
 }
 
-func TestCacheAside_Get(t *testing.T) {
+func TestCache_Get(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -68,7 +79,7 @@ func TestCacheAside_Get(t *testing.T) {
 
 }
 
-func TestCacheAside_GetMulti(t *testing.T) {
+func TestCache_GetMulti(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -108,7 +119,7 @@ func TestCacheAside_GetMulti(t *testing.T) {
 	require.False(t, called)
 }
 
-func TestCacheAside_GetMulti_Partial(t *testing.T) {
+func TestCache_GetMulti_Partial(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -171,7 +182,7 @@ func TestCacheAside_GetMulti_Partial(t *testing.T) {
 	require.False(t, called)
 }
 
-func TestCacheAside_GetMulti_PartLock(t *testing.T) {
+func TestCache_GetMulti_PartLock(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -216,7 +227,7 @@ func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 	require.False(t, called)
 }
 
-func TestCacheAside_Del(t *testing.T) {
+func TestCache_Del(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -601,7 +612,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 	wg.Wait()
 }
 
-func TestCacheAside_DelMulti(t *testing.T) {
+func TestCache_DelMulti(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -632,7 +643,7 @@ func TestCacheAside_DelMulti(t *testing.T) {
 	}
 }
 
-func TestCacheAside_Touch_ExtendsTTL(t *testing.T) {
+func TestCache_Touch_ExtendsTTL(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -652,7 +663,7 @@ func TestCacheAside_Touch_ExtendsTTL(t *testing.T) {
 	assert.Greater(t, pttl, int64(2000), "TTL should have been extended well past the original 500ms")
 }
 
-func TestCacheAside_Touch_NoOpOnMissing(t *testing.T) {
+func TestCache_Touch_NoOpOnMissing(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -665,7 +676,7 @@ func TestCacheAside_Touch_NoOpOnMissing(t *testing.T) {
 	require.True(t, rueidis.IsRedisNil(err), "Touch must not create the key")
 }
 
-func TestCacheAside_Touch_NoOpOnLockValue(t *testing.T) {
+func TestCache_Touch_NoOpOnLockValue(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -688,7 +699,7 @@ func TestCacheAside_Touch_NoOpOnLockValue(t *testing.T) {
 	assert.Equal(t, lockVal, got, "lock value must be preserved")
 }
 
-func TestCacheAside_TouchMulti_ExtendsTTLs(t *testing.T) {
+func TestCache_TouchMulti_ExtendsTTLs(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -715,14 +726,14 @@ func TestCacheAside_TouchMulti_ExtendsTTLs(t *testing.T) {
 	}
 }
 
-func TestCacheAside_TouchMulti_EmptyKeysIsNoOp(t *testing.T) {
+func TestCache_TouchMulti_EmptyKeysIsNoOp(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
 	require.NoError(t, client.TouchMulti(context.Background(), 5*time.Second))
 }
 
-func TestCacheAside_GetParentContextCancellation(t *testing.T) {
+func TestCache_GetParentContextCancellation(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -754,6 +765,7 @@ func TestCacheAside_GetParentContextCancellation(t *testing.T) {
 // TestConcurrentRegisterRace stresses register() to guard the CompareAndDelete race.
 func TestConcurrentRegisterRace(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	// Minimum lock TTL forces expirations under contention.
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{
@@ -874,11 +886,11 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 	assert.Equal(t, 1, callCount, "callback should only be called once")
 }
 
-// TestCacheAside_Get_LeaderNXFailure_WaitsForInvalidation verifies the
+// TestCache_Get_LeaderNXFailure_WaitsForInvalidation verifies the
 // leader/follower discipline when an in-process leader's SET NX is rejected.
 // The leader must wait for the actual holder's invalidation rather than
 // cancelling its own lockEntry and waking followers into a busy-loop NX race.
-func TestCacheAside_Get_LeaderNXFailure_WaitsForInvalidation(t *testing.T) {
+func TestCache_Get_LeaderNXFailure_WaitsForInvalidation(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -987,7 +999,7 @@ func TestConcurrentInvalidation(t *testing.T) {
 	assert.Greater(t, callCount, initialCount, "callbacks should be invoked after invalidation")
 }
 
-func TestCacheAside_Get_CallbackError(t *testing.T) {
+func TestCache_Get_CallbackError(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -1010,7 +1022,7 @@ func TestCacheAside_Get_CallbackError(t *testing.T) {
 	assert.Equal(t, val, res)
 }
 
-func TestCacheAside_GetMulti_CallbackError(t *testing.T) {
+func TestCache_GetMulti_CallbackError(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -1045,7 +1057,7 @@ func TestCacheAside_GetMulti_CallbackError(t *testing.T) {
 	}
 }
 
-func TestCacheAside_Close(t *testing.T) {
+func TestCache_Close(t *testing.T) {
 	t.Parallel()
 	client := makeClient(t, addr)
 	defer client.Client().Close()
@@ -1087,6 +1099,7 @@ func TestCacheAside_Close(t *testing.T) {
 
 func makeRefreshClient(t *testing.T, addr []string, fraction float64) redcache.Cache[string, string] {
 	t.Helper()
+	skipIfNoRedis(t)
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{
 			InitAddress: addr,
@@ -1454,6 +1467,7 @@ func TestRefreshAhead_GetMulti(t *testing.T) {
 
 func TestRefreshAhead_Backpressure(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	// Tiny pool (1 worker, queue size 1) plus a sleeping callback so the queue fills fast.
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
@@ -1555,6 +1569,7 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	})
 	t.Run("valid fraction", func(t *testing.T) {
 		t.Parallel()
+		skipIfNoRedis(t)
 		client, err := redcache.NewString[string](
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.StringCodec{},
@@ -1588,6 +1603,7 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	})
 	t.Run("custom workers and queue", func(t *testing.T) {
 		t.Parallel()
+		skipIfNoRedis(t)
 		client, err := redcache.NewString[string](
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.StringCodec{},
@@ -1601,7 +1617,7 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	})
 }
 
-func TestNewRedCacheAside_Validation(t *testing.T) {
+func TestNew_Validation(t *testing.T) {
 	t.Parallel()
 	t.Run("empty InitAddress", func(t *testing.T) {
 		t.Parallel()
@@ -1636,10 +1652,11 @@ func TestNewRedCacheAside_Validation(t *testing.T) {
 	})
 }
 
-// TestCacheAside_Get_ErrLockLostRetry verifies a ForceSet during a Get callback
+// TestCache_Get_ErrLockLostRetry verifies a ForceSet during a Get callback
 // causes Get's CAS-set to fail and a subsequent read returns the forced value.
-func TestCacheAside_Get_ErrLockLostRetry(t *testing.T) {
+func TestCache_Get_ErrLockLostRetry(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
 		redcache.StringCodec{},

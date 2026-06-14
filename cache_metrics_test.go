@@ -55,6 +55,7 @@ func (m *capturingMetrics) RefreshError(key string) {
 
 func TestMetrics_HitAndMiss(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
@@ -84,6 +85,7 @@ func TestMetrics_HitAndMiss(t *testing.T) {
 
 func TestMetrics_RefreshTriggered(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
@@ -121,6 +123,7 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 
 func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
@@ -169,6 +172,7 @@ func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
 // emits RefreshError tagged with the affected key.
 func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
@@ -217,6 +221,7 @@ func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 // the refresh queue saturates.
 func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
@@ -275,6 +280,7 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 
 func TestMetrics_LockWaitDuration(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	client, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},

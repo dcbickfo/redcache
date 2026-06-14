@@ -187,6 +187,7 @@ func BenchmarkTypedForceSetMulti(b *testing.B) {
 // JSON pays json.Unmarshal; Bytes/String are zero-/single-copy.
 func BenchmarkTypedGet_Codec(b *testing.B) {
 	b.ReportAllocs()
+	skipIfNoRedis(b)
 	ctx := context.Background()
 	payload := `{"id":1,"name":"alice"}`
 
@@ -254,6 +255,7 @@ func newBenchTypedJSON(b *testing.B) redcache.Cache[string, tUser] {
 
 func newBenchBase(b *testing.B) redcache.Cache[string, tUser] {
 	b.Helper()
+	skipIfNoRedis(b)
 	c, err := redcache.NewString[tUser](
 		rueidisOptForBench(),
 		redcache.JSONCodec[tUser]{},

@@ -31,7 +31,8 @@ func ExampleNewString() {
 		panic(err)
 	}
 	fmt.Println(val)
-	// Output: hello
+	// This example dials Redis, so it omits an Output: directive (which would
+	// make `go test` run it). It is compiled to keep the snippet honest.
 }
 
 func ExampleNewString_getMulti() {
@@ -60,5 +61,5 @@ func ExampleNewString_getMulti() {
 		panic(err)
 	}
 	fmt.Println(len(vals))
-	// Output: 2
+	// Redis-dependent; omits Output: so `go test` does not run it.
 }

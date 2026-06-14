@@ -14,6 +14,7 @@ import (
 
 func newTypedCache[V any](t *testing.T, valCodec redcache.Codec[V]) redcache.Cache[string, V] {
 	t.Helper()
+	skipIfNoRedis(t)
 	c, err := redcache.NewString[V](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		valCodec,
@@ -26,7 +27,7 @@ func newTypedCache[V any](t *testing.T, valCodec redcache.Codec[V]) redcache.Cac
 	return c
 }
 
-func TestPrimeableTyped_Set_PopulatesAndCaches(t *testing.T) {
+func TestTyped_Set_PopulatesAndCaches(t *testing.T) {
 	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	key := "set:" + uuid.NewString()
 
@@ -50,7 +51,7 @@ func TestPrimeableTyped_Set_PopulatesAndCaches(t *testing.T) {
 	}
 }
 
-func TestPrimeableTyped_ForceSet_OverwritesUnconditionally(t *testing.T) {
+func TestTyped_ForceSet_OverwritesUnconditionally(t *testing.T) {
 	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	key := "force:" + uuid.NewString()
 
@@ -72,7 +73,7 @@ func TestPrimeableTyped_ForceSet_OverwritesUnconditionally(t *testing.T) {
 	}
 }
 
-func TestPrimeableTyped_Set_EncodeFailureReleasesLock(t *testing.T) {
+func TestTyped_Set_EncodeFailureReleasesLock(t *testing.T) {
 	users := newTypedCache[badEncode](t, badEncodeCodec{})
 	key := "encfail:" + uuid.NewString()
 
@@ -101,7 +102,7 @@ func (badEncodeCodec) Encode(b badEncode) ([]byte, error) {
 }
 func (badEncodeCodec) Decode(b []byte) (badEncode, error) { return badEncode{}, nil }
 
-func TestPrimeableTyped_SetMulti_PopulatesAll(t *testing.T) {
+func TestTyped_SetMulti_PopulatesAll(t *testing.T) {
 	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	prefix := uuid.NewString() + ":"
 	keys := []string{prefix + "a", prefix + "b"}
@@ -132,9 +133,9 @@ func TestPrimeableTyped_SetMulti_PopulatesAll(t *testing.T) {
 	}
 }
 
-// TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces verifies the typed
+// TestTyped_SetMulti_BatchKeyError_Surfaces verifies the typed
 // wrapper converts *BatchError to *BatchKeyError[string] on partial CAS failure.
-func TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
+func TestTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
 	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	prefix := uuid.NewString() + ":"
 	keys := []string{prefix + "a", prefix + "b"}
@@ -167,7 +168,7 @@ func TestPrimeableTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
 	}
 }
 
-func TestPrimeableTyped_ForceSetMulti_OverwritesAll(t *testing.T) {
+func TestTyped_ForceSetMulti_OverwritesAll(t *testing.T) {
 	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	prefix := uuid.NewString() + ":"
 	in := map[string]tUser{

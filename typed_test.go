@@ -139,6 +139,7 @@ func TestTyped_Touch_ExtendsTTL(t *testing.T) {
 }
 
 func TestTyped_RefreshAhead_FiresThroughTypedView(t *testing.T) {
+	skipIfNoRedis(t)
 	users, err := redcache.NewString[tUser](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.JSONCodec[tUser]{},
@@ -224,6 +225,7 @@ func TestTyped_GetMulti_LoadsAndCaches(t *testing.T) {
 }
 
 func TestTyped_GetMulti_IntKeys(t *testing.T) {
+	skipIfNoRedis(t)
 	prefix := uuid.NewString() + ":"
 	codec := redcache.KeyCodecFunc[int](func(i int) (string, error) {
 		return prefix + strconv.Itoa(i), nil

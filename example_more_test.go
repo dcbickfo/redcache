@@ -54,6 +54,53 @@ func ExampleCache_ForceSetMulti() {
 	}
 }
 
+// Set primes a key under a write lock without a prior read. If the callback
+// returns an error, the cache restores the value that was there before, so a
+// failed refresh never leaves the key empty. Redis-dependent, so it omits an
+// Output: directive and is compiled but not run by `go test`.
+func ExampleCache_Set() {
+	cache, err := redcache.NewString[string](
+		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(5*time.Second),
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer cache.Close()
+
+	err = cache.Set(context.Background(), time.Minute, "config:greeting",
+		func(ctx context.Context, key string) (string, error) {
+			// Compute the value to cache; runs under a write lock.
+			return "hello", nil
+		},
+	)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("primed")
+}
+
+// ForceSet writes a value unconditionally, bypassing the lock. Any in-progress
+// Get or Set on the same key sees ErrLockLost and retries. Redis-dependent, so
+// it omits an Output: directive.
+func ExampleCache_ForceSet() {
+	cache, err := redcache.NewString[string](
+		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+		redcache.StringCodec{},
+		redcache.WithLockTTL(5*time.Second),
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer cache.Close()
+
+	if err := cache.ForceSet(context.Background(), time.Minute, "config:greeting", "hola"); err != nil {
+		panic(err)
+	}
+	fmt.Println("forced")
+}
+
 // New keys the cache by a domain type via a KeyCodec. KeyCodecFunc adapts a
 // plain function into a KeyCodec.
 func ExampleNew() {
