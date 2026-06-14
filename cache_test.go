@@ -48,7 +48,7 @@ func makeClient(t *testing.T, addr []string) (redcache.Cache[string, string], *r
 		t.Fatal(err)
 	}
 	t.Cleanup(conn.Close)
-	return redcache.StringOf[string](conn, redcache.StringCodec{}), conn
+	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
 }
 
 func TestCache_Get(t *testing.T) {
@@ -759,7 +759,7 @@ func TestConcurrentRegisterRace(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "key:" + uuid.New().String()
@@ -1092,7 +1092,7 @@ func makeRefreshClient(t *testing.T, addr []string, fraction float64) (redcache.
 		t.Fatal(err)
 	}
 	t.Cleanup(conn.Close)
-	return redcache.StringOf[string](conn, redcache.StringCodec{}), conn
+	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
 }
 
 func TestRefreshAhead_TriggersBackgroundRefresh(t *testing.T) {
@@ -1452,7 +1452,7 @@ func TestRefreshAhead_Backpressure(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 
 	// Distinct keys so each triggers its own refresh.
@@ -1621,7 +1621,7 @@ func TestCache_Get_ErrLockLostRetry(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 
 	key := "key:" + uuid.New().String()

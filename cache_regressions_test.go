@@ -31,7 +31,7 @@ func TestCache_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "close-stress:" + uuid.New().String()
@@ -93,7 +93,7 @@ func TestCache_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "clean-miss:" + uuid.New().String()
@@ -122,7 +122,7 @@ func TestCache_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	suffix := uuid.New().String()
@@ -155,7 +155,7 @@ func TestCache_EmptyValueIsCacheHit(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	pca := redcache.StringOf[string](conn, redcache.StringCodec{})
+	pca := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "empty-hit:" + uuid.New().String()
@@ -244,7 +244,7 @@ func TestCache_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	pca := redcache.StringOf[string](conn, redcache.StringCodec{})
+	pca := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key1 := "cas:1:" + uuid.New().String()
@@ -280,7 +280,7 @@ func TestCache_Set_RollbackSurvivesContextCancel(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	bg := context.Background()
 	key := "rollback-cancel:" + uuid.New().String()

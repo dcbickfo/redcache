@@ -59,7 +59,7 @@ func TestTyped_Get_DecodeErrorIsWrapped(t *testing.T) {
 		t.Fatalf("open conn: %v", err)
 	}
 	t.Cleanup(conn.Close)
-	users := redcache.StringOf[tUser](conn, redcache.JSONCodec[tUser]{})
+	users := redcache.NewString[tUser](conn, redcache.JSONCodec[tUser]{})
 
 	// Seed garbage so the typed Get's decode call surfaces ErrDecode.
 	key := "decode:" + uuid.NewString()
@@ -86,7 +86,7 @@ func TestTyped_Get_DecodeErrorPreservesUnderlying(t *testing.T) {
 		t.Fatalf("open conn: %v", err)
 	}
 	t.Cleanup(conn.Close)
-	users := redcache.StringOf[tUser](conn, redcache.JSONCodec[tUser]{})
+	users := redcache.NewString[tUser](conn, redcache.JSONCodec[tUser]{})
 
 	key := "decode-chain:" + uuid.NewString()
 	if err := conn.Client().Do(context.Background(),
@@ -171,7 +171,7 @@ func TestTyped_RefreshAhead_FiresThroughTypedView(t *testing.T) {
 		t.Fatalf("new cache: %v", err)
 	}
 	t.Cleanup(conn.Close)
-	users := redcache.StringOf[tUser](conn, redcache.JSONCodec[tUser]{})
+	users := redcache.NewString[tUser](conn, redcache.JSONCodec[tUser]{})
 
 	key := "refresh:" + uuid.NewString()
 
@@ -258,7 +258,7 @@ func TestTyped_GetMulti_IntKeys(t *testing.T) {
 		t.Fatalf("new cache: %v", err)
 	}
 	t.Cleanup(conn.Close)
-	users := redcache.Of[int, tUser](conn, codec, redcache.JSONCodec[tUser]{})
+	users := redcache.New[int, tUser](conn, codec, redcache.JSONCodec[tUser]{})
 
 	loader := func(_ context.Context, missing []int) (map[int]tUser, error) {
 		out := make(map[int]tUser, len(missing))

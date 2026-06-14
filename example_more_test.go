@@ -36,7 +36,7 @@ func ExampleCache_ForceSetMulti() {
 		panic(err)
 	}
 	defer conn.Close()
-	cache := redcache.StringOf[string](conn, failOnEmpty{})
+	cache := redcache.NewString[string](conn, failOnEmpty{})
 
 	err = cache.ForceSetMulti(context.Background(), time.Minute, map[string]string{
 		"a": "alpha",
@@ -67,7 +67,7 @@ func ExampleCache_Set() {
 		panic(err)
 	}
 	defer conn.Close()
-	cache := redcache.StringOf[string](conn, redcache.StringCodec{})
+	cache := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	err = cache.Set(context.Background(), time.Minute, "config:greeting",
 		func(ctx context.Context, key string) (string, error) {
@@ -93,7 +93,7 @@ func ExampleCache_ForceSet() {
 		panic(err)
 	}
 	defer conn.Close()
-	cache := redcache.StringOf[string](conn, redcache.StringCodec{})
+	cache := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	if err := cache.ForceSet(context.Background(), time.Minute, "config:greeting", "hola"); err != nil {
 		panic(err)
@@ -101,9 +101,9 @@ func ExampleCache_ForceSet() {
 	fmt.Println("forced")
 }
 
-// Of keys the cache by a domain type via a KeyCodec. KeyCodecFunc adapts a
+// New keys the cache by a domain type via a KeyCodec. KeyCodecFunc adapts a
 // plain function into a KeyCodec.
-func ExampleOf_typedKeys() {
+func ExampleNew_typedKeys() {
 	type UserID int64
 	type User struct {
 		ID   UserID
@@ -122,7 +122,7 @@ func ExampleOf_typedKeys() {
 		panic(err)
 	}
 	defer conn.Close()
-	cache := redcache.Of[UserID, User](conn, userIDCodec, redcache.JSONCodec[User]{})
+	cache := redcache.New[UserID, User](conn, userIDCodec, redcache.JSONCodec[User]{})
 
 	u, err := cache.Get(context.Background(), time.Minute, UserID(123),
 		func(ctx context.Context, id UserID) (User, error) {
@@ -136,9 +136,9 @@ func ExampleOf_typedKeys() {
 	fmt.Println(u.Name)
 }
 
-// A Conn owns one Redis client and invalidation stream; Of/StringOf derive
+// A Conn owns one Redis client and invalidation stream; New/NewString derive
 // typed views over it — one client backing multiple value types.
-func ExampleOf() {
+func ExampleNew() {
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.WithLockTTL(5*time.Second),
@@ -149,8 +149,8 @@ func ExampleOf() {
 	defer conn.Close() // closing the Conn closes the shared client (and all views)
 
 	// users and loginCounts share one client, connection, and invalidation stream.
-	users := redcache.StringOf[string](conn, redcache.StringCodec{})
-	loginCounts := redcache.Of[string, int](conn, redcache.StringKeyCodec{}, redcache.JSONCodec[int]{})
+	users := redcache.NewString[string](conn, redcache.StringCodec{})
+	loginCounts := redcache.New[string, int](conn, redcache.StringKeyCodec{}, redcache.JSONCodec[int]{})
 	_ = users
 
 	n, err := loginCounts.Get(context.Background(), time.Minute, "u-123",
@@ -179,7 +179,7 @@ func (m *countingMetrics) CacheMisses(n int64) { m.misses.Add(n) }
 // directly (no Redis needed) to show the counting shape.
 func ExampleNoopMetrics() {
 	m := &countingMetrics{}
-	// In real use: open a Conn and derive redcache.StringOf[string](conn, codec) with redcache.WithMetrics(m) passed to Open.
+	// In real use: open a Conn and derive redcache.NewString[string](conn, codec) with redcache.WithMetrics(m) passed to Open.
 	m.CacheHits(3)
 	m.CacheMisses(1)
 	fmt.Println(m.hits.Load(), m.misses.Load())

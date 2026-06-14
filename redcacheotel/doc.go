@@ -1,14 +1,20 @@
 // Package redcacheotel provides a drop-in OpenTelemetry adapter for the
 // redcache.Metrics interface.
 //
-// Wire it into a CacheAside with redcache.WithMetrics:
+// Wire it into a Conn with redcache.WithMetrics, then derive typed views:
 //
 //	mp := otel.GetMeterProvider() // or your own *sdkmetric.MeterProvider
 //	m, err := redcacheotel.NewMetrics(mp)
 //	if err != nil {
 //		return err
 //	}
-//	c, err := redcache.NewCacheAside(client, redcache.WithMetrics(m))
+//	conn, err := redcache.Open(opt, redcache.WithMetrics(m))
+//	if err != nil {
+//		return err
+//	}
+//	defer conn.Close()
+//
+//	cache := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
 //
 // If you prefer to panic on construction failure (instruments only fail to
 // build on programmer error, e.g. a bad unit string), wrap it in a must helper:
@@ -20,7 +26,7 @@
 //		return v
 //	}
 //
-//	c, err := redcache.NewCacheAside(client, redcache.WithMetrics(must(redcacheotel.NewMetrics(mp))))
+//	conn, err := redcache.Open(opt, redcache.WithMetrics(must(redcacheotel.NewMetrics(mp))))
 //
 // # Instruments
 //

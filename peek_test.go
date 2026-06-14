@@ -24,7 +24,7 @@ func TestPeek_MissThenHit(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "peek:" + uuid.New().String()
@@ -61,7 +61,7 @@ func TestPeek_LockValueReadsAsMiss(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "peek-lock:" + uuid.New().String()

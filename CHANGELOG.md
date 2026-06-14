@@ -29,11 +29,11 @@ settles.
   - `Open(clientOption, opts...) (*Conn, error)` — builds and owns the rueidis
     client (and its invalidation stream); the `error` covers config validation
     and client-build failure.
-  - `Of[K, V](conn, keyCodec, valCodec) Cache[K, V]` — typed keys via a
+  - `New[K, V](conn, keyCodec, valCodec) Cache[K, V]` — typed keys via a
     `KeyCodec[K]` and typed values.
-  - `StringOf[V](conn, valCodec) Cache[string, V]` — `StringKeyCodec` preset.
-  - `BytesOf(conn) Cache[string, []byte]` — zero-copy opaque payloads.
-  `Of`/`StringOf`/`BytesOf` do no I/O, so they return no error and panic on a nil
+  - `NewString[V](conn, valCodec) Cache[string, V]` — `StringKeyCodec` preset.
+  - `NewBytes(conn) Cache[string, []byte]` — zero-copy opaque payloads.
+  `New`/`NewString`/`NewBytes` do no I/O, so they return no error and panic on a nil
   codec. One `Conn` can back many views over a single client/invalidation stream.
   Lifecycle stays on the `Conn` (`(*Conn).Close()` / `(*Conn).Client()`); the
   views are operations-only.
@@ -55,8 +55,8 @@ settles.
 - **`BytesCodec` renamed to `UnsafeBytesCodec`** — the name now states the
   zero-copy retention hazard: the decoded slice aliases borrowed library memory
   and must not be mutated or retained past the call.
-- **Nil codecs panic at derivation**, not on the first call. `Of`/`StringOf`/
-  `BytesOf` do no I/O and panic immediately on a nil codec — a programmer error
+- **Nil codecs panic at derivation**, not on the first call. `New`/`NewString`/
+  `NewBytes` do no I/O and panic immediately on a nil codec — a programmer error
   caught at wiring time rather than on the hot path.
 
 ### Added

@@ -21,9 +21,9 @@
 // Open one [Conn] (it owns the rueidis client and invalidation stream), then
 // derive typed views over it that all share that single client:
 //
-//   - [StringOf] — Cache[string, V]: string keys, typed values. The common case.
-//   - [BytesOf]  — Cache[string, []byte]: zero-copy opaque payloads.
-//   - [Of]       — Cache[K, V]: typed keys via a [KeyCodec] (and typed values).
+//   - [NewString] — Cache[string, V]: string keys, typed values. The common case.
+//   - [NewBytes]  — Cache[string, []byte]: zero-copy opaque payloads.
+//   - [New]       — Cache[K, V]: typed keys via a [KeyCodec] (and typed values).
 //
 // The views are operations-only; lifecycle (Close) and the raw-client escape
 // hatch (Client) live on the [Conn]. Deriving a view does no I/O, returns no
@@ -39,7 +39,7 @@
 //	}
 //	defer conn.Close()
 //
-//	cache := redcache.StringOf[string](conn, redcache.StringCodec{})
+//	cache := redcache.NewString[string](conn, redcache.StringCodec{})
 //
 //	v, err := cache.Get(ctx, time.Minute, "k", func(ctx context.Context, key string) (string, error) {
 //		return loadFromUpstream(ctx, key) // runs only on a miss, once per key

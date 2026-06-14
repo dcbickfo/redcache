@@ -10,10 +10,10 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-// Of derives a view over an existing Conn and panics on a nil codec, so a nil
+// New derives a view over an existing Conn and panics on a nil codec, so a nil
 // keyCodec or valCodec fails fast at derivation rather than on the first
 // hot-path call. Deriving needs a live Conn, so this needs Redis.
-func TestOf_NilCodecPanics(t *testing.T) {
+func TestNew_NilCodecPanics(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	opt := rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}
@@ -22,8 +22,8 @@ func TestOf_NilCodecPanics(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
 
-	require.Panics(t, func() { redcache.Of[string, int](conn, nil, redcache.JSONCodec[int]{}) },
-		"Of must panic on a nil keyCodec")
+	require.Panics(t, func() { redcache.New[string, int](conn, nil, redcache.JSONCodec[int]{}) },
+		"New must panic on a nil keyCodec")
 }
 
 // Write methods reject a non-positive ttl with ErrInvalidTTL instead of leaking

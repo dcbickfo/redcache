@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Open builds a Conn; StringOf and Of derive typed views that share its engine
+// Open builds a Conn; NewString and New derive typed views that share its engine
 // (one client, one invalidation stream). This in-package test asserts the share
 // is real via the unexported *cache.core, and that both views work.
 func TestConn_SharesEngine(t *testing.T) {
@@ -26,14 +26,14 @@ func TestConn_SharesEngine(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
 
-	strs := StringOf[string](conn, StringCodec{})
-	ints := Of[string, int](conn, StringKeyCodec{}, JSONCodec[int]{})
+	strs := NewString[string](conn, StringCodec{})
+	ints := New[string, int](conn, StringKeyCodec{}, JSONCodec[int]{})
 
 	require.Same(t, conn.core, strs.(*cache[string, string]).core, "view must share the Conn engine")
 	require.Same(t, conn.core, ints.(*cache[string, int]).core, "views must share one engine")
 
 	// nil codecs panic, they are not rejected with an error.
-	require.Panics(t, func() { Of[string, int](conn, nil, JSONCodec[int]{}) }, "Of must panic on nil codec")
+	require.Panics(t, func() { New[string, int](conn, nil, JSONCodec[int]{}) }, "New must panic on nil codec")
 
 	// Both views are usable over the shared engine.
 	ctx := context.Background()
@@ -66,7 +66,7 @@ func TestConn_ClosesCleanly(t *testing.T) {
 		WithLockTTL(time.Second),
 	)
 	require.NoError(t, err)
-	c := StringOf[string](conn, StringCodec{})
+	c := NewString[string](conn, StringCodec{})
 
 	ctx := context.Background()
 	key := "conn:oneshot:" + uuid.NewString()

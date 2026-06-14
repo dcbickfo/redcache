@@ -80,7 +80,7 @@ func TestMetrics_HitAndMiss(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "metrics:" + uuid.New().String()
@@ -112,7 +112,7 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "refresh-metrics:" + uuid.New().String()
@@ -147,7 +147,7 @@ func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "panic-metrics:" + uuid.New().String()
@@ -193,7 +193,7 @@ func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "refresh-err-metrics:" + uuid.New().String()
@@ -241,7 +241,7 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 
 	const numKeys = 20
@@ -293,7 +293,7 @@ func TestMetrics_LockWaitDuration(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "lockwait:" + uuid.New().String()
@@ -358,7 +358,7 @@ func TestMetrics_LoaderDuration(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "loader-dur:" + uuid.New().String()
@@ -387,7 +387,7 @@ func TestMetrics_LoaderErrors(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "loader-err:" + uuid.New().String()
@@ -415,7 +415,7 @@ func TestMetrics_RedisError(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	// Close the underlying client so the next command fails with a real Redis
 	// transport error (not redis-nil, not lock-lost).

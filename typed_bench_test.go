@@ -211,7 +211,7 @@ func BenchmarkTypedGet_Codec(b *testing.B) {
 			b.Fatalf("new cache: %v", err)
 		}
 		b.Cleanup(conn.Close)
-		users := redcache.BytesOf(conn)
+		users := redcache.NewBytes(conn)
 		key := "bench:typed:codec:bytes:" + uuid.NewString()
 		if err := users.ForceSet(ctx, time.Minute, key, []byte(payload)); err != nil {
 			b.Fatal(err)
@@ -233,7 +233,7 @@ func BenchmarkTypedGet_Codec(b *testing.B) {
 			b.Fatalf("new cache: %v", err)
 		}
 		b.Cleanup(conn.Close)
-		users := redcache.StringOf[string](conn, redcache.StringCodec{})
+		users := redcache.NewString[string](conn, redcache.StringCodec{})
 		key := "bench:typed:codec:string:" + uuid.NewString()
 		if err := users.ForceSet(ctx, time.Minute, key, payload); err != nil {
 			b.Fatal(err)
@@ -266,7 +266,7 @@ func newBenchBase(b *testing.B) redcache.Cache[string, tUser] {
 		b.Fatalf("new cache: %v", err)
 	}
 	b.Cleanup(conn.Close)
-	c := redcache.StringOf[tUser](conn, redcache.JSONCodec[tUser]{})
+	c := redcache.NewString[tUser](conn, redcache.JSONCodec[tUser]{})
 	return c
 }
 

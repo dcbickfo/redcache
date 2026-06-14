@@ -23,7 +23,7 @@ func newTypedCache[V any](t *testing.T, valCodec redcache.Codec[V]) redcache.Cac
 		t.Fatalf("open conn: %v", err)
 	}
 	t.Cleanup(conn.Close)
-	return redcache.StringOf[V](conn, valCodec)
+	return redcache.NewString[V](conn, valCodec)
 }
 
 func TestTyped_Set_PopulatesAndCaches(t *testing.T) {

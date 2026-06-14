@@ -27,7 +27,7 @@ func makeBenchClient(b *testing.B) (redcache.Cache[string, string], *redcache.Co
 		b.Fatal(err)
 	}
 	b.Cleanup(conn.Close)
-	return redcache.StringOf[string](conn, redcache.StringCodec{}), conn
+	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
 }
 
 // Hoisted to package scope so per-iteration loops don't allocate closures.
@@ -253,7 +253,7 @@ func BenchmarkCache_Get_Refresh(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 	key := "bench:get:refresh:" + uuid.New().String()
 	const val = "bench-value"
@@ -287,7 +287,7 @@ func BenchmarkCache_GetMulti_Refresh(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.Cleanup(conn.Close)
-	client := redcache.StringOf[string](conn, redcache.StringCodec{})
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 
 	keys := make([]string, 10)

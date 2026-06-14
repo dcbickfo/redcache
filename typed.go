@@ -14,7 +14,7 @@ import (
 // and value type V, and a pure operational handle. Read methods run the
 // stampede-protected lock loop; write methods populate every subscribed client's
 // cache. It carries no lifecycle or raw-client access — those live on the owning
-// Conn (see Open/Of) — so a Cache is safe to inject into code that should not be
+// Conn (see Open/New) — so a Cache is safe to inject into code that should not be
 // able to close the shared connection, and trivial to fake in tests.
 type Cache[K comparable, V any] interface {
 	// Get returns the cached value for k, calling fn on a miss. Only one caller
@@ -55,7 +55,7 @@ type Cache[K comparable, V any] interface {
 }
 
 // Conn owns one rueidis client, its invalidation stream, and a lock namespace.
-// Derive typed cache views over it with Of, StringOf, or BytesOf — they all
+// Derive typed cache views over it with New, NewString, or NewBytes — they all
 // share the single client and invalidation subscription. The Conn and every
 // view it spawns share one client; closing any of them closes it. Open the Conn
 // once, derive all the views you need, and close the Conn when done with all of
@@ -65,7 +65,7 @@ type Conn struct {
 }
 
 // Open builds a Conn with its own rueidis.Client (wired for invalidation).
-// Derive typed views with Of/StringOf/BytesOf.
+// Derive typed views with New/NewString/NewBytes.
 func Open(clientOption rueidis.ClientOption, opts ...Option) (*Conn, error) {
 	cfg := newConfig(opts...)
 	core, err := newCacheAside(clientOption, cfg)
@@ -82,13 +82,13 @@ func (c *Conn) Close() { c.core.Close() }
 // Client returns the underlying rueidis.Client, shared by every view.
 func (c *Conn) Client() rueidis.Client { return c.core.Client() }
 
-// Of derives a typed Cache[K, V] view over c with its own key/value codecs. The
+// New derives a typed Cache[K, V] view over c with its own key/value codecs. The
 // view shares c's client and invalidation stream and is a pure operational
 // handle — lifecycle (Close) and the raw-client escape hatch live on the Conn,
 // not on the view, so a view is safe to hand to code that should not be able to
 // tear the connection down. Deriving a view does no I/O and cannot fail;
 // keyCodec and valCodec must be non-nil (passing nil panics — a programmer error).
-func Of[K comparable, V any](c *Conn, keyCodec KeyCodec[K], valCodec Codec[V]) Cache[K, V] {
+func New[K comparable, V any](c *Conn, keyCodec KeyCodec[K], valCodec Codec[V]) Cache[K, V] {
 	if keyCodec == nil || valCodec == nil {
 		panic("redcache: keyCodec and valCodec must not be nil")
 	}
@@ -100,20 +100,20 @@ func Of[K comparable, V any](c *Conn, keyCodec KeyCodec[K], valCodec Codec[V]) C
 	}
 }
 
-// StringOf is Of with StringKeyCodec preset (enabling the K=string fast path).
-func StringOf[V any](c *Conn, valCodec Codec[V]) Cache[string, V] {
-	return Of[string, V](c, StringKeyCodec{}, valCodec)
+// NewString is New with StringKeyCodec preset (enabling the K=string fast path).
+func NewString[V any](c *Conn, valCodec Codec[V]) Cache[string, V] {
+	return New[string, V](c, StringKeyCodec{}, valCodec)
 }
 
-// BytesOf is StringOf with UnsafeBytesCodec — a zero-copy raw []byte view. The
+// NewBytes is NewString with UnsafeBytesCodec — a zero-copy raw []byte view. The
 // decoded slice aliases borrowed memory; do not mutate or retain it.
-func BytesOf(c *Conn) Cache[string, []byte] {
-	return StringOf[[]byte](c, UnsafeBytesCodec{})
+func NewBytes(c *Conn) Cache[string, []byte] {
+	return NewString[[]byte](c, UnsafeBytesCodec{})
 }
 
 // cache is the concrete generic implementation of Cache[K, V]. It encodes K/V
 // and delegates to the unexported string-typed engine (*cacheAside). One engine
-// may back many cache views with different K/V and codecs (see Conn/Of).
+// may back many cache views with different K/V and codecs (see Conn/New).
 type cache[K comparable, V any] struct {
 	core     *cacheAside
 	keyCodec KeyCodec[K]
