@@ -395,12 +395,3 @@ func TestPeek_DoesNotMutate(t *testing.T) {
 	assert.Equal(t, 5, got)
 	assert.Equal(t, int64(1), calls.Load(), "Peek must not populate the cache")
 }
-
-func TestClientIsNilAndCloseIsIdempotent(t *testing.T) {
-	f := redcachetest.New[string, int]()
-	assert.Nil(t, f.Client(), "Fake has no real client")
-	assert.NotPanics(t, func() {
-		f.Close()
-		f.Close()
-	})
-}

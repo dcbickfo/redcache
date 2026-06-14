@@ -12,20 +12,22 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-func makeBenchClient(b *testing.B) redcache.Cache[string, string] {
+// makeBenchClient opens a Conn (closed via b.Cleanup) and returns a string view
+// plus the Conn for benches that need the raw client.
+func makeBenchClient(b *testing.B) (redcache.Cache[string, string], *redcache.Conn) {
 	b.Helper()
 	skipIfNoRedis(b)
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: []string{"127.0.0.1:6379"},
 		},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
 	)
 	if err != nil {
 		b.Fatal(err)
 	}
-	return client
+	b.Cleanup(conn.Close)
+	return redcache.StringOf[string](conn, redcache.StringCodec{}), conn
 }
 
 // Hoisted to package scope so per-iteration loops don't allocate closures.
@@ -48,8 +50,7 @@ var (
 // BenchmarkCache_Get measures hot-path performance for a single cached key.
 func BenchmarkCache_Get(b *testing.B) {
 	b.ReportAllocs()
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 	key := "bench:get:" + uuid.New().String()
 
@@ -68,8 +69,7 @@ func BenchmarkCache_Get(b *testing.B) {
 // BenchmarkCache_Get_Parallel measures hot-path performance under contention.
 func BenchmarkCache_Get_Parallel(b *testing.B) {
 	b.ReportAllocs()
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 	key := "bench:get:parallel:" + uuid.New().String()
 
@@ -90,8 +90,7 @@ func BenchmarkCache_Get_Parallel(b *testing.B) {
 // BenchmarkCache_GetMulti measures hot-path performance for multiple cached keys.
 func BenchmarkCache_GetMulti(b *testing.B) {
 	b.ReportAllocs()
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 
 	keys := make([]string, 10)
@@ -114,8 +113,7 @@ func BenchmarkCache_GetMulti(b *testing.B) {
 // BenchmarkCache_GetMulti_Parallel measures hot-path multi-key performance under contention.
 func BenchmarkCache_GetMulti_Parallel(b *testing.B) {
 	b.ReportAllocs()
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 
 	keys := make([]string, 10)
@@ -140,8 +138,7 @@ func BenchmarkCache_GetMulti_Parallel(b *testing.B) {
 // BenchmarkCache_Del measures the single-key delete path.
 func BenchmarkCache_Del(b *testing.B) {
 	b.ReportAllocs()
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 	key := "bench:del:" + uuid.New().String()
 
@@ -156,8 +153,7 @@ func BenchmarkCache_Del(b *testing.B) {
 // BenchmarkCache_DelMulti measures the multi-key delete path with N=10 keys.
 func BenchmarkCache_DelMulti(b *testing.B) {
 	b.ReportAllocs()
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 
 	keys := make([]string, 10)
@@ -176,8 +172,7 @@ func BenchmarkCache_DelMulti(b *testing.B) {
 // BenchmarkSet measures the single-key Set hot path.
 func BenchmarkSet(b *testing.B) {
 	b.ReportAllocs()
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 	key := "bench:set:" + uuid.New().String()
 
@@ -192,8 +187,7 @@ func BenchmarkSet(b *testing.B) {
 // BenchmarkSetMulti measures multi-key Set with N=10 keys.
 func BenchmarkSetMulti(b *testing.B) {
 	b.ReportAllocs()
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 
 	keys := make([]string, 10)
@@ -212,8 +206,7 @@ func BenchmarkSetMulti(b *testing.B) {
 // BenchmarkForceSet measures the unconditional ForceSet path.
 func BenchmarkForceSet(b *testing.B) {
 	b.ReportAllocs()
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 	key := "bench:forceset:" + uuid.New().String()
 
@@ -228,8 +221,7 @@ func BenchmarkForceSet(b *testing.B) {
 // BenchmarkForceSetMulti measures unconditional multi-key writes.
 func BenchmarkForceSetMulti(b *testing.B) {
 	b.ReportAllocs()
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 
 	values := make(map[string]string, 10)
@@ -250,7 +242,7 @@ func BenchmarkForceSetMulti(b *testing.B) {
 func BenchmarkCache_Get_Refresh(b *testing.B) {
 	b.ReportAllocs()
 	skipIfNoRedis(b)
-	client, err := redcache.NewString[string](
+	client, closer, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
@@ -261,7 +253,7 @@ func BenchmarkCache_Get_Refresh(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer client.Client().Close()
+	defer closer()
 	ctx := context.Background()
 	key := "bench:get:refresh:" + uuid.New().String()
 	const val = "bench-value"
@@ -284,7 +276,7 @@ func BenchmarkCache_Get_Refresh(b *testing.B) {
 func BenchmarkCache_GetMulti_Refresh(b *testing.B) {
 	b.ReportAllocs()
 	skipIfNoRedis(b)
-	client, err := redcache.NewString[string](
+	client, closer, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
@@ -295,7 +287,7 @@ func BenchmarkCache_GetMulti_Refresh(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer client.Client().Close()
+	defer closer()
 	ctx := context.Background()
 
 	keys := make([]string, 10)

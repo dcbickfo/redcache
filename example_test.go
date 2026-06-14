@@ -11,7 +11,7 @@ import (
 )
 
 func ExampleNewString() {
-	client, err := redcache.NewString[string](
+	client, closer, err := redcache.NewString[string](
 		rueidis.ClientOption{
 			InitAddress: []string{"127.0.0.1:6379"},
 		},
@@ -21,7 +21,7 @@ func ExampleNewString() {
 	if err != nil {
 		panic(err)
 	}
-	defer client.Client().Close()
+	defer closer()
 
 	val, err := client.Get(context.Background(), time.Minute, "example:get", func(ctx context.Context, key string) (string, error) {
 		// Called only on cache miss — fetch from your data source.
@@ -36,7 +36,7 @@ func ExampleNewString() {
 }
 
 func ExampleNewString_getMulti() {
-	client, err := redcache.NewString[string](
+	client, closer, err := redcache.NewString[string](
 		rueidis.ClientOption{
 			InitAddress: []string{"127.0.0.1:6379"},
 		},
@@ -46,7 +46,7 @@ func ExampleNewString_getMulti() {
 	if err != nil {
 		panic(err)
 	}
-	defer client.Client().Close()
+	defer closer()
 
 	keys := []string{"example:multi:a", "example:multi:b"}
 	vals, err := client.GetMulti(context.Background(), time.Minute, keys, func(ctx context.Context, keys []string) (map[string]string, error) {

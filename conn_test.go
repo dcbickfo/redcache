@@ -26,19 +26,14 @@ func TestConn_SharesEngine(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
 
-	strs, err := StringOf[string](conn, StringCodec{})
-	require.NoError(t, err)
-	ints, err := Of[string, int](conn, StringKeyCodec{}, JSONCodec[int]{})
-	require.NoError(t, err)
+	strs := StringOf[string](conn, StringCodec{})
+	ints := Of[string, int](conn, StringKeyCodec{}, JSONCodec[int]{})
 
 	require.Same(t, conn.core, strs.(*cache[string, string]).core, "view must share the Conn engine")
 	require.Same(t, conn.core, ints.(*cache[string, int]).core, "views must share one engine")
-	require.Equal(t, conn.Client(), strs.Client(), "view must share the Conn client")
-	require.Equal(t, strs.Client(), ints.Client(), "views must share one client")
 
-	// nil codecs are rejected, not panicked on.
-	_, ofErr := Of[string, int](conn, nil, JSONCodec[int]{})
-	require.Error(t, ofErr)
+	// nil codecs panic, they are not rejected with an error.
+	require.Panics(t, func() { Of[string, int](conn, nil, JSONCodec[int]{}) }, "Of must panic on nil codec")
 
 	// Both views are usable over the shared engine.
 	ctx := context.Background()
@@ -58,16 +53,16 @@ func TestConn_SharesEngine(t *testing.T) {
 	require.Equal(t, 42, gotI)
 }
 
-// The one-shot New path builds a Conn internally and returns a single view; its
-// Close still closes the underlying client cleanly (and is idempotent, since the
-// engine guards on closeOnce).
+// The one-shot New path builds a Conn internally and returns a view plus a
+// closer func; the closer shuts the underlying client cleanly (and is
+// idempotent, since the engine guards on closeOnce).
 func TestNew_OneShotClosesCleanly(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires Redis")
 	}
 
-	c, err := New[string, string](
+	c, closeFn, err := New[string, string](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		StringKeyCodec{},
 		StringCodec{},
@@ -83,6 +78,6 @@ func TestNew_OneShotClosesCleanly(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "v", got)
 
-	c.Close()
-	c.Close() // idempotent
+	closeFn()
+	closeFn() // idempotent
 }

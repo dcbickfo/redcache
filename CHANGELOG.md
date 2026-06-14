@@ -15,10 +15,13 @@ settles.
 ### Breaking
 - **Single generic `Cache[K, V]` interface** replaces the four concrete types.
   Removed `CacheAside`, `PrimeableCacheAside`, `Typed[K, V]`, and
-  `PrimeableTyped[K, V]`. Read methods (`Get`/`GetMulti`), write/prime methods
-  (`Set`/`SetMulti`/`ForceSet`/`ForceSetMulti`), invalidation (`Del`/`DelMulti`),
-  TTL extension (`Touch`/`TouchMulti`), `Client()`, and `Close()` are all methods
+  `PrimeableTyped[K, V]`. Read methods (`Get`/`GetMulti`/`Peek`), write/prime
+  methods (`Set`/`SetMulti`/`ForceSet`/`ForceSetMulti`), invalidation
+  (`Del`/`DelMulti`), and TTL extension (`Touch`/`TouchMulti`) are all methods
   on `Cache[K, V]`.
+- **`Cache[K, V]` is now a pure operational interface: `Close()` and `Client()`
+  moved to the new `Conn` owner** — lifecycle and raw-client access belong to
+  whoever holds the connection, not to injected views.
 - **New constructors; old ones removed.** Removed `NewRedCacheAside`,
   `NewPrimeableCacheAside`, `NewTyped`, `NewStringTyped`, `NewPrimeableTyped`, and
   `NewPrimeableStringTyped`. Added:
@@ -26,10 +29,16 @@ settles.
   - `NewString[V](clientOption, valCodec, opts...)` — `StringKeyCodec` preset.
   - `NewBytes(clientOption, opts...)` — zero-copy `Cache[string, []byte]`.
   Constructors take a `rueidis.ClientOption` and build the client internally.
+- **`New`/`NewString`/`NewBytes` now return `(Cache, func(), error)`** — the
+  middle `func()` closes the underlying client. They build a client, so the error
+  return covers client-build failure; a nil codec panics before any client opens.
 - **Shared-client sharing via `Conn`.** To cache multiple value types over a
   single client/invalidation stream, `Open(clientOption, opts...) (*Conn, error)`
   and derive typed views with `Of[K, V](conn, keyCodec, valCodec)`,
   `StringOf[V](conn, valCodec)`, or `BytesOf(conn)` — all compile-time typed.
+  `Of`/`StringOf`/`BytesOf` do no I/O, so they no longer return an error and
+  panic on a nil codec. Lifecycle stays on the `Conn` (`(*Conn).Close()` /
+  `(*Conn).Client()`); the views are operations-only.
 - **`Cache[K, V]` gained `Peek(ctx, ttl, k) (V, bool, error)`** — a read-only,
   client-side-cached lookup with no loader and no lock. Adding it to the interface
   is a breaking change for external implementers.
@@ -48,8 +57,10 @@ settles.
 - **`BytesCodec` renamed to `UnsafeBytesCodec`** — the name now states the
   zero-copy retention hazard: the decoded slice aliases borrowed library memory
   and must not be mutated or retained past the call.
-- **`New` and `Of` reject nil codecs at construction** rather than panicking on
-  the first call.
+- **Nil codecs panic at construction**, not on the first call. `Of`/`StringOf`/
+  `BytesOf` do no I/O and panic immediately on a nil codec; `New`/`NewString`/
+  `NewBytes` panic on a nil codec before opening a client (their `error` return
+  is reserved for client-build failure).
 
 ### Added
 - **Observability signals on `Metrics`**: `LoaderDuration(d)` (foreground

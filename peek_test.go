@@ -18,13 +18,13 @@ func TestPeek_MissThenHit(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 
-	client, err := redcache.NewString[string](
+	client, closer, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
 		redcache.StringCodec{},
 		redcache.WithLockTTL(time.Second),
 	)
 	require.NoError(t, err)
-	t.Cleanup(client.Close)
+	t.Cleanup(closer)
 
 	ctx := context.Background()
 	key := "peek:" + uuid.New().String()
@@ -55,13 +55,13 @@ func TestPeek_LockValueReadsAsMiss(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 
-	client, err := redcache.NewString[string](
+	client, closer, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: addr},
 		redcache.StringCodec{},
 		redcache.WithLockTTL(2*time.Second),
 	)
 	require.NoError(t, err)
-	t.Cleanup(client.Close)
+	t.Cleanup(closer)
 
 	ctx := context.Background()
 	key := "peek-lock:" + uuid.New().String()

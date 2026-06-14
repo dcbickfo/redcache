@@ -10,10 +10,12 @@ import (
 	"github.com/redis/rueidis"
 )
 
-// Cache is the primary cache-aside surface: a generic interface over a key type
-// K and value type V. It mirrors rueidis.Client in being an interface so callers
-// can fake it in tests. All read methods run the stampede-protected lock loop;
-// all write methods populate every subscribed client's cache.
+// Cache is the typed cache-aside surface: a generic interface over a key type K
+// and value type V, and a pure operational handle. Read methods run the
+// stampede-protected lock loop; write methods populate every subscribed client's
+// cache. It carries no lifecycle or raw-client access — those live on the owning
+// Conn (see Open/Of) — so a Cache is safe to inject into code that should not be
+// able to close the shared connection, and trivial to fake in tests.
 type Cache[K comparable, V any] interface {
 	// Get returns the cached value for k, calling fn on a miss. Only one caller
 	// across all processes runs fn for a given key; the rest wait on the
@@ -50,12 +52,6 @@ type Cache[K comparable, V any] interface {
 	Touch(ctx context.Context, ttl time.Duration, k K) error
 	// TouchMulti extends the TTL of cached values.
 	TouchMulti(ctx context.Context, ttl time.Duration, keys ...K) error
-	// Client returns the underlying rueidis.Client. Bypasses cache-aside
-	// semantics; do NOT raw-SET cached keys (it skips the envelope).
-	Client() rueidis.Client
-	// Close cancels pending lock entries, drains refresh workers, and closes the
-	// underlying client. Idempotent.
-	Close()
 }
 
 // Conn owns one rueidis client, its invalidation stream, and a lock namespace.
@@ -86,28 +82,32 @@ func (c *Conn) Close() { c.core.Close() }
 // Client returns the underlying rueidis.Client, shared by every view.
 func (c *Conn) Client() rueidis.Client { return c.core.Client() }
 
-// Of derives a typed Cache[K, V] view over c, with its own key/value codecs.
-// The view shares c's client and invalidation stream.
-func Of[K comparable, V any](c *Conn, keyCodec KeyCodec[K], valCodec Codec[V]) (Cache[K, V], error) {
+// Of derives a typed Cache[K, V] view over c with its own key/value codecs. The
+// view shares c's client and invalidation stream and is a pure operational
+// handle — lifecycle (Close) and the raw-client escape hatch live on the Conn,
+// not on the view, so a view is safe to hand to code that should not be able to
+// tear the connection down. Deriving a view does no I/O and cannot fail;
+// keyCodec and valCodec must be non-nil (passing nil panics — a programmer error).
+func Of[K comparable, V any](c *Conn, keyCodec KeyCodec[K], valCodec Codec[V]) Cache[K, V] {
 	if keyCodec == nil || valCodec == nil {
-		return nil, errors.New("redcache: keyCodec and valCodec must not be nil")
+		panic("redcache: keyCodec and valCodec must not be nil")
 	}
 	return &cache[K, V]{
 		core:        c.core,
 		keyCodec:    keyCodec,
 		valCodec:    valCodec,
 		keyIsString: isStringKeyCodec[K](keyCodec),
-	}, nil
+	}
 }
 
 // StringOf is Of with StringKeyCodec preset (enabling the K=string fast path).
-func StringOf[V any](c *Conn, valCodec Codec[V]) (Cache[string, V], error) {
+func StringOf[V any](c *Conn, valCodec Codec[V]) Cache[string, V] {
 	return Of[string, V](c, StringKeyCodec{}, valCodec)
 }
 
 // BytesOf is StringOf with UnsafeBytesCodec — a zero-copy raw []byte view. The
 // decoded slice aliases borrowed memory; do not mutate or retain it.
-func BytesOf(c *Conn) (Cache[string, []byte], error) {
+func BytesOf(c *Conn) Cache[string, []byte] {
 	return StringOf[[]byte](c, UnsafeBytesCodec{})
 }
 
@@ -125,32 +125,28 @@ type cache[K comparable, V any] struct {
 
 var _ Cache[string, []byte] = (*cache[string, []byte])(nil)
 
-// New builds a self-contained Cache[K, V] with its own rueidis.Client (wired for
-// invalidation). keyCodec maps K to the Redis key; valCodec maps V to the
-// envelope payload. The returned view's Close closes the underlying client, so
-// the one-shot path needs no separate Conn handle. To cache multiple value
-// types over one client, use Open + Of instead.
+// New builds a one-shot Cache[K, V] with its own rueidis.Client (wired for
+// invalidation) for the common single-cache case. It returns the cache, a close
+// func that tears the client down (call it when done — typically via defer), and
+// an error from building the client. keyCodec maps K to the Redis key; valCodec
+// maps V to the envelope payload; both must be non-nil (nil panics). To cache
+// multiple value types over one shared client, use Open + Of instead.
 func New[K comparable, V any](
 	clientOption rueidis.ClientOption,
 	keyCodec KeyCodec[K],
 	valCodec Codec[V],
 	opts ...Option,
-) (Cache[K, V], error) {
-	// Guard codecs before Open so a nil-codec misuse fails fast without ever
-	// building a client (Of repeats the check for the Open + Of path).
+) (Cache[K, V], func(), error) {
+	// Guard codecs before Open so a nil-codec misuse panics without ever
+	// building a client.
 	if keyCodec == nil || valCodec == nil {
-		return nil, errors.New("redcache: keyCodec and valCodec must not be nil")
+		panic("redcache: keyCodec and valCodec must not be nil")
 	}
 	conn, err := Open(clientOption, opts...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	c, err := Of(conn, keyCodec, valCodec)
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-	return c, nil
+	return Of(conn, keyCodec, valCodec), conn.Close, nil
 }
 
 // NewString is New[string, V] with StringKeyCodec preset (enabling the K=string
@@ -159,13 +155,13 @@ func NewString[V any](
 	clientOption rueidis.ClientOption,
 	valCodec Codec[V],
 	opts ...Option,
-) (Cache[string, V], error) {
+) (Cache[string, V], func(), error) {
 	return New[string, V](clientOption, StringKeyCodec{}, valCodec, opts...)
 }
 
 // NewBytes is NewString[[]byte] with UnsafeBytesCodec — a zero-copy raw []byte
 // cache. The decoded slice aliases borrowed memory; do not mutate or retain it.
-func NewBytes(clientOption rueidis.ClientOption, opts ...Option) (Cache[string, []byte], error) {
+func NewBytes(clientOption rueidis.ClientOption, opts ...Option) (Cache[string, []byte], func(), error) {
 	return NewString[[]byte](clientOption, UnsafeBytesCodec{}, opts...)
 }
 
@@ -175,12 +171,6 @@ func isStringKeyCodec[K comparable](keyCodec KeyCodec[K]) bool {
 	_, ok := any(keyCodec).(StringKeyCodec)
 	return ok
 }
-
-// Client returns the underlying rueidis.Client.
-func (c *cache[K, V]) Client() rueidis.Client { return c.core.Client() }
-
-// Close closes the underlying engine and client.
-func (c *cache[K, V]) Close() { c.core.Close() }
 
 // Get returns the cached value for k, calling fn on a miss. Decode errors on
 // read are wrapped with ErrDecode and leave the cached entry intact.

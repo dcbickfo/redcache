@@ -15,16 +15,15 @@ import (
 func newTypedCache[V any](t *testing.T, valCodec redcache.Codec[V]) redcache.Cache[string, V] {
 	t.Helper()
 	skipIfNoRedis(t)
-	c, err := redcache.NewString[V](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		valCodec,
 		redcache.WithLockTTL(2*time.Second),
 	)
 	if err != nil {
-		t.Fatalf("new cache: %v", err)
+		t.Fatalf("open conn: %v", err)
 	}
-	t.Cleanup(c.Close)
-	return c
+	t.Cleanup(conn.Close)
+	return redcache.StringOf[V](conn, valCodec)
 }
 
 func TestTyped_Set_PopulatesAndCaches(t *testing.T) {

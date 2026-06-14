@@ -50,15 +50,25 @@ func TestTyped_Get_LoadsAndCaches(t *testing.T) {
 }
 
 func TestTyped_Get_DecodeErrorIsWrapped(t *testing.T) {
-	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+		redcache.WithLockTTL(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("open conn: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	users := redcache.StringOf[tUser](conn, redcache.JSONCodec[tUser]{})
+
 	// Seed garbage so the typed Get's decode call surfaces ErrDecode.
 	key := "decode:" + uuid.NewString()
-	if err := users.Client().Do(context.Background(),
-		users.Client().B().Set().Key(key).Value("not json").Px(time.Second).Build()).Error(); err != nil {
+	if err := conn.Client().Do(context.Background(),
+		conn.Client().B().Set().Key(key).Value("not json").Px(time.Second).Build()).Error(); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	_, err := users.Get(context.Background(), time.Second, key, func(context.Context, string) (tUser, error) {
+	_, err = users.Get(context.Background(), time.Second, key, func(context.Context, string) (tUser, error) {
 		return tUser{}, errors.New("loader should not be called on decode failure of cache hit")
 	})
 	if !errors.Is(err, redcache.ErrDecode) {
@@ -67,13 +77,23 @@ func TestTyped_Get_DecodeErrorIsWrapped(t *testing.T) {
 }
 
 func TestTyped_Get_DecodeErrorPreservesUnderlying(t *testing.T) {
-	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+		redcache.WithLockTTL(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("open conn: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	users := redcache.StringOf[tUser](conn, redcache.JSONCodec[tUser]{})
+
 	key := "decode-chain:" + uuid.NewString()
-	if err := users.Client().Do(context.Background(),
-		users.Client().B().Set().Key(key).Value("not json").Px(time.Second).Build()).Error(); err != nil {
+	if err := conn.Client().Do(context.Background(),
+		conn.Client().B().Set().Key(key).Value("not json").Px(time.Second).Build()).Error(); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	_, err := users.Get(context.Background(), time.Second, key,
+	_, err = users.Get(context.Background(), time.Second, key,
 		func(context.Context, string) (tUser, error) { return tUser{}, nil },
 	)
 	if err == nil {
@@ -140,7 +160,7 @@ func TestTyped_Touch_ExtendsTTL(t *testing.T) {
 
 func TestTyped_RefreshAhead_FiresThroughTypedView(t *testing.T) {
 	skipIfNoRedis(t)
-	users, err := redcache.NewString[tUser](
+	users, closer, err := redcache.NewString[tUser](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.JSONCodec[tUser]{},
 		redcache.WithLockTTL(500*time.Millisecond),
@@ -151,7 +171,7 @@ func TestTyped_RefreshAhead_FiresThroughTypedView(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	defer users.Close()
+	defer closer()
 
 	key := "refresh:" + uuid.NewString()
 
@@ -230,7 +250,7 @@ func TestTyped_GetMulti_IntKeys(t *testing.T) {
 	codec := redcache.KeyCodecFunc[int](func(i int) (string, error) {
 		return prefix + strconv.Itoa(i), nil
 	})
-	users, err := redcache.New[int, tUser](
+	users, closer, err := redcache.New[int, tUser](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		codec,
 		redcache.JSONCodec[tUser]{},
@@ -239,7 +259,7 @@ func TestTyped_GetMulti_IntKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	t.Cleanup(users.Close)
+	t.Cleanup(closer)
 
 	loader := func(_ context.Context, missing []int) (map[int]tUser, error) {
 		out := make(map[int]tUser, len(missing))

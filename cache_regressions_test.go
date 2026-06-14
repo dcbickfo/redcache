@@ -21,9 +21,8 @@ import (
 func TestCache_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(2*time.Second),
 		redcache.WithRefreshAfterFraction(0.01), // refresh on virtually every Get
 		redcache.WithRefreshBeta(0),
@@ -31,7 +30,8 @@ func TestCache_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 		redcache.WithRefreshQueueSize(4), // small queue maximizes the close-during-send window
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Client().Close() })
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "close-stress:" + uuid.New().String()
@@ -66,11 +66,11 @@ func TestCache_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	closeWg.Add(2)
 	go func() {
 		defer closeWg.Done()
-		client.Close()
+		conn.Close()
 	}()
 	go func() {
 		defer closeWg.Done()
-		client.Close() // double-close must be a no-op (closeOnce).
+		conn.Close() // double-close must be a no-op (closeOnce).
 	}()
 	closeWg.Wait()
 
@@ -86,17 +86,14 @@ func TestCache_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(2*time.Second),
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		client.Close()
-		client.Client().Close()
-	})
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "clean-miss:" + uuid.New().String()
@@ -118,17 +115,14 @@ func TestCache_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(2*time.Second),
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		client.Close()
-		client.Client().Close()
-	})
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	suffix := uuid.New().String()
@@ -154,17 +148,14 @@ func TestCache_EmptyValueIsCacheHit(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	pca, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(2*time.Second),
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		pca.Close()
-		pca.Client().Close()
-	})
+	t.Cleanup(conn.Close)
+	pca := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "empty-hit:" + uuid.New().String()
@@ -185,8 +176,7 @@ func TestCache_EmptyValueIsCacheHit(t *testing.T) {
 // failure restores "" rather than DELing the key.
 func TestCache_Set_RollbackPreservesEmptyValue(t *testing.T) {
 	t.Parallel()
-	pca := makeClient(t, addr)
-	defer pca.Client().Close()
+	pca, _ := makeClient(t, addr)
 	ctx := context.Background()
 
 	key := "rollback-empty:" + uuid.New().String()
@@ -214,8 +204,7 @@ func TestCache_Set_RollbackPreservesEmptyValue(t *testing.T) {
 //   - PTTL ~= ttl arg: rollback used the new ttl, not the captured PTTL.
 func TestCache_Set_RollbackPreservesPTTL(t *testing.T) {
 	t.Parallel()
-	pca := makeClient(t, addr)
-	defer pca.Client().Close()
+	pca, conn := makeClient(t, addr)
 	ctx := context.Background()
 
 	key := "rollback-pttl:" + uuid.New().String()
@@ -231,12 +220,12 @@ func TestCache_Set_RollbackPreservesPTTL(t *testing.T) {
 	})
 	require.ErrorIs(t, err, sentinel)
 
-	pttl, err := pca.Client().Do(ctx, pca.Client().B().Pttl().Key(key).Build()).AsInt64()
+	pttl, err := conn.Client().Do(ctx, conn.Client().B().Pttl().Key(key).Build()).AsInt64()
 	require.NoError(t, err)
 	assert.Greater(t, pttl, int64(0), "key should exist with a finite TTL after rollback")
 	assert.Less(t, pttl, int64(1800), "rollback must preserve the original remaining TTL, not refresh it")
 
-	val, err := pca.Client().Do(ctx, pca.Client().B().Get().Key(key).Build()).ToString()
+	val, err := conn.Client().Do(ctx, conn.Client().B().Get().Key(key).Build()).ToString()
 	require.NoError(t, err)
 	// Raw GET sees the envelope; Get() unwraps to "v" for callers.
 	assert.Equal(t, "__redcache:v1:0:v", val, "rollback should restore the original captured (envelope-wrapped) value")
@@ -248,17 +237,14 @@ func TestCache_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	pca, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(2*time.Second),
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		pca.Close()
-		pca.Client().Close()
-	})
+	t.Cleanup(conn.Close)
+	pca := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key1 := "cas:1:" + uuid.New().String()
@@ -288,16 +274,13 @@ func TestCache_GetMulti_CASMismatchDropsKey(t *testing.T) {
 func TestCache_Set_RollbackSurvivesContextCancel(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		client.Close()
-		client.Client().Close()
-	})
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	bg := context.Background()
 	key := "rollback-cancel:" + uuid.New().String()

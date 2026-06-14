@@ -19,21 +19,25 @@
 // # Choosing a constructor
 //
 //   - [NewString] — Cache[string, V]: string keys, typed values. The common case.
-//   - [NewBytes]  — Cache[string, []byte]: zero-copy opaque payloads.
+//     Returns a close func alongside the cache.
+//   - [NewBytes]  — Cache[string, []byte]: zero-copy opaque payloads. Returns a
+//     close func alongside the cache.
 //   - [New]       — Cache[K, V]: typed keys via a [KeyCodec] (and typed values).
+//     Returns a close func alongside the cache.
 //   - [Open] + [Of]/[StringOf]/[BytesOf] — open one [Conn] and derive several
-//     typed views with different K/V over a single client and invalidation stream.
+//     typed views over a single client and invalidation stream; the views are
+//     operations-only (Close/Client live on the [Conn]).
 //
 // # Minimal example
 //
-//	cache, err := redcache.NewString[string](
+//	cache, closer, err := redcache.NewString[string](
 //		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 //		redcache.StringCodec{},
 //	)
 //	if err != nil {
 //		return err
 //	}
-//	defer cache.Close()
+//	defer closer()
 //
 //	v, err := cache.Get(ctx, time.Minute, "k", func(ctx context.Context, key string) (string, error) {
 //		return loadFromUpstream(ctx, key) // runs only on a miss, once per key

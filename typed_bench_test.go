@@ -206,11 +206,11 @@ func BenchmarkTypedGet_Codec(b *testing.B) {
 	})
 
 	b.Run("bytes", func(b *testing.B) {
-		users, err := redcache.NewBytes(rueidisOptForBench(), redcache.WithLockTTL(2*time.Second))
+		users, closer, err := redcache.NewBytes(rueidisOptForBench(), redcache.WithLockTTL(2*time.Second))
 		if err != nil {
 			b.Fatalf("new cache: %v", err)
 		}
-		b.Cleanup(users.Close)
+		b.Cleanup(closer)
 		key := "bench:typed:codec:bytes:" + uuid.NewString()
 		if err := users.ForceSet(ctx, time.Minute, key, []byte(payload)); err != nil {
 			b.Fatal(err)
@@ -227,11 +227,11 @@ func BenchmarkTypedGet_Codec(b *testing.B) {
 	})
 
 	b.Run("string", func(b *testing.B) {
-		users, err := redcache.NewString[string](rueidisOptForBench(), redcache.StringCodec{}, redcache.WithLockTTL(2*time.Second))
+		users, closer, err := redcache.NewString[string](rueidisOptForBench(), redcache.StringCodec{}, redcache.WithLockTTL(2*time.Second))
 		if err != nil {
 			b.Fatalf("new cache: %v", err)
 		}
-		b.Cleanup(users.Close)
+		b.Cleanup(closer)
 		key := "bench:typed:codec:string:" + uuid.NewString()
 		if err := users.ForceSet(ctx, time.Minute, key, payload); err != nil {
 			b.Fatal(err)
@@ -256,7 +256,7 @@ func newBenchTypedJSON(b *testing.B) redcache.Cache[string, tUser] {
 func newBenchBase(b *testing.B) redcache.Cache[string, tUser] {
 	b.Helper()
 	skipIfNoRedis(b)
-	c, err := redcache.NewString[tUser](
+	c, closer, err := redcache.NewString[tUser](
 		rueidisOptForBench(),
 		redcache.JSONCodec[tUser]{},
 		redcache.WithLockTTL(2*time.Second),
@@ -264,7 +264,7 @@ func newBenchBase(b *testing.B) redcache.Cache[string, tUser] {
 	if err != nil {
 		b.Fatalf("new cache: %v", err)
 	}
-	b.Cleanup(c.Close)
+	b.Cleanup(closer)
 	return c
 }
 

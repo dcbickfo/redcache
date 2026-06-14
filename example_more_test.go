@@ -29,14 +29,14 @@ func (failOnEmpty) Decode(b []byte) (string, error) { return string(b), nil }
 // reachable via errors.As. Note the generic type argument on the target pointer:
 // it must match the cache's key type (string here).
 func ExampleCache_ForceSetMulti() {
-	cache, err := redcache.NewString[string](
+	cache, closer, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		failOnEmpty{},
 	)
 	if err != nil {
 		panic(err)
 	}
-	defer cache.Close()
+	defer closer()
 
 	err = cache.ForceSetMulti(context.Background(), time.Minute, map[string]string{
 		"a": "alpha",
@@ -59,7 +59,7 @@ func ExampleCache_ForceSetMulti() {
 // failed refresh never leaves the key empty. Redis-dependent, so it omits an
 // Output: directive and is compiled but not run by `go test`.
 func ExampleCache_Set() {
-	cache, err := redcache.NewString[string](
+	cache, closer, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
@@ -67,7 +67,7 @@ func ExampleCache_Set() {
 	if err != nil {
 		panic(err)
 	}
-	defer cache.Close()
+	defer closer()
 
 	err = cache.Set(context.Background(), time.Minute, "config:greeting",
 		func(ctx context.Context, key string) (string, error) {
@@ -85,7 +85,7 @@ func ExampleCache_Set() {
 // Get or Set on the same key sees ErrLockLost and retries. Redis-dependent, so
 // it omits an Output: directive.
 func ExampleCache_ForceSet() {
-	cache, err := redcache.NewString[string](
+	cache, closer, err := redcache.NewString[string](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
@@ -93,7 +93,7 @@ func ExampleCache_ForceSet() {
 	if err != nil {
 		panic(err)
 	}
-	defer cache.Close()
+	defer closer()
 
 	if err := cache.ForceSet(context.Background(), time.Minute, "config:greeting", "hola"); err != nil {
 		panic(err)
@@ -114,7 +114,7 @@ func ExampleNew() {
 		return fmt.Sprintf("user:%d", id), nil
 	})
 
-	cache, err := redcache.New[UserID, User](
+	cache, closer, err := redcache.New[UserID, User](
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		userIDCodec,
 		redcache.JSONCodec[User]{},
@@ -123,7 +123,7 @@ func ExampleNew() {
 	if err != nil {
 		panic(err)
 	}
-	defer cache.Close()
+	defer closer()
 
 	u, err := cache.Get(context.Background(), time.Minute, UserID(123),
 		func(ctx context.Context, id UserID) (User, error) {
@@ -150,14 +150,8 @@ func ExampleOf() {
 	defer conn.Close() // closing the Conn closes the shared client (and all views)
 
 	// users and loginCounts share one client, connection, and invalidation stream.
-	users, err := redcache.StringOf[string](conn, redcache.StringCodec{})
-	if err != nil {
-		panic(err)
-	}
-	loginCounts, err := redcache.Of[string, int](conn, redcache.StringKeyCodec{}, redcache.JSONCodec[int]{})
-	if err != nil {
-		panic(err)
-	}
+	users := redcache.StringOf[string](conn, redcache.StringCodec{})
+	loginCounts := redcache.Of[string, int](conn, redcache.StringKeyCodec{}, redcache.JSONCodec[int]{})
 	_ = users
 
 	n, err := loginCounts.Get(context.Background(), time.Minute, "u-123",

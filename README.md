@@ -53,7 +53,7 @@ type User struct {
 }
 
 func main() {
-    cache, err := redcache.NewString[User](
+    cache, closer, err := redcache.NewString[User](
         rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
         redcache.JSONCodec[User]{},
         redcache.WithLockTTL(5*time.Second),
@@ -61,7 +61,7 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    defer cache.Close()
+    defer closer()
 
     ctx := context.Background()
 
@@ -117,7 +117,7 @@ userIDCodec := redcache.KeyCodecFunc[UserID](func(id UserID) (string, error) {
     return fmt.Sprintf("user:%d", id), nil
 })
 
-cache, err := redcache.New[UserID, User](
+cache, closer, err := redcache.New[UserID, User](
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
     userIDCodec,
     redcache.JSONCodec[User]{},
@@ -125,7 +125,7 @@ cache, err := redcache.New[UserID, User](
 if err != nil {
     log.Fatal(err)
 }
-defer cache.Close()
+defer closer()
 
 u, err := cache.Get(ctx, time.Minute, UserID(123),
     func(ctx context.Context, id UserID) (User, error) {
@@ -141,13 +141,13 @@ The key codec must be deterministic, concurrent-safe, and produce a non-empty ke
 `NewBytes` is a zero-copy `Cache[string, []byte]` for opaque payloads — `NewString[[]byte]` preset with `UnsafeBytesCodec`. The decoded slice aliases the cache's borrowed read buffer; do not mutate or retain it past the callback. Copy it out if you need an owned value.
 
 ```go
-cache, err := redcache.NewBytes(
+cache, closer, err := redcache.NewBytes(
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 )
 if err != nil {
     log.Fatal(err)
 }
-defer cache.Close()
+defer closer()
 
 b, err := cache.Get(ctx, time.Minute, "blob:42",
     func(ctx context.Context, key string) ([]byte, error) {
@@ -196,7 +196,7 @@ Construction takes functional options. They are applied in order; later wins.
 Set `WithRefreshAfterFraction` to enable background refreshes. When a `Get`/`GetMulti` returns a value whose remaining TTL has crossed the configured threshold, the stale value is returned immediately and a background worker repopulates the entry. Distributed and local dedup ensure only one refresh runs per key.
 
 ```go
-cache, err := redcache.NewString[User](
+cache, closer, err := redcache.NewString[User](
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
     redcache.JSONCodec[User]{},
     redcache.WithLockTTL(5*time.Second),
@@ -205,6 +205,10 @@ cache, err := redcache.NewString[User](
     redcache.WithRefreshWorkers(4),
     redcache.WithRefreshQueueSize(64),
 )
+if err != nil {
+    log.Fatal(err)
+}
+defer closer()
 ```
 
 ### XFetch probabilistic refresh
@@ -237,7 +241,7 @@ This is an honest superset for those specific needs, not a claim that `rueidisas
 
 ## Sharing one client across value types
 
-Open a `Conn` once, then derive typed `Cache[K, V]` views over it with `Of` (or `StringOf` / `BytesOf`). Every view shares the `Conn`'s rueidis client and invalidation stream, with its own key/value types and codecs. Use it to cache several value types over a single Redis connection instead of opening one connection per type. The `Conn` and every view it spawns share one client; closing any of them closes it, so treat them as one lifecycle — open the `Conn`, derive all the views you need, and close the `Conn` when done.
+Open a `Conn` once, then derive typed `Cache[K, V]` views over it with `Of` (or `StringOf` / `BytesOf`). Every view shares the `Conn`'s rueidis client and invalidation stream, with its own key/value types and codecs. Use it to cache several value types over a single Redis connection instead of opening one connection per type. Lifecycle lives on the `Conn`: the views are operations-only (no `Close` / `Client`), so closing happens in exactly one place. Open the `Conn`, derive all the views you need, and close the `Conn` when done.
 
 ```go
 // One connection backs several typed views.
@@ -249,22 +253,35 @@ if err != nil {
 }
 defer conn.Close() // closes the shared client and all views
 
-sessions, err := redcache.StringOf[Session](conn, redcache.JSONCodec[Session]{})
-if err != nil {
-    log.Fatal(err)
-}
+sessions := redcache.StringOf[Session](conn, redcache.JSONCodec[Session]{})
 
-orders, err := redcache.Of[OrderID, Order](
+orders := redcache.Of[OrderID, Order](
     conn,
     orderIDCodec,
     redcache.JSONCodec[Order]{},
 )
+```
+
+`Of` (and `StringOf` / `BytesOf`) does no I/O — it returns a `Cache[K, V]` with no error, and panics on a nil codec. One-shot `New` / `NewString` / `NewBytes` open their own `Conn` internally and return `(cache, closer, err)`; call the returned `closer` to tear down the underlying client.
+
+### Long-lived service caching multiple value types
+
+For a service that caches several value types, open one `Conn`, derive a view per type, and inject the views. Because views are operations-only, the injected code can read and write the cache but cannot close the shared connection — lifecycle stays with whoever holds the `Conn`:
+
+```go
+conn, err := redcache.Open(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}})
 if err != nil {
     log.Fatal(err)
 }
-```
+defer conn.Close()
 
-`Of` (and `StringOf` / `BytesOf`) returns an error only on nil codecs. One-shot `New` / `NewString` / `NewBytes` open their own `Conn` internally and return a single view whose `Close` still closes the underlying client.
+users := redcache.StringOf[User](conn, redcache.JSONCodec[User]{})
+sessions := redcache.StringOf[Session](conn, redcache.JSONCodec[Session]{})
+
+// Inject `users` and `sessions` (operations-only Cache values) into services.
+userSvc := NewUserService(users)
+sessionSvc := NewSessionService(sessions)
+```
 
 ## Metrics
 
@@ -281,11 +298,15 @@ type myMetrics struct {
 func (m *myMetrics) CacheHits(n int64)   { m.hits.Add(n) }
 func (m *myMetrics) CacheMisses(n int64) { m.misses.Add(n) }
 
-cache, err := redcache.NewString[User](
+cache, closer, err := redcache.NewString[User](
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
     redcache.JSONCodec[User]{},
     redcache.WithMetrics(&myMetrics{}),
 )
+if err != nil {
+    log.Fatal(err)
+}
+defer closer()
 ```
 
 ### OpenTelemetry
@@ -299,7 +320,11 @@ m, err := redcacheotel.NewMetrics(meterProvider) // *otel/metric.MeterProvider
 if err != nil {
     log.Fatal(err)
 }
-cache, err := redcache.NewString[User](opt, redcache.JSONCodec[User]{}, redcache.WithMetrics(m))
+cache, closer, err := redcache.NewString[User](opt, redcache.JSONCodec[User]{}, redcache.WithMetrics(m))
+if err != nil {
+    log.Fatal(err)
+}
+defer closer()
 ```
 
 It records counters (hits, misses, lock contention, refresh and error events) and histograms (`lock.wait.duration`, `loader.duration`, in seconds). High-cardinality keys are deliberately not attached as labels; `RedisError`'s bounded `op` is.

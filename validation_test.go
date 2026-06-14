@@ -10,26 +10,39 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-// New and Of reject nil codecs at construction rather than panicking on the
-// first hot-path call. New's nil check runs before any client is built, so this
-// needs no Redis.
+// New panics on a nil codec before building a client, so a nil keyCodec or
+// valCodec fails fast at construction rather than on the first hot-path call.
+// The panic check runs before any client is built, so this needs no Redis.
 func TestNew_NilCodecRejected(t *testing.T) {
 	t.Parallel()
 	opt := rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}
 
-	_, err := redcache.New[string, string](opt, nil, redcache.StringCodec{})
-	require.Error(t, err)
+	require.Panics(t, func() { _, _, _ = redcache.New[string, string](opt, nil, redcache.StringCodec{}) },
+		"New must panic on a nil keyCodec")
+	require.Panics(t, func() { _, _, _ = redcache.New[string, string](opt, redcache.StringKeyCodec{}, nil) },
+		"New must panic on a nil valCodec")
+}
 
-	_, err = redcache.New[string, string](opt, redcache.StringKeyCodec{}, nil)
-	require.Error(t, err)
+// Of derives a view over an existing Conn and panics on a nil codec, mirroring
+// New's fail-fast behavior. Deriving needs a live Conn, so this needs Redis.
+func TestOf_NilCodecPanics(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	opt := rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}
+
+	conn, err := redcache.Open(opt)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+
+	require.Panics(t, func() { redcache.Of[string, int](conn, nil, redcache.JSONCodec[int]{}) },
+		"Of must panic on a nil keyCodec")
 }
 
 // Write methods reject a non-positive ttl with ErrInvalidTTL instead of leaking
 // the raw Redis "PX 0" error.
 func TestWrite_InvalidTTLRejected(t *testing.T) {
 	t.Parallel()
-	cache := makeClient(t, []string{"127.0.0.1:6379"})
-	defer cache.Close()
+	cache, _ := makeClient(t, []string{"127.0.0.1:6379"})
 	ctx := context.Background()
 
 	require.ErrorIs(t, cache.ForceSet(ctx, 0, "k", "v"), redcache.ErrInvalidTTL)

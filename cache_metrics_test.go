@@ -73,14 +73,14 @@ func TestMetrics_HitAndMiss(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(time.Second),
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Client().Close() })
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "metrics:" + uuid.New().String()
@@ -103,19 +103,16 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(time.Second*2),
 		redcache.WithRefreshAfterFraction(0.01), // refresh almost immediately
 		redcache.WithRefreshBeta(0),             // disable XFetch for determinism
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		client.Close()
-		client.Client().Close()
-	})
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "refresh-metrics:" + uuid.New().String()
@@ -141,19 +138,16 @@ func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(time.Second*2),
 		redcache.WithRefreshAfterFraction(0.01),
 		redcache.WithRefreshBeta(0),
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		client.Close()
-		client.Client().Close()
-	})
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "panic-metrics:" + uuid.New().String()
@@ -190,19 +184,16 @@ func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(time.Second*2),
 		redcache.WithRefreshAfterFraction(0.01),
 		redcache.WithRefreshBeta(0),
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		client.Close()
-		client.Client().Close()
-	})
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "refresh-err-metrics:" + uuid.New().String()
@@ -239,9 +230,8 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(time.Second*3),
 		redcache.WithRefreshAfterFraction(0.01), // refresh almost immediately
 		redcache.WithRefreshBeta(0),
@@ -250,10 +240,8 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		client.Close()
-		client.Client().Close()
-	})
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 
 	const numKeys = 20
@@ -298,17 +286,14 @@ func TestMetrics_LockWaitDuration(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(2*time.Second),
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		client.Close()
-		client.Client().Close()
-	})
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "lockwait:" + uuid.New().String()
@@ -366,14 +351,14 @@ func TestMetrics_LoaderDuration(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(time.Second),
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Client().Close() })
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "loader-dur:" + uuid.New().String()
@@ -395,14 +380,14 @@ func TestMetrics_LoaderErrors(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(time.Second),
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Client().Close() })
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "loader-err:" + uuid.New().String()
@@ -423,17 +408,18 @@ func TestMetrics_RedisError(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
-	client, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(time.Second),
 		redcache.WithMetrics(metrics),
 	)
 	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	// Close the underlying client so the next command fails with a real Redis
 	// transport error (not redis-nil, not lock-lost).
-	client.Client().Close()
+	conn.Close()
 
 	ctx := context.Background()
 	key := "redis-err:" + uuid.New().String()

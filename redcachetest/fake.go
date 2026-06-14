@@ -21,8 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/redis/rueidis"
-
 	"github.com/dcbickfo/redcache"
 )
 
@@ -297,11 +295,3 @@ func (f *Fake[K, V]) TouchMulti(_ context.Context, ttl time.Duration, keys ...K)
 	f.mu.Unlock()
 	return nil
 }
-
-// Client always returns nil: the Fake has no underlying rueidis.Client. Code
-// under test that reaches for Client() needs the real cache against
-// rueidis/mock.
-func (f *Fake[K, V]) Client() rueidis.Client { return nil }
-
-// Close is a no-op and is safe to call multiple times.
-func (f *Fake[K, V]) Close() {}
