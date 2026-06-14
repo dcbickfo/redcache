@@ -522,7 +522,7 @@ func TestCache_SetMulti_PartialCASFailure_BatchError(t *testing.T) {
 		}, nil
 	})
 
-	// Stolen lock must surface as a BatchError; silently returning nil would
+	// Stolen lock must surface as a batchError; silently returning nil would
 	// mask the partial failure.
 	require.Error(t, err, "SetMulti must report partial CAS failure")
 	var batchErr *redcache.BatchKeyError[string]

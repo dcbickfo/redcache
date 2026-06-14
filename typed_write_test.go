@@ -133,7 +133,7 @@ func TestTyped_SetMulti_PopulatesAll(t *testing.T) {
 }
 
 // TestTyped_SetMulti_BatchKeyError_Surfaces verifies the typed
-// wrapper converts *BatchError to *BatchKeyError[string] on partial CAS failure.
+// wrapper converts *batchError to *BatchKeyError[string] on partial CAS failure.
 func TestTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
 	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	prefix := uuid.NewString() + ":"

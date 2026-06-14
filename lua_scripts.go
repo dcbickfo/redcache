@@ -90,9 +90,11 @@ var (
 		end
 	`)
 
-	// refreshLockScript CAS-refreshes a lock's TTL via PEXPIRE. PEXPIRE does
-	// not trigger invalidation and cannot overwrite a concurrently-written
-	// value. Returns 1 on success, 0 if lock was lost.
+	// refreshLockScript CAS-extends a held lock's TTL via PEXPIRE, only while
+	// the caller still owns the lock (GET == lockVal); it never overwrites a
+	// concurrently-written value. The PEXPIRE emits a CSC invalidation that
+	// harmlessly wakes any waiters, which re-check and resume waiting.
+	// Returns 1 on success, 0 if the lock was lost.
 	refreshLockScript = rueidis.NewLuaScript(`
 		if redis.call("GET", KEYS[1]) == ARGV[1] then
 			redis.call("PEXPIRE", KEYS[1], ARGV[2])

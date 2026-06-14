@@ -50,9 +50,12 @@ type Cache[K comparable, V any] interface {
 	Del(ctx context.Context, k K) error
 	// DelMulti removes keys, triggering invalidation.
 	DelMulti(ctx context.Context, keys []K) error
-	// Touch sets the TTL of a cached value. No-ops on a missing key or lock value.
+	// Touch sets the TTL of a cached value. No-ops on a missing key or lock
+	// value. Clients caching the key are invalidated and re-fetch it (with the
+	// new TTL) on their next read.
 	Touch(ctx context.Context, ttl time.Duration, k K) error
-	// TouchMulti extends the TTL of cached values.
+	// TouchMulti extends the TTL of cached values, with the same invalidation
+	// behavior as Touch.
 	TouchMulti(ctx context.Context, ttl time.Duration, keys []K) error
 }
 

@@ -22,7 +22,12 @@ A typed cache-aside for Redis, built on the [rueidis](https://github.com/redis/r
 ## Requirements
 
 - Go 1.24+
-- Redis 7+
+- Redis 7+ with RESP3 and client-side caching (tracking) enabled
+
+RESP3 client-side caching is load-bearing, not optional: redcache wakes waiters
+through Redis invalidation pushes. Without RESP3 (or with tracking disabled)
+there are no pushes — waiters fall back to polling at the lock TTL, sharply
+raising tail latency under contention.
 
 ## Installation
 
