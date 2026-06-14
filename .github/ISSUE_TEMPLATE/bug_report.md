@@ -13,8 +13,9 @@ A clear description of the bug.
 What you expected instead.
 
 **Minimal reproduction**
-A small snippet or steps that reproduce it. Include the constructor and options
-used (e.g. `NewString` + which codec, `WithRefreshAfterFraction`, etc.).
+A small snippet or steps that reproduce it. Include how the cache was built and
+the options used (e.g. `Open` + `StringOf` and which codec,
+`WithRefreshAfterFraction`, etc.).
 
 **Environment**
 - redcache version (or commit):

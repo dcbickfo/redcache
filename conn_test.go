@@ -53,22 +53,20 @@ func TestConn_SharesEngine(t *testing.T) {
 	require.Equal(t, 42, gotI)
 }
 
-// The one-shot New path builds a Conn internally and returns a view plus a
-// closer func; the closer shuts the underlying client cleanly (and is
-// idempotent, since the engine guards on closeOnce).
-func TestNew_OneShotClosesCleanly(t *testing.T) {
+// Open builds a Conn that owns its client; Conn.Close shuts the underlying
+// client cleanly and is idempotent (the engine guards on closeOnce).
+func TestConn_ClosesCleanly(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires Redis")
 	}
 
-	c, closeFn, err := New[string, string](
+	conn, err := Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		StringKeyCodec{},
-		StringCodec{},
 		WithLockTTL(time.Second),
 	)
 	require.NoError(t, err)
+	c := StringOf[string](conn, StringCodec{})
 
 	ctx := context.Background()
 	key := "conn:oneshot:" + uuid.NewString()
@@ -78,6 +76,6 @@ func TestNew_OneShotClosesCleanly(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "v", got)
 
-	closeFn()
-	closeFn() // idempotent
+	conn.Close()
+	conn.Close() // idempotent
 }

@@ -24,21 +24,19 @@ settles.
   whoever holds the connection, not to injected views.
 - **New constructors; old ones removed.** Removed `NewRedCacheAside`,
   `NewPrimeableCacheAside`, `NewTyped`, `NewStringTyped`, `NewPrimeableTyped`, and
-  `NewPrimeableStringTyped`. Added:
-  - `New[K, V](clientOption, keyCodec, valCodec, opts...)`
-  - `NewString[V](clientOption, valCodec, opts...)` — `StringKeyCodec` preset.
-  - `NewBytes(clientOption, opts...)` — zero-copy `Cache[string, []byte]`.
-  Constructors take a `rueidis.ClientOption` and build the client internally.
-- **`New`/`NewString`/`NewBytes` now return `(Cache, func(), error)`** — the
-  middle `func()` closes the underlying client. They build a client, so the error
-  return covers client-build failure; a nil codec panics before any client opens.
-- **Shared-client sharing via `Conn`.** To cache multiple value types over a
-  single client/invalidation stream, `Open(clientOption, opts...) (*Conn, error)`
-  and derive typed views with `Of[K, V](conn, keyCodec, valCodec)`,
-  `StringOf[V](conn, valCodec)`, or `BytesOf(conn)` — all compile-time typed.
-  `Of`/`StringOf`/`BytesOf` do no I/O, so they no longer return an error and
-  panic on a nil codec. Lifecycle stays on the `Conn` (`(*Conn).Close()` /
-  `(*Conn).Client()`); the views are operations-only.
+  `NewPrimeableStringTyped`. The constructor surface is now `Open` plus three
+  derive-funcs:
+  - `Open(clientOption, opts...) (*Conn, error)` — builds and owns the rueidis
+    client (and its invalidation stream); the `error` covers config validation
+    and client-build failure.
+  - `Of[K, V](conn, keyCodec, valCodec) Cache[K, V]` — typed keys via a
+    `KeyCodec[K]` and typed values.
+  - `StringOf[V](conn, valCodec) Cache[string, V]` — `StringKeyCodec` preset.
+  - `BytesOf(conn) Cache[string, []byte]` — zero-copy opaque payloads.
+  `Of`/`StringOf`/`BytesOf` do no I/O, so they return no error and panic on a nil
+  codec. One `Conn` can back many views over a single client/invalidation stream.
+  Lifecycle stays on the `Conn` (`(*Conn).Close()` / `(*Conn).Client()`); the
+  views are operations-only.
 - **`Cache[K, V]` gained `Peek(ctx, ttl, k) (V, bool, error)`** — a read-only,
   client-side-cached lookup with no loader and no lock. Adding it to the interface
   is a breaking change for external implementers.
@@ -57,10 +55,9 @@ settles.
 - **`BytesCodec` renamed to `UnsafeBytesCodec`** — the name now states the
   zero-copy retention hazard: the decoded slice aliases borrowed library memory
   and must not be mutated or retained past the call.
-- **Nil codecs panic at construction**, not on the first call. `Of`/`StringOf`/
-  `BytesOf` do no I/O and panic immediately on a nil codec; `New`/`NewString`/
-  `NewBytes` panic on a nil codec before opening a client (their `error` return
-  is reserved for client-build failure).
+- **Nil codecs panic at derivation**, not on the first call. `Of`/`StringOf`/
+  `BytesOf` do no I/O and panic immediately on a nil codec — a programmer error
+  caught at wiring time rather than on the hot path.
 
 ### Added
 - **Observability signals on `Metrics`**: `LoaderDuration(d)` (foreground

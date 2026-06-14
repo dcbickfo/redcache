@@ -18,26 +18,28 @@
 //
 // # Choosing a constructor
 //
-//   - [NewString] — Cache[string, V]: string keys, typed values. The common case.
-//     Returns a close func alongside the cache.
-//   - [NewBytes]  — Cache[string, []byte]: zero-copy opaque payloads. Returns a
-//     close func alongside the cache.
-//   - [New]       — Cache[K, V]: typed keys via a [KeyCodec] (and typed values).
-//     Returns a close func alongside the cache.
-//   - [Open] + [Of]/[StringOf]/[BytesOf] — open one [Conn] and derive several
-//     typed views over a single client and invalidation stream; the views are
-//     operations-only (Close/Client live on the [Conn]).
+// Open one [Conn] (it owns the rueidis client and invalidation stream), then
+// derive typed views over it that all share that single client:
+//
+//   - [StringOf] — Cache[string, V]: string keys, typed values. The common case.
+//   - [BytesOf]  — Cache[string, []byte]: zero-copy opaque payloads.
+//   - [Of]       — Cache[K, V]: typed keys via a [KeyCodec] (and typed values).
+//
+// The views are operations-only; lifecycle (Close) and the raw-client escape
+// hatch (Client) live on the [Conn]. Deriving a view does no I/O, returns no
+// error, and panics on a nil codec.
 //
 // # Minimal example
 //
-//	cache, closer, err := redcache.NewString[string](
+//	conn, err := redcache.Open(
 //		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-//		redcache.StringCodec{},
 //	)
 //	if err != nil {
 //		return err
 //	}
-//	defer closer()
+//	defer conn.Close()
+//
+//	cache := redcache.StringOf[string](conn, redcache.StringCodec{})
 //
 //	v, err := cache.Get(ctx, time.Minute, "k", func(ctx context.Context, key string) (string, error) {
 //		return loadFromUpstream(ctx, key) // runs only on a miss, once per key

@@ -29,14 +29,14 @@ func (failOnEmpty) Decode(b []byte) (string, error) { return string(b), nil }
 // reachable via errors.As. Note the generic type argument on the target pointer:
 // it must match the cache's key type (string here).
 func ExampleCache_ForceSetMulti() {
-	cache, closer, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		failOnEmpty{},
 	)
 	if err != nil {
 		panic(err)
 	}
-	defer closer()
+	defer conn.Close()
+	cache := redcache.StringOf[string](conn, failOnEmpty{})
 
 	err = cache.ForceSetMulti(context.Background(), time.Minute, map[string]string{
 		"a": "alpha",
@@ -59,15 +59,15 @@ func ExampleCache_ForceSetMulti() {
 // failed refresh never leaves the key empty. Redis-dependent, so it omits an
 // Output: directive and is compiled but not run by `go test`.
 func ExampleCache_Set() {
-	cache, closer, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
 	)
 	if err != nil {
 		panic(err)
 	}
-	defer closer()
+	defer conn.Close()
+	cache := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	err = cache.Set(context.Background(), time.Minute, "config:greeting",
 		func(ctx context.Context, key string) (string, error) {
@@ -85,15 +85,15 @@ func ExampleCache_Set() {
 // Get or Set on the same key sees ErrLockLost and retries. Redis-dependent, so
 // it omits an Output: directive.
 func ExampleCache_ForceSet() {
-	cache, closer, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
 	)
 	if err != nil {
 		panic(err)
 	}
-	defer closer()
+	defer conn.Close()
+	cache := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	if err := cache.ForceSet(context.Background(), time.Minute, "config:greeting", "hola"); err != nil {
 		panic(err)
@@ -101,9 +101,9 @@ func ExampleCache_ForceSet() {
 	fmt.Println("forced")
 }
 
-// New keys the cache by a domain type via a KeyCodec. KeyCodecFunc adapts a
+// Of keys the cache by a domain type via a KeyCodec. KeyCodecFunc adapts a
 // plain function into a KeyCodec.
-func ExampleNew() {
+func ExampleOf_typedKeys() {
 	type UserID int64
 	type User struct {
 		ID   UserID
@@ -114,16 +114,15 @@ func ExampleNew() {
 		return fmt.Sprintf("user:%d", id), nil
 	})
 
-	cache, closer, err := redcache.New[UserID, User](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		userIDCodec,
-		redcache.JSONCodec[User]{},
 		redcache.WithLockTTL(5*time.Second),
 	)
 	if err != nil {
 		panic(err)
 	}
-	defer closer()
+	defer conn.Close()
+	cache := redcache.Of[UserID, User](conn, userIDCodec, redcache.JSONCodec[User]{})
 
 	u, err := cache.Get(context.Background(), time.Minute, UserID(123),
 		func(ctx context.Context, id UserID) (User, error) {
@@ -180,7 +179,7 @@ func (m *countingMetrics) CacheMisses(n int64) { m.misses.Add(n) }
 // directly (no Redis needed) to show the counting shape.
 func ExampleNoopMetrics() {
 	m := &countingMetrics{}
-	// In real use: redcache.NewString[string](opt, codec, redcache.WithMetrics(m)).
+	// In real use: open a Conn and derive redcache.StringOf[string](conn, codec) with redcache.WithMetrics(m) passed to Open.
 	m.CacheHits(3)
 	m.CacheMisses(1)
 	fmt.Println(m.hits.Load(), m.misses.Load())

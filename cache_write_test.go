@@ -567,23 +567,19 @@ func TestCache_ForceSet_OverwritesExistingValue(t *testing.T) {
 	assert.Equal(t, forcedVal, res)
 }
 
-func TestNewWriteCache_Validation(t *testing.T) {
+func TestOpenWriteCache_Validation(t *testing.T) {
 	t.Parallel()
 	t.Run("empty InitAddress", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := redcache.NewString[string](
-			rueidis.ClientOption{},
-			redcache.StringCodec{},
-		)
+		_, err := redcache.Open(rueidis.ClientOption{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "InitAddress")
 	})
 
 	t.Run("negative LockTTL", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := redcache.NewString[string](
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.StringCodec{},
 			redcache.WithLockTTL(-1*time.Second),
 		)
 		require.Error(t, err)

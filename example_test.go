@@ -10,18 +10,18 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-func ExampleNewString() {
-	client, closer, err := redcache.NewString[string](
+func ExampleStringOf() {
+	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: []string{"127.0.0.1:6379"},
 		},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
 	)
 	if err != nil {
 		panic(err)
 	}
-	defer closer()
+	defer conn.Close()
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	val, err := client.Get(context.Background(), time.Minute, "example:get", func(ctx context.Context, key string) (string, error) {
 		// Called only on cache miss — fetch from your data source.
@@ -35,18 +35,18 @@ func ExampleNewString() {
 	// make `go test` run it). It is compiled to keep the snippet honest.
 }
 
-func ExampleNewString_getMulti() {
-	client, closer, err := redcache.NewString[string](
+func ExampleStringOf_getMulti() {
+	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: []string{"127.0.0.1:6379"},
 		},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
 	)
 	if err != nil {
 		panic(err)
 	}
-	defer closer()
+	defer conn.Close()
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	keys := []string{"example:multi:a", "example:multi:b"}
 	vals, err := client.GetMulti(context.Background(), time.Minute, keys, func(ctx context.Context, keys []string) (map[string]string, error) {

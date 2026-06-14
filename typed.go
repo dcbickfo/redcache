@@ -125,46 +125,6 @@ type cache[K comparable, V any] struct {
 
 var _ Cache[string, []byte] = (*cache[string, []byte])(nil)
 
-// New builds a one-shot Cache[K, V] with its own rueidis.Client (wired for
-// invalidation) for the common single-cache case. It returns the cache, a close
-// func that tears the client down (call it when done — typically via defer), and
-// an error from building the client. keyCodec maps K to the Redis key; valCodec
-// maps V to the envelope payload; both must be non-nil (nil panics). To cache
-// multiple value types over one shared client, use Open + Of instead.
-func New[K comparable, V any](
-	clientOption rueidis.ClientOption,
-	keyCodec KeyCodec[K],
-	valCodec Codec[V],
-	opts ...Option,
-) (Cache[K, V], func(), error) {
-	// Guard codecs before Open so a nil-codec misuse panics without ever
-	// building a client.
-	if keyCodec == nil || valCodec == nil {
-		panic("redcache: keyCodec and valCodec must not be nil")
-	}
-	conn, err := Open(clientOption, opts...)
-	if err != nil {
-		return nil, nil, err
-	}
-	return Of(conn, keyCodec, valCodec), conn.Close, nil
-}
-
-// NewString is New[string, V] with StringKeyCodec preset (enabling the K=string
-// fast path).
-func NewString[V any](
-	clientOption rueidis.ClientOption,
-	valCodec Codec[V],
-	opts ...Option,
-) (Cache[string, V], func(), error) {
-	return New[string, V](clientOption, StringKeyCodec{}, valCodec, opts...)
-}
-
-// NewBytes is NewString[[]byte] with UnsafeBytesCodec — a zero-copy raw []byte
-// cache. The decoded slice aliases borrowed memory; do not mutate or retain it.
-func NewBytes(clientOption rueidis.ClientOption, opts ...Option) (Cache[string, []byte], func(), error) {
-	return NewString[[]byte](clientOption, UnsafeBytesCodec{}, opts...)
-}
-
 // isStringKeyCodec reports whether keyCodec is StringKeyCodec, which guarantees
 // K=string and so gates the unsafe []K↔[]string fast path.
 func isStringKeyCodec[K comparable](keyCodec KeyCodec[K]) bool {

@@ -751,15 +751,15 @@ func TestConcurrentRegisterRace(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	// Minimum lock TTL forces expirations under contention.
-	client, closer, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: addr,
 		},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(100*time.Millisecond),
 	)
 	require.NoError(t, err)
-	defer closer()
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "key:" + uuid.New().String()
@@ -1442,9 +1442,8 @@ func TestRefreshAhead_Backpressure(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 	// Tiny pool (1 worker, queue size 1) plus a sleeping callback so the queue fills fast.
-	client, closer, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(time.Second*3),
 		redcache.WithRefreshAfterFraction(0.5),
 		redcache.WithRefreshBeta(0),
@@ -1452,7 +1451,8 @@ func TestRefreshAhead_Backpressure(t *testing.T) {
 		redcache.WithRefreshQueueSize(1),
 	)
 	require.NoError(t, err)
-	t.Cleanup(closer)
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 
 	// Distinct keys so each triggers its own refresh.
@@ -1509,9 +1509,8 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	t.Parallel()
 	t.Run("negative fraction", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := redcache.NewString[string](
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.StringCodec{},
 			redcache.WithRefreshAfterFraction(-0.1),
 		)
 		require.Error(t, err)
@@ -1519,9 +1518,8 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	})
 	t.Run("fraction equals 1", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := redcache.NewString[string](
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.StringCodec{},
 			redcache.WithRefreshAfterFraction(1.0),
 		)
 		require.Error(t, err)
@@ -1529,9 +1527,8 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	})
 	t.Run("fraction greater than 1", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := redcache.NewString[string](
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.StringCodec{},
 			redcache.WithRefreshAfterFraction(1.5),
 		)
 		require.Error(t, err)
@@ -1540,19 +1537,17 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	t.Run("valid fraction", func(t *testing.T) {
 		t.Parallel()
 		skipIfNoRedis(t)
-		_, closer, err := redcache.NewString[string](
+		conn, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.StringCodec{},
 			redcache.WithRefreshAfterFraction(0.8),
 		)
 		require.NoError(t, err)
-		defer closer()
+		t.Cleanup(conn.Close)
 	})
 	t.Run("negative RefreshWorkers", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := redcache.NewString[string](
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.StringCodec{},
 			redcache.WithRefreshAfterFraction(0.8),
 			redcache.WithRefreshWorkers(-1),
 		)
@@ -1561,9 +1556,8 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	})
 	t.Run("negative RefreshQueueSize", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := redcache.NewString[string](
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.StringCodec{},
 			redcache.WithRefreshAfterFraction(0.8),
 			redcache.WithRefreshQueueSize(-1),
 		)
@@ -1573,25 +1567,23 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	t.Run("custom workers and queue", func(t *testing.T) {
 		t.Parallel()
 		skipIfNoRedis(t)
-		_, closer, err := redcache.NewString[string](
+		conn, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.StringCodec{},
 			redcache.WithRefreshAfterFraction(0.8),
 			redcache.WithRefreshWorkers(2),
 			redcache.WithRefreshQueueSize(16),
 		)
 		require.NoError(t, err)
-		defer closer()
+		t.Cleanup(conn.Close)
 	})
 }
 
-func TestNew_Validation(t *testing.T) {
+func TestOpen_Validation(t *testing.T) {
 	t.Parallel()
 	t.Run("empty InitAddress", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := redcache.NewString[string](
+		_, err := redcache.Open(
 			rueidis.ClientOption{},
-			redcache.StringCodec{},
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "InitAddress")
@@ -1599,9 +1591,8 @@ func TestNew_Validation(t *testing.T) {
 
 	t.Run("negative LockTTL", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := redcache.NewString[string](
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.StringCodec{},
 			redcache.WithLockTTL(-1*time.Second),
 		)
 		require.Error(t, err)
@@ -1610,9 +1601,8 @@ func TestNew_Validation(t *testing.T) {
 
 	t.Run("too small LockTTL", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := redcache.NewString[string](
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.StringCodec{},
 			redcache.WithLockTTL(10*time.Millisecond),
 		)
 		require.Error(t, err)
@@ -1625,13 +1615,13 @@ func TestNew_Validation(t *testing.T) {
 func TestCache_Get_ErrLockLostRetry(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
-	client, closer, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(time.Second*2),
 	)
 	require.NoError(t, err)
-	defer closer()
+	t.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 
 	key := "key:" + uuid.New().String()

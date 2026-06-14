@@ -160,9 +160,8 @@ func TestTyped_Touch_ExtendsTTL(t *testing.T) {
 
 func TestTyped_RefreshAhead_FiresThroughTypedView(t *testing.T) {
 	skipIfNoRedis(t)
-	users, closer, err := redcache.NewString[tUser](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.JSONCodec[tUser]{},
 		redcache.WithLockTTL(500*time.Millisecond),
 		redcache.WithRefreshAfterFraction(0.1),
 		redcache.WithRefreshWorkers(1),
@@ -171,7 +170,8 @@ func TestTyped_RefreshAhead_FiresThroughTypedView(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	defer closer()
+	t.Cleanup(conn.Close)
+	users := redcache.StringOf[tUser](conn, redcache.JSONCodec[tUser]{})
 
 	key := "refresh:" + uuid.NewString()
 
@@ -250,16 +250,15 @@ func TestTyped_GetMulti_IntKeys(t *testing.T) {
 	codec := redcache.KeyCodecFunc[int](func(i int) (string, error) {
 		return prefix + strconv.Itoa(i), nil
 	})
-	users, closer, err := redcache.New[int, tUser](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		codec,
-		redcache.JSONCodec[tUser]{},
 		redcache.WithLockTTL(2*time.Second),
 	)
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	t.Cleanup(closer)
+	t.Cleanup(conn.Close)
+	users := redcache.Of[int, tUser](conn, codec, redcache.JSONCodec[tUser]{})
 
 	loader := func(_ context.Context, missing []int) (map[int]tUser, error) {
 		out := make(map[int]tUser, len(missing))

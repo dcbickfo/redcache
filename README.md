@@ -32,7 +32,7 @@ go get github.com/dcbickfo/redcache
 
 ## Quickstart
 
-`NewString[V]` builds a `Cache[string, V]` with its own rueidis client. Pair it with `JSONCodec[V]` to store JSON-encoded values. `Get` returns the cached value, calling your loader only on a miss — and only on one caller per key.
+`Open` builds a `Conn` that owns a rueidis client; `StringOf[V]` derives a `Cache[string, V]` view over it. Pair it with `JSONCodec[V]` to store JSON-encoded values. `Get` returns the cached value, calling your loader only on a miss — and only on one caller per key.
 
 ```go
 package main
@@ -53,15 +53,16 @@ type User struct {
 }
 
 func main() {
-    cache, closer, err := redcache.NewString[User](
+    conn, err := redcache.Open(
         rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-        redcache.JSONCodec[User]{},
         redcache.WithLockTTL(5*time.Second),
     )
     if err != nil {
         log.Fatal(err)
     }
-    defer closer()
+    defer conn.Close()
+
+    cache := redcache.StringOf[User](conn, redcache.JSONCodec[User]{})
 
     ctx := context.Background()
 
@@ -108,7 +109,7 @@ u, ok, err := cache.Peek(ctx, time.Minute, "u-123")
 
 ## Typed keys
 
-Use `New[K, V]` with a `KeyCodec[K]` to key the cache by a domain type. `KeyCodecFunc[K]` adapts a plain function into a `KeyCodec[K]`.
+Derive a view with `Of[K, V]` and a `KeyCodec[K]` to key the cache by a domain type. `KeyCodecFunc[K]` adapts a plain function into a `KeyCodec[K]`.
 
 ```go
 type UserID int64
@@ -117,15 +118,15 @@ userIDCodec := redcache.KeyCodecFunc[UserID](func(id UserID) (string, error) {
     return fmt.Sprintf("user:%d", id), nil
 })
 
-cache, closer, err := redcache.New[UserID, User](
+conn, err := redcache.Open(
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-    userIDCodec,
-    redcache.JSONCodec[User]{},
 )
 if err != nil {
     log.Fatal(err)
 }
-defer closer()
+defer conn.Close()
+
+cache := redcache.Of[UserID, User](conn, userIDCodec, redcache.JSONCodec[User]{})
 
 u, err := cache.Get(ctx, time.Minute, UserID(123),
     func(ctx context.Context, id UserID) (User, error) {
@@ -138,16 +139,18 @@ The key codec must be deterministic, concurrent-safe, and produce a non-empty ke
 
 ## Raw bytes
 
-`NewBytes` is a zero-copy `Cache[string, []byte]` for opaque payloads — `NewString[[]byte]` preset with `UnsafeBytesCodec`. The decoded slice aliases the cache's borrowed read buffer; do not mutate or retain it past the callback. Copy it out if you need an owned value.
+`BytesOf` derives a zero-copy `Cache[string, []byte]` for opaque payloads — `StringOf[[]byte]` preset with `UnsafeBytesCodec`. The decoded slice aliases the cache's borrowed read buffer; do not mutate or retain it past the callback. Copy it out if you need an owned value.
 
 ```go
-cache, closer, err := redcache.NewBytes(
+conn, err := redcache.Open(
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 )
 if err != nil {
     log.Fatal(err)
 }
-defer closer()
+defer conn.Close()
+
+cache := redcache.BytesOf(conn)
 
 b, err := cache.Get(ctx, time.Minute, "blob:42",
     func(ctx context.Context, key string) ([]byte, error) {
@@ -196,9 +199,8 @@ Construction takes functional options. They are applied in order; later wins.
 Set `WithRefreshAfterFraction` to enable background refreshes. When a `Get`/`GetMulti` returns a value whose remaining TTL has crossed the configured threshold, the stale value is returned immediately and a background worker repopulates the entry. Distributed and local dedup ensure only one refresh runs per key.
 
 ```go
-cache, closer, err := redcache.NewString[User](
+conn, err := redcache.Open(
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-    redcache.JSONCodec[User]{},
     redcache.WithLockTTL(5*time.Second),
     redcache.WithRefreshAfterFraction(0.8), // refresh once 80% of TTL has elapsed
     redcache.WithRefreshTimeout(20*time.Second),
@@ -208,7 +210,9 @@ cache, closer, err := redcache.NewString[User](
 if err != nil {
     log.Fatal(err)
 }
-defer closer()
+defer conn.Close()
+
+cache := redcache.StringOf[User](conn, redcache.JSONCodec[User]{})
 ```
 
 ### XFetch probabilistic refresh
@@ -262,7 +266,7 @@ orders := redcache.Of[OrderID, Order](
 )
 ```
 
-`Of` (and `StringOf` / `BytesOf`) does no I/O — it returns a `Cache[K, V]` with no error, and panics on a nil codec. One-shot `New` / `NewString` / `NewBytes` open their own `Conn` internally and return `(cache, closer, err)`; call the returned `closer` to tear down the underlying client.
+`Of` (and `StringOf` / `BytesOf`) does no I/O — it returns a `Cache[K, V]` with no error, and panics on a nil codec. The constructors are exactly `Open` (which builds the `Conn` and owns the client) plus the `Of` / `StringOf` / `BytesOf` derive-funcs; close the `Conn` to tear down the underlying client and every view derived from it.
 
 ### Long-lived service caching multiple value types
 
@@ -298,15 +302,16 @@ type myMetrics struct {
 func (m *myMetrics) CacheHits(n int64)   { m.hits.Add(n) }
 func (m *myMetrics) CacheMisses(n int64) { m.misses.Add(n) }
 
-cache, closer, err := redcache.NewString[User](
+conn, err := redcache.Open(
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-    redcache.JSONCodec[User]{},
     redcache.WithMetrics(&myMetrics{}),
 )
 if err != nil {
     log.Fatal(err)
 }
-defer closer()
+defer conn.Close()
+
+cache := redcache.StringOf[User](conn, redcache.JSONCodec[User]{})
 ```
 
 ### OpenTelemetry
@@ -320,11 +325,13 @@ m, err := redcacheotel.NewMetrics(meterProvider) // *otel/metric.MeterProvider
 if err != nil {
     log.Fatal(err)
 }
-cache, closer, err := redcache.NewString[User](opt, redcache.JSONCodec[User]{}, redcache.WithMetrics(m))
+conn, err := redcache.Open(opt, redcache.WithMetrics(m))
 if err != nil {
     log.Fatal(err)
 }
-defer closer()
+defer conn.Close()
+
+cache := redcache.StringOf[User](conn, redcache.JSONCodec[User]{})
 ```
 
 It records counters (hits, misses, lock contention, refresh and error events) and histograms (`lock.wait.duration`, `loader.duration`, in seconds). High-cardinality keys are deliberately not attached as labels; `RedisError`'s bounded `op` is.

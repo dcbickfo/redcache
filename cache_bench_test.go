@@ -242,9 +242,8 @@ func BenchmarkForceSetMulti(b *testing.B) {
 func BenchmarkCache_Get_Refresh(b *testing.B) {
 	b.ReportAllocs()
 	skipIfNoRedis(b)
-	client, closer, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
 		redcache.WithRefreshAfterFraction(0.001), // any TTL elapsed → trigger refresh
 		redcache.WithRefreshWorkers(8),
@@ -253,7 +252,8 @@ func BenchmarkCache_Get_Refresh(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer closer()
+	b.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 	key := "bench:get:refresh:" + uuid.New().String()
 	const val = "bench-value"
@@ -276,9 +276,8 @@ func BenchmarkCache_Get_Refresh(b *testing.B) {
 func BenchmarkCache_GetMulti_Refresh(b *testing.B) {
 	b.ReportAllocs()
 	skipIfNoRedis(b)
-	client, closer, err := redcache.NewString[string](
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
 		redcache.WithRefreshAfterFraction(0.001), // any TTL elapsed → trigger refresh
 		redcache.WithRefreshWorkers(8),
@@ -287,7 +286,8 @@ func BenchmarkCache_GetMulti_Refresh(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer closer()
+	b.Cleanup(conn.Close)
+	client := redcache.StringOf[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 
 	keys := make([]string, 10)
