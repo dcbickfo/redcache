@@ -49,8 +49,8 @@ func NewMetrics(mp metric.MeterProvider) (*Metrics, error) {
 	meter := mp.Meter(scopeName)
 	m := &Metrics{ctx: context.Background()}
 
-	// Errors from instrument creation are joined so a single bad build surfaces
-	// all problems at once rather than one per call.
+	// Construction continues past a failed instrument and returns the first error
+	// encountered, so one bad build doesn't short-circuit the rest of the wiring.
 	var firstErr error
 	counter := func(name, desc string) metric.Int64Counter {
 		c, err := meter.Int64Counter(name, metric.WithDescription(desc))

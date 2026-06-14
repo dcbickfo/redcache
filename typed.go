@@ -37,8 +37,10 @@ type Cache[K comparable, V any] interface {
 	// SetMulti populates keys via fn under write locks. Partial failures surface
 	// as *BatchKeyError[K] via errors.As.
 	SetMulti(ctx context.Context, ttl time.Duration, keys []K, fn func(context.Context, []K) (map[K]V, error)) error
-	// ForceSet writes v unconditionally, bypassing locks. In-progress Get/Set
-	// callers on the same key see ErrLockLost and retry.
+	// ForceSet writes v unconditionally, bypassing locks. In-progress Get
+	// callers on the same key retry transparently and observe the force-set
+	// value; in-progress Set callers receive ErrLockLost and their pending set
+	// is abandoned (not retried).
 	ForceSet(ctx context.Context, ttl time.Duration, k K, v V) error
 	// ForceSetMulti writes values unconditionally. Encode failures are collected
 	// per-key; successfully-encoded entries are still written. Partial failures

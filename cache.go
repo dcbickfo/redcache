@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,7 +16,6 @@ import (
 
 	"github.com/dcbickfo/redcache/internal/cmdx"
 	"github.com/dcbickfo/redcache/internal/lockpool"
-	"github.com/dcbickfo/redcache/internal/mapsx"
 	"github.com/dcbickfo/redcache/internal/poolx"
 	"github.com/dcbickfo/redcache/internal/syncx"
 )
@@ -395,7 +396,7 @@ func (rca *cacheAside) peek(ctx context.Context, ttl time.Duration, key string) 
 func (rca *cacheAside) del(ctx context.Context, key string) error {
 	if err := rca.client.Do(ctx, rca.client.B().Del().Key(key).Build()).Error(); err != nil {
 		rca.emitRedisError("del")
-		return err
+		return fmt.Errorf("del key %q: %w", key, err)
 	}
 	return nil
 }
@@ -804,7 +805,7 @@ func (rca *cacheAside) trySetMultiKeyFn(
 		return nil
 	}
 
-	fnKeys := mapsx.Keys(lockVals)
+	fnKeys := slices.Collect(maps.Keys(lockVals))
 	start := time.Now()
 	vals, err := fn(ctx, fnKeys)
 	rca.emitLoaderDuration(time.Since(start))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"sync"
@@ -18,7 +19,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dcbickfo/redcache"
-	"github.com/dcbickfo/redcache/internal/mapsx"
 )
 
 var addr = []string{"127.0.0.1:6379"}
@@ -624,7 +624,7 @@ func TestCache_DelMulti(t *testing.T) {
 		require.NoErrorf(t, err, "expected no error, got %v", err)
 	}
 
-	err := client.DelMulti(ctx, mapsx.Keys(keyAndVals)...)
+	err := client.DelMulti(ctx, slices.Collect(maps.Keys(keyAndVals))...)
 	require.NoError(t, err)
 
 	for key := range keyAndVals {

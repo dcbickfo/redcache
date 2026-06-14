@@ -39,13 +39,13 @@ func unwrapEnvelope(s string) (val string, delta time.Duration) {
 		return s, 0
 	}
 	rest := s[len(envelopePrefix):]
-	colonIdx := strings.IndexByte(rest, ':')
-	if colonIdx < 0 {
+	deltaStr, payload, found := strings.Cut(rest, ":")
+	if !found {
 		return s, 0
 	}
-	deltaNs, err := strconv.ParseInt(rest[:colonIdx], 10, 64)
+	deltaNs, err := strconv.ParseInt(deltaStr, 10, 64)
 	if err != nil || deltaNs < 0 {
 		return s, 0
 	}
-	return rest[colonIdx+1:], time.Duration(deltaNs)
+	return payload, time.Duration(deltaNs)
 }

@@ -57,11 +57,14 @@ func (s *Slice[T]) GetCap(n int) *[]T {
 	return h
 }
 
-// Put returns a *[]T to the pool. Slices grown past maxCap are dropped.
+// Put returns a *[]T to the pool. Slices grown past maxCap are dropped. The
+// live elements are cleared first so a pooled buffer doesn't pin channels,
+// strings, or other references until its next reuse.
 func (s *Slice[T]) Put(h *[]T) {
 	if cap(*h) > maxCap {
 		return
 	}
+	clear(*h)
 	*h = (*h)[:0]
 	s.p.Put(h)
 }

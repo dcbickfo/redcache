@@ -3,13 +3,14 @@ package redcache
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/redis/rueidis"
 
-	"github.com/dcbickfo/redcache/internal/mapsx"
 	"github.com/dcbickfo/redcache/internal/syncx"
 )
 
@@ -126,7 +127,7 @@ func (rca *cacheAside) setMulti(
 		return err
 	}
 
-	fnKeys := mapsx.Keys(lockValues)
+	fnKeys := slices.Collect(maps.Keys(lockValues))
 	start := time.Now()
 	vals, err := fn(ctx, fnKeys)
 	rca.emitLoaderDuration(time.Since(start))
@@ -167,22 +168,26 @@ func (rca *cacheAside) setMulti(
 	return newBatchError(failed, succeeded)
 }
 
-// forceSet unconditionally writes value, bypassing locks. In-progress Get/Set
-// callers on the same key will see ErrLockLost and retry. ttl must be > 0
-// (Redis rejects PX 0); use Del to remove. The value is envelope-wrapped with
-// delta=0, so refresh-ahead falls back to the simple floor check. Prefer set
-// when you need callback-error rollback.
+// forceSet unconditionally writes value, bypassing locks. In-progress Get
+// callers on the same key retry transparently and observe the force-set value;
+// in-progress Set callers receive ErrLockLost and their pending set is
+// abandoned (not retried). ttl must be > 0 (Redis rejects PX 0); use Del to
+// remove. The value is envelope-wrapped with delta=0, so refresh-ahead falls
+// back to the simple floor check. Prefer set when you need callback-error
+// rollback.
 func (rca *cacheAside) forceSet(ctx context.Context, ttl time.Duration, key, value string) error {
 	if err := rca.client.Do(ctx, rca.client.B().Set().Key(key).Value(wrapEnvelope(value, 0)).Px(ttl).Build()).Error(); err != nil {
 		rca.emitRedisError("set")
-		return err
+		return fmt.Errorf("force set key %q: %w", key, err)
 	}
 	return nil
 }
 
 // forceSetMulti unconditionally writes values, bypassing locks. In-progress
-// Get/Set callers on the same keys will see ErrLockLost and retry. ttl must
-// be > 0. Returns a *batchError on partial failure.
+// Get callers on the same keys retry transparently and observe the force-set
+// values; in-progress Set callers receive ErrLockLost and their pending sets
+// are abandoned (not retried). ttl must be > 0. Returns a *batchError on
+// partial failure.
 func (rca *cacheAside) forceSetMulti(ctx context.Context, ttl time.Duration, values map[string]string) error {
 	if len(values) == 0 {
 		return nil
