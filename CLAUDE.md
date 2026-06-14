@@ -13,7 +13,7 @@ redcache is a Go library that provides a cache-aside implementation for Redis, b
 go test ./...
 
 # Run a single test
-go test -run TestCacheAside_Get ./...
+go test -run TestCache_Get ./...
 
 # Run tests with race detector
 go test -race ./...
@@ -32,10 +32,13 @@ docker compose up -d
 
 The library is a single-package Go module (`package redcache`) with internal helpers.
 
-**Core type: `CacheAside`** (`cacheaside.go`) — wraps a `rueidis.Client` and provides:
+**Public surface: `Cache[K, V]`** (`cache.go`) — a generic interface obtained from a `Conn` (which owns the `rueidis.Client` and invalidation stream) via `Open` plus `New` / `NewString` / `NewBytes`. It is backed by the unexported `cacheAside` engine (`engine.go`, with the single-key path in `get.go`, multi-key in `getmulti.go`, del/touch in `ops.go`, and metric emitters in `emit.go`). Core operations:
 - `Get(ctx, ttl, key, fn)` — single-key cache-aside with distributed lock
 - `GetMulti(ctx, ttl, keys, fn)` — multi-key cache-aside; groups SET operations by Redis cluster slot for efficient batching
+- `Peek` — read-only client-side-cached lookup (no loader, no lock)
+- `Set` / `SetMulti` / `ForceSet` / `ForceSetMulti` — write-through priming
 - `Del` / `DelMulti` — cache invalidation
+- `Touch` / `TouchMulti` — sliding-TTL extension
 
 **How it works — the Get loop:**
 
@@ -51,12 +54,13 @@ The key insight: because `tryGet` uses `DoCache`, any client that reads a lock v
 
 **Lock mechanism:** Lock values are prefixed UUIDv7 strings (default prefix `__redcache:lock:`). `tryGet` recognizes these by prefix and treats them as cache misses. Lua scripts (`delKeyLua`, `setKeyLua`) atomically verify lock ownership before deleting or overwriting values. Lock entries are tracked locally via `syncx.Map` with context-based auto-expiration via `context.AfterFunc`.
 
-**Multi-key operations:** `GetMulti` follows the same pattern but batches operations. `tryGetMulti` uses `DoMultiCache` for batch reads. `tryLockMulti` acquires locks in batch. `setMultiWithLock` groups SET Lua scripts by Redis cluster slot (via `cmdx.Slot`) and executes each group in parallel using `errgroup`. `syncx.WaitForAll` waits on multiple channels simultaneously using `reflect.Select`.
+**Multi-key operations:** `GetMulti` follows the same pattern but batches operations. `tryGetMulti` uses `DoMultiCache` for batch reads. `tryLockMulti` acquires locks in batch. `setMultiWithLock` groups SET Lua scripts by Redis cluster slot (via `cmdx.Slot`) and executes each group in parallel via goroutines coordinated with `sync.WaitGroup` (results merged under a `sync.Mutex`). `syncx.WaitForAll` waits on multiple channels simultaneously by spawning one goroutine per channel coordinated via a buffered channel and `sync.WaitGroup`, returning the context error on cancellation.
 
 **Internal packages:**
 - `internal/cmdx` — Redis cluster slot calculation (CRC16) for grouping multi-key operations
-- `internal/syncx` — Generic typed wrapper around `sync.Map`; `WaitForAll` uses `reflect.Select` to wait on multiple channels with context cancellation
-- `internal/mapsx` — Generic map helpers (`Keys`, `Values`)
+- `internal/lockpool` — fast lock-value generation: a per-instance UUIDv7 prefix plus an atomic counter, avoiding a per-lock `uuid.NewV7()` call
+- `internal/poolx` — typed `sync.Pool` wrappers that reuse `[]T` slice headers (stored as `*[]T` to avoid interface-boxing allocations) across multi-key paths; capacity-capped, with live elements cleared on return
+- `internal/syncx` — Generic typed wrapper around `sync.Map`; `WaitForAll` waits on multiple channels by spawning one goroutine per channel coordinated via a buffered channel and `sync.WaitGroup`, returning the context error on cancellation
 
 ## Code Conventions
 

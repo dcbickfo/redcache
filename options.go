@@ -49,6 +49,12 @@ func WithLogger(l Logger) Option {
 	return func(c *config) { c.logger = l }
 }
 
+// Logger is the slog-shaped subset the cache calls into. *slog.Logger satisfies it.
+type Logger interface {
+	Error(msg string, args ...any)
+	Debug(msg string, args ...any)
+}
+
 // WithMetrics sets the metrics sink. Defaults to NoopMetrics. Methods run on
 // the hot path; impls must be concurrent-safe.
 func WithMetrics(m Metrics) Option {

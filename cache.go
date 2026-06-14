@@ -4,1060 +4,703 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
-	"slices"
-	"strconv"
-	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/redis/rueidis"
-
-	"github.com/dcbickfo/redcache/internal/cmdx"
-	"github.com/dcbickfo/redcache/internal/lockpool"
-	"github.com/dcbickfo/redcache/internal/poolx"
-	"github.com/dcbickfo/redcache/internal/syncx"
 )
 
-var (
-	cacheableTTLPool = poolx.NewSlice(func() []rueidis.CacheableTTL { return make([]rueidis.CacheableTTL, 0, 16) })
-	commandsPool     = poolx.NewSlice(func() []rueidis.Completed { return make([]rueidis.Completed, 0, 16) })
-	luaExecPool      = poolx.NewSlice(func() []rueidis.LuaExec { return make([]rueidis.LuaExec, 0, 16) })
-	stringPool       = poolx.NewSlice(func() []string { return make([]string, 0, 16) })
-	chanPool         = poolx.NewSlice(func() []<-chan struct{} { return make([]<-chan struct{}, 0, 16) })
-)
-
-// lockEntry tracks a key's wait channel and its TTL timer. cancel and
-// timerExpired close done idempotently; timerExpired skips reading le.timer
-// because doing so would race the write in register's slow path.
-type lockEntry struct {
-	done  chan struct{}
-	once  sync.Once
-	timer *time.Timer
+// Cache is the typed cache-aside surface: a generic interface over a key type K
+// and value type V, and a pure operational handle. Read methods run the
+// stampede-protected lock loop; write methods populate every subscribed client's
+// cache. It carries no lifecycle or raw-client access — those live on the owning
+// Conn (see Open/New) — so a Cache is safe to inject into code that should not be
+// able to close the shared connection, and trivial to fake in tests.
+type Cache[K comparable, V any] interface {
+	// Get returns the cached value for k, calling fn on a miss. Only one caller
+	// across all processes runs fn for a given key; the rest wait on the
+	// resulting invalidation. Decode errors on read are wrapped with ErrDecode.
+	Get(ctx context.Context, ttl time.Duration, k K, fn func(context.Context, K) (V, error)) (V, error)
+	// GetMulti returns cached values for keys, calling fn for misses. SETs are
+	// grouped by Redis cluster slot. A decode error aborts the batch (wrapped
+	// with ErrDecode).
+	GetMulti(ctx context.Context, ttl time.Duration, keys []K, fn func(context.Context, []K) (map[K]V, error)) (map[K]V, error)
+	// Peek is a read-only, client-side-cached lookup with no loader and no lock.
+	// It returns (value, true, nil) on a cached hit, (zero, false, nil) on a miss
+	// or when the key currently holds a lock value, and (zero, false, err) on a
+	// real Redis or decode error. ttl is the client-side-cache subscription TTL,
+	// like Get.
+	Peek(ctx context.Context, ttl time.Duration, k K) (V, bool, error)
+	// Set populates k via fn under a write lock, writing the value to every
+	// subscribed client. On callback error the prior value is restored.
+	Set(ctx context.Context, ttl time.Duration, k K, fn func(context.Context, K) (V, error)) error
+	// SetMulti populates keys via fn under write locks. Partial failures surface
+	// as *BatchKeyError[K] via errors.As.
+	SetMulti(ctx context.Context, ttl time.Duration, keys []K, fn func(context.Context, []K) (map[K]V, error)) error
+	// ForceSet writes v unconditionally, bypassing locks. In-progress Get
+	// callers on the same key retry transparently and observe the force-set
+	// value; in-progress Set callers receive ErrLockLost and their pending set
+	// is abandoned (not retried).
+	ForceSet(ctx context.Context, ttl time.Duration, k K, v V) error
+	// ForceSetMulti writes values unconditionally. Encode failures are collected
+	// per-key; successfully-encoded entries are still written. Partial failures
+	// surface as *BatchKeyError[K].
+	ForceSetMulti(ctx context.Context, ttl time.Duration, values map[K]V) error
+	// Del removes a key, triggering invalidation on all subscribed clients.
+	Del(ctx context.Context, k K) error
+	// DelMulti removes keys, triggering invalidation.
+	DelMulti(ctx context.Context, keys []K) error
+	// Touch sets the TTL of a cached value. No-ops on a missing key or lock value.
+	Touch(ctx context.Context, ttl time.Duration, k K) error
+	// TouchMulti extends the TTL of cached values.
+	TouchMulti(ctx context.Context, ttl time.Duration, keys []K) error
 }
 
-func (le *lockEntry) cancel() {
-	le.once.Do(func() {
-		if le.timer != nil {
-			le.timer.Stop()
-		}
-		close(le.done)
-	})
+// Conn owns one rueidis client, its invalidation stream, and a lock namespace.
+// Derive typed cache views over it with New, NewString, or NewBytes — they all
+// share the single client and invalidation subscription. The Conn and every
+// view it spawns share one client; closing any of them closes it. Open the Conn
+// once, derive all the views you need, and close the Conn when done with all of
+// them.
+type Conn struct {
+	core *cacheAside
 }
 
-func (le *lockEntry) timerExpired() {
-	le.once.Do(func() {
-		close(le.done)
-	})
-}
-
-// Logger is the slog-shaped subset the cache calls into. *slog.Logger satisfies it.
-type Logger interface {
-	Error(msg string, args ...any)
-	Debug(msg string, args ...any)
-}
-
-// cacheAside is the string-typed cache-aside engine over a rueidis.Client. It
-// owns the lock/refresh/pool machinery; the generic Cache[K,V] layer encodes
-// K/V and delegates here.
-type cacheAside struct {
-	client         rueidis.Client
-	locks          syncx.Map[string, *lockEntry]
-	lockPool       *lockpool.Pool
-	lockTTL        time.Duration
-	lockTTLMs      string // pre-formatted lockTTL.Milliseconds() for Lua args.
-	logger         Logger
-	metrics        Metrics
-	metricsEnabled bool // false when metrics is NoopMetrics{}, gates hot-path emits.
-	lockPrefix     string
-	refreshAfter   float64                     // 0 = disabled.
-	refreshBeta    float64                     // XFetch beta; 0 = simple floor only.
-	refreshTimeout time.Duration               // 0 = use the data ttl per call.
-	refreshing     syncx.Map[string, struct{}] // local dedup of in-flight refreshes.
-	refreshPrefix  string
-	refreshQueue   chan refreshJob // worker pool job queue (nil when disabled).
-	refreshDone    chan struct{}   // closed by Close to signal workers/senders.
-	refreshWg      sync.WaitGroup
-	closing        atomic.Bool // set true at the start of Close to gate refresh sends.
-	closeOnce      sync.Once
-}
-
-// newCacheAside builds a cacheAside from a validated/defaulted config and the
-// rueidis.ClientOption. It builds the underlying client internally and wires
-// OnInvalidations to its own handler.
-func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, error) {
-	if err := cfg.applyDefaults(clientOption); err != nil {
-		return nil, err
-	}
-
-	lp, err := lockpool.New(cfg.lockPrefix)
-	if err != nil {
-		return nil, fmt.Errorf("lock pool: %w", err)
-	}
-	_, isNoop := cfg.metrics.(NoopMetrics)
-	rca := &cacheAside{
-		lockPool:       lp,
-		lockTTL:        cfg.lockTTL,
-		lockTTLMs:      strconv.FormatInt(cfg.lockTTL.Milliseconds(), 10),
-		logger:         cfg.logger,
-		metrics:        cfg.metrics,
-		metricsEnabled: !isNoop,
-		lockPrefix:     cfg.lockPrefix,
-		refreshAfter:   cfg.refreshAfterFraction,
-		refreshBeta:    cfg.refreshBeta,
-		refreshTimeout: cfg.refreshTimeout,
-		refreshPrefix:  cfg.refreshLockPrefix,
-	}
-	// PipelineMultiplex=-1: single connection per node so cache reads and the
-	// invalidation stream share a pipe. ClientBuilder can override.
-	clientOption.PipelineMultiplex = -1
-	clientOption.OnInvalidations = rca.onInvalidate
-
-	if cfg.clientBuilder != nil {
-		rca.client, err = cfg.clientBuilder(clientOption)
-	} else {
-		rca.client, err = rueidis.NewClient(clientOption)
-	}
+// Open builds a Conn with its own rueidis.Client (wired for invalidation).
+// Derive typed views with New/NewString/NewBytes.
+func Open(clientOption rueidis.ClientOption, opts ...Option) (*Conn, error) {
+	cfg := newConfig(opts...)
+	core, err := newCacheAside(clientOption, cfg)
 	if err != nil {
 		return nil, err
 	}
+	return &Conn{core: core}, nil
+}
 
-	if rca.refreshAfter > 0 {
-		rca.refreshQueue = make(chan refreshJob, cfg.refreshQueueSize)
-		rca.refreshDone = make(chan struct{})
-		rca.startRefreshWorkers(cfg.refreshWorkers)
+// Close closes the underlying engine and client. Idempotent. Closes every view
+// derived from this Conn too, since they share the client.
+func (c *Conn) Close() { c.core.Close() }
+
+// Client returns the underlying rueidis.Client, shared by every view.
+func (c *Conn) Client() rueidis.Client { return c.core.Client() }
+
+// New derives a typed Cache[K, V] view over c with its own key/value codecs. The
+// view shares c's client and invalidation stream and is a pure operational
+// handle — lifecycle (Close) and the raw-client escape hatch live on the Conn,
+// not on the view, so a view is safe to hand to code that should not be able to
+// tear the connection down. Deriving a view does no I/O and cannot fail;
+// keyCodec and valCodec must be non-nil (passing nil panics — a programmer error).
+func New[K comparable, V any](c *Conn, keyCodec KeyCodec[K], valCodec Codec[V]) Cache[K, V] {
+	if keyCodec == nil || valCodec == nil {
+		panic("redcache: keyCodec and valCodec must not be nil")
+	}
+	return &cache[K, V]{
+		core:        c.core,
+		keyCodec:    keyCodec,
+		valCodec:    valCodec,
+		keyIsString: isStringKeyCodec[K](keyCodec),
+	}
+}
+
+// NewString is New with StringKeyCodec preset (enabling the K=string fast path).
+func NewString[V any](c *Conn, valCodec Codec[V]) Cache[string, V] {
+	return New[string, V](c, StringKeyCodec{}, valCodec)
+}
+
+// NewBytes is NewString with UnsafeBytesCodec — a zero-copy raw []byte view. The
+// decoded slice aliases borrowed memory; do not mutate or retain it.
+func NewBytes(c *Conn) Cache[string, []byte] {
+	return NewString[[]byte](c, UnsafeBytesCodec{})
+}
+
+// cache is the concrete generic implementation of Cache[K, V]. It encodes K/V
+// and delegates to the unexported string-typed engine (*cacheAside). One engine
+// may back many cache views with different K/V and codecs (see Conn/New).
+type cache[K comparable, V any] struct {
+	core     *cacheAside
+	keyCodec KeyCodec[K]
+	valCodec Codec[V]
+	// keyIsString is set when keyCodec is StringKeyCodec; multi-key paths then
+	// alias []K↔[]string instead of building a reverse-lookup map.
+	keyIsString bool
+}
+
+var _ Cache[string, []byte] = (*cache[string, []byte])(nil)
+
+// isStringKeyCodec reports whether keyCodec is StringKeyCodec, which guarantees
+// K=string and so gates the unsafe []K↔[]string fast path.
+func isStringKeyCodec[K comparable](keyCodec KeyCodec[K]) bool {
+	_, ok := any(keyCodec).(StringKeyCodec)
+	return ok
+}
+
+// Get returns the cached value for k, calling fn on a miss. Decode errors on
+// read are wrapped with ErrDecode and leave the cached entry intact.
+func (c *cache[K, V]) Get(
+	ctx context.Context,
+	ttl time.Duration,
+	k K,
+	fn func(ctx context.Context, k K) (V, error),
+) (V, error) {
+	var zero V
+	encKey, err := c.keyCodec.EncodeKey(k)
+	if err != nil {
+		return zero, fmt.Errorf("redcache: encode key: %w", err)
 	}
 
-	return rca, nil
-}
-
-// Client returns the underlying rueidis.Client. Bypasses cache-aside semantics.
-func (rca *cacheAside) Client() rueidis.Client {
-	return rca.client
-}
-
-// Close cancels pending lock entries and drains refresh workers (bounded by
-// LockTTL). The underlying rueidis.Client is closed too. Idempotent.
-//
-// Shutdown signals workers via refreshDone; closing refreshQueue would race
-// concurrent senders.
-func (rca *cacheAside) Close() {
-	rca.closeOnce.Do(func() {
-		rca.closing.Store(true)
-		rca.locks.Range(func(_ string, entry *lockEntry) bool {
-			entry.cancel()
-			return true
-		})
-		if rca.refreshQueue != nil {
-			close(rca.refreshDone)
-			rca.refreshWg.Wait()
+	raw, err := c.core.get(ctx, ttl, encKey, func(ctx context.Context, _ string) (string, error) {
+		v, ferr := fn(ctx, k)
+		if ferr != nil {
+			return "", ferr
 		}
-		rca.client.Close()
+		b, eerr := c.valCodec.Encode(v)
+		if eerr != nil {
+			return "", fmt.Errorf("redcache: encode value: %w", eerr)
+		}
+		return bytesToString(b), nil
 	})
-}
-
-// cleanupCtx returns ctx with cancellation/deadline stripped but bounded at
-// lockTTL — so cleanup outlives a cancelled request without leaking forever.
-// Callers must defer the returned cancel.
-func (rca *cacheAside) cleanupCtx(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), rca.lockTTL)
-}
-
-func (rca *cacheAside) emitCacheHits(n int) {
-	if rca.metricsEnabled && n > 0 {
-		rca.metrics.CacheHits(int64(n))
+	if err != nil {
+		return zero, err
 	}
-}
 
-func (rca *cacheAside) emitCacheMisses(n int) {
-	if rca.metricsEnabled && n > 0 {
-		rca.metrics.CacheMisses(int64(n))
+	v, derr := c.valCodec.Decode(stringToBytes(raw))
+	if derr != nil {
+		return zero, fmt.Errorf("redcache: decode key %q: %w: %w", encKey, ErrDecode, derr)
 	}
+	return v, nil
 }
 
-// awaitLock blocks on waitChan or ctx. Emits the wait duration regardless.
-func (rca *cacheAside) awaitLock(ctx context.Context, waitChan <-chan struct{}) error {
-	start := time.Now()
-	select {
-	case <-waitChan:
-		rca.emitLockWaitDuration(time.Since(start))
-		return nil
-	case <-ctx.Done():
-		rca.emitLockWaitDuration(time.Since(start))
-		return ctx.Err()
+// Peek is a read-only, client-side-cached lookup with no loader and no lock.
+// Returns (value, true, nil) on a cached hit, (zero, false, nil) on a miss or a
+// lock value, and (zero, false, err) on a real Redis or decode error. Decode
+// errors are wrapped with ErrDecode like Get.
+func (c *cache[K, V]) Peek(ctx context.Context, ttl time.Duration, k K) (V, bool, error) {
+	var zero V
+	encKey, err := c.keyCodec.EncodeKey(k)
+	if err != nil {
+		return zero, false, fmt.Errorf("redcache: encode key: %w", err)
 	}
-}
 
-// awaitLockMulti is awaitLock for many channels.
-func (rca *cacheAside) awaitLockMulti(ctx context.Context, chans []<-chan struct{}) error {
-	start := time.Now()
-	err := syncx.WaitForAll(ctx, chans)
-	rca.emitLockWaitDuration(time.Since(start))
-	return err
-}
-
-func (rca *cacheAside) emitLockWaitDuration(d time.Duration) {
-	if rca.metricsEnabled {
-		rca.metrics.LockWaitDuration(d)
+	raw, ok, err := c.core.peek(ctx, ttl, encKey)
+	if err != nil {
+		return zero, false, err
 	}
-}
-
-func (rca *cacheAside) emitLoaderDuration(d time.Duration) {
-	if rca.metricsEnabled {
-		rca.metrics.LoaderDuration(d)
+	if !ok {
+		return zero, false, nil
 	}
-}
 
-func (rca *cacheAside) emitLoaderErrors(n int) {
-	if rca.metricsEnabled && n > 0 {
-		rca.metrics.LoaderErrors(int64(n))
+	v, derr := c.valCodec.Decode(stringToBytes(raw))
+	if derr != nil {
+		return zero, false, fmt.Errorf("redcache: decode key %q: %w: %w", encKey, ErrDecode, derr)
 	}
+	return v, true, nil
 }
 
-func (rca *cacheAside) emitRedisError(op string) {
-	if rca.metricsEnabled {
-		rca.metrics.RedisError(op)
+// Del removes a key, triggering invalidation on all subscribed clients.
+func (c *cache[K, V]) Del(ctx context.Context, k K) error {
+	encKey, err := c.keyCodec.EncodeKey(k)
+	if err != nil {
+		return fmt.Errorf("redcache: encode key: %w", err)
 	}
+	return c.core.del(ctx, encKey)
 }
 
-func (rca *cacheAside) emitLockContended(n int) {
-	if rca.metricsEnabled && n > 0 {
-		rca.metrics.LockContended(int64(n))
+// Touch sets the TTL of a cached value.
+func (c *cache[K, V]) Touch(ctx context.Context, ttl time.Duration, k K) error {
+	encKey, err := c.keyCodec.EncodeKey(k)
+	if err != nil {
+		return fmt.Errorf("redcache: encode key: %w", err)
 	}
+	return c.core.touch(ctx, ttl, encKey)
 }
 
-func (rca *cacheAside) emitRefreshTriggered(n int) {
-	if rca.metricsEnabled && n > 0 {
-		rca.metrics.RefreshTriggered(int64(n))
+// GetMulti returns cached values for keys, calling fn for misses. A decode
+// error on any read returns wrapped with ErrDecode and aborts the batch.
+func (c *cache[K, V]) GetMulti(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []K,
+	fn func(ctx context.Context, missing []K) (map[K]V, error),
+) (map[K]V, error) {
+	if len(keys) == 0 {
+		return map[K]V{}, nil
 	}
-}
-
-func (rca *cacheAside) emitRefreshSkipped(n int) {
-	if rca.metricsEnabled && n > 0 {
-		rca.metrics.RefreshSkipped(int64(n))
+	if c.keyIsString {
+		return c.getMultiString(ctx, ttl, keys, fn)
 	}
+	return c.getMultiKeyed(ctx, ttl, keys, fn)
 }
 
-func (rca *cacheAside) emitRefreshDropped(n int) {
-	if rca.metricsEnabled && n > 0 {
-		rca.metrics.RefreshDropped(int64(n))
+// K=string fast path: aliases keys to []string, skips the reverse-lookup map.
+func (c *cache[K, V]) getMultiString(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []K,
+	fn func(ctx context.Context, missing []K) (map[K]V, error),
+) (map[K]V, error) {
+	encKeys := asStringSlice(keys)
+
+	raw, err := c.core.getMulti(ctx, ttl, encKeys, func(ctx context.Context, missingEnc []string) (map[string]string, error) {
+		result, ferr := fn(ctx, asKSlice[K](missingEnc))
+		if ferr != nil {
+			return nil, ferr
+		}
+		return c.encodeMultiResult(result)
+	})
+	if err != nil {
+		return nil, err
 	}
-}
 
-func (rca *cacheAside) emitLockLost(key string) {
-	if rca.metricsEnabled {
-		rca.metrics.LockLost(key)
+	out := make(map[K]V, len(raw))
+	for s, payload := range raw {
+		v, derr := c.valCodec.Decode(stringToBytes(payload))
+		if derr != nil {
+			return nil, fmt.Errorf("redcache: decode key %q: %w: %w", s, ErrDecode, derr)
+		}
+		out[asK[K](s)] = v
 	}
+	return out, nil
 }
 
-func (rca *cacheAside) emitRefreshError(key string) {
-	if rca.metricsEnabled {
-		rca.metrics.RefreshError(key)
-	}
-}
-
-func (rca *cacheAside) emitRefreshPanicked(key string) {
-	if rca.metricsEnabled {
-		rca.metrics.RefreshPanicked(key)
-	}
-}
-
-func (rca *cacheAside) emitInvalidationError() {
-	if rca.metricsEnabled {
-		rca.metrics.InvalidationError()
-	}
-}
-
-func (rca *cacheAside) onInvalidate(messages []rueidis.RedisMessage) {
-	for _, m := range messages {
-		key, err := m.ToString()
+func (c *cache[K, V]) getMultiKeyed(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []K,
+	fn func(ctx context.Context, missing []K) (map[K]V, error),
+) (map[K]V, error) {
+	encKeys := make([]string, len(keys))
+	byEnc := make(map[string]K, len(keys))
+	for i, k := range keys {
+		s, err := c.keyCodec.EncodeKey(k)
 		if err != nil {
-			rca.logger.Error("failed to parse invalidation message", "error", err)
-			rca.emitInvalidationError()
-			continue
+			return nil, fmt.Errorf("redcache: encode key: %w", err)
 		}
-		entry, loaded := rca.locks.LoadAndDelete(key)
-		if loaded {
-			entry.cancel()
-		}
-	}
-}
-
-// register publishes a per-key lockEntry. leader=true means the caller drives
-// Redis-side work (SET NX + fn + setWithLock); followers wait on the returned
-// channel, saving N-1 round trips on a shared miss.
-func (rca *cacheAside) register(key string) (<-chan struct{}, bool) {
-retry:
-	if actual, ok := rca.locks.Load(key); ok {
-		select {
-		case <-actual.done:
-			rca.locks.CompareAndDelete(key, actual)
-			goto retry
-		default:
-			return actual.done, false
-		}
+		encKeys[i] = s
+		byEnc[s] = k
 	}
 
-	// timer must be assigned before LoadOrStore publishes newEntry — otherwise
-	// a concurrent cancel could see the field still nil.
-	newEntry := &lockEntry{done: make(chan struct{})}
-	newEntry.timer = time.AfterFunc(rca.lockTTL, func() {
-		newEntry.timerExpired()
-		rca.locks.CompareAndDelete(key, newEntry)
+	raw, err := c.core.getMulti(ctx, ttl, encKeys, func(ctx context.Context, missingEnc []string) (map[string]string, error) {
+		missingK := make([]K, len(missingEnc))
+		for i, s := range missingEnc {
+			missingK[i] = byEnc[s]
+		}
+		result, ferr := fn(ctx, missingK)
+		if ferr != nil {
+			return nil, ferr
+		}
+		return c.encodeMultiResult(result)
 	})
-	actual, loaded := rca.locks.LoadOrStore(key, newEntry)
-	if !loaded {
-		return newEntry.done, true
-	}
-
-	// Lost the race — release our timer so the closure can be GCd.
-	newEntry.cancel()
-
-	select {
-	case <-actual.done:
-		rca.locks.CompareAndDelete(key, actual)
-		goto retry
-	default:
-		return actual.done, false
-	}
-}
-
-// get returns the cached value for key, calling fn on a miss. Only one
-// goroutine across all processes runs fn for a given key; others wait on the
-// resulting invalidation. Empty strings are valid hits.
-func (rca *cacheAside) get(
-	ctx context.Context,
-	ttl time.Duration,
-	key string,
-	fn func(ctx context.Context, key string) (val string, err error),
-) (string, error) {
-retry:
-	wait, leader := rca.register(key)
-	res, err := rca.tryGet(ctx, ttl, key)
-
-	if err == nil {
-		rca.emitCacheHits(1)
-		if rca.shouldRefresh(res.pttl, ttl, res.delta) {
-			rca.triggerRefresh(ctx, ttl, key, fn)
-		}
-		return res.val, nil
-	}
-	if !errors.Is(err, errNotFound) {
-		return "", err
-	}
-
-	rca.emitCacheMisses(1)
-
-	if !leader {
-		rca.emitLockContended(1)
-		if werr := rca.awaitLock(ctx, wait); werr != nil {
-			return "", werr
-		}
-		goto retry
-	}
-
-	val, err := rca.trySetKeyFunc(ctx, ttl, key, fn)
-	if err == nil {
-		return val, nil
-	}
-
-	if errors.Is(err, errLockFailed) || errors.Is(err, ErrLockLost) {
-		// errLockFailed: another process holds the Redis lock — wait alongside
-		// followers (cancelling our entry would wake them to race the same NX).
-		// ErrLockLost: a ForceSet stole our lock; retry to read its value.
-		rca.emitLockContended(1)
-		if werr := rca.awaitLock(ctx, wait); werr != nil {
-			return "", werr
-		}
-		goto retry
-	}
-
-	return "", err
-}
-
-// peek is a read-only client-side-cached lookup: no loader, no lock. It reuses
-// tryGet (which subscribes via DoCache and treats missing-or-lock values as
-// errNotFound). Returns (val,true,nil) on a hit, ("",false,nil) on a miss or
-// lock value, and ("",false,err) on a real Redis or decode error.
-func (rca *cacheAside) peek(ctx context.Context, ttl time.Duration, key string) (string, bool, error) {
-	res, err := rca.tryGet(ctx, ttl, key)
-	if errors.Is(err, errNotFound) {
-		return "", false, nil
-	}
-	if err != nil {
-		// tryGet already emitted RedisError("read") for the real-read failure.
-		return "", false, err
-	}
-	return res.val, true, nil
-}
-
-// del removes a key, triggering invalidation on all subscribed clients.
-func (rca *cacheAside) del(ctx context.Context, key string) error {
-	if err := rca.client.Do(ctx, rca.client.B().Del().Key(key).Build()).Error(); err != nil {
-		rca.emitRedisError("del")
-		return fmt.Errorf("del key %q: %w", key, err)
-	}
-	return nil
-}
-
-// delMulti deletes keys. Per-key errors are logged; the first is returned.
-func (rca *cacheAside) delMulti(ctx context.Context, keys ...string) error {
-	if len(keys) == 0 {
-		return nil
-	}
-	cmdsP := commandsPool.GetCap(len(keys))
-	defer commandsPool.Put(cmdsP)
-	for _, key := range keys {
-		*cmdsP = append(*cmdsP, rca.client.B().Del().Key(key).Build())
-	}
-	resps := rca.client.DoMulti(ctx, *cmdsP...)
-	var firstErr error
-	var firstErrKey string
-	for i, resp := range resps {
-		if err := resp.Error(); err != nil {
-			rca.logger.Error("DelMulti key failed", "key", keys[i], "error", err)
-			rca.emitRedisError("del")
-			if firstErr == nil {
-				firstErr = err
-				firstErrKey = keys[i]
-			}
-		}
-	}
-	if firstErr != nil {
-		return fmt.Errorf("del key %q: %w", firstErrKey, firstErr)
-	}
-	return nil
-}
-
-// touch extends a cached value's TTL via PEXPIRE. No-ops on missing key or
-// lock value (so it can't extend an in-flight lock). PEXPIRE doesn't push
-// invalidations, so existing readers keep serving from their local copy.
-func (rca *cacheAside) touch(ctx context.Context, ttl time.Duration, key string) error {
-	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
-	if err := touchScript.Exec(ctx, rca.client, []string{key}, []string{ttlMs, rca.lockPrefix}).Error(); err != nil {
-		rca.emitRedisError("touch")
-		return fmt.Errorf("touch key %q: %w", key, err)
-	}
-	return nil
-}
-
-// touchMulti is touch over many keys. Per-key errors are logged; the first
-// is returned.
-func (rca *cacheAside) touchMulti(ctx context.Context, ttl time.Duration, keys ...string) error {
-	if len(keys) == 0 {
-		return nil
-	}
-	stmtsBySlot := rca.groupTouchExecs(ttl, keys)
-	if firstErrKey, firstErr := rca.runTouchSlots(ctx, stmtsBySlot); firstErr != nil {
-		return fmt.Errorf("touch key %q: %w", firstErrKey, firstErr)
-	}
-	return nil
-}
-
-type touchExec struct {
-	key  string
-	exec rueidis.LuaExec
-}
-
-func (rca *cacheAside) groupTouchExecs(ttl time.Duration, keys []string) map[uint16][]touchExec {
-	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
-	stmtsBySlot := make(map[uint16][]touchExec)
-	for _, k := range keys {
-		slot := cmdx.Slot(k)
-		stmtsBySlot[slot] = append(stmtsBySlot[slot], touchExec{
-			key: k,
-			exec: rueidis.LuaExec{
-				Keys: []string{k},
-				Args: []string{ttlMs, rca.lockPrefix},
-			},
-		})
-	}
-	return stmtsBySlot
-}
-
-func (rca *cacheAside) runTouchSlots(ctx context.Context, slots map[uint16][]touchExec) (string, error) {
-	var (
-		mu          sync.Mutex
-		wg          sync.WaitGroup
-		firstErr    error
-		firstErrKey string
-	)
-	for _, stmts := range slots {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			key, err := rca.touchSlot(ctx, stmts)
-			if err == nil {
-				return
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			if firstErr == nil {
-				firstErr, firstErrKey = err, key
-			}
-		}()
-	}
-	wg.Wait()
-	return firstErrKey, firstErr
-}
-
-func (rca *cacheAside) touchSlot(ctx context.Context, stmts []touchExec) (string, error) {
-	execsP := luaExecPool.Get(len(stmts))
-	defer luaExecPool.Put(execsP)
-	execs := *execsP
-	for i, s := range stmts {
-		execs[i] = s.exec
-	}
-	resps := touchScript.ExecMulti(ctx, rca.client, execs...)
-	var firstErr error
-	var firstErrKey string
-	for i, resp := range resps {
-		if err := resp.Error(); err != nil {
-			rca.logger.Error("TouchMulti key failed", "key", stmts[i].key, "error", err)
-			rca.emitRedisError("touch")
-			if firstErr == nil {
-				firstErr, firstErrKey = err, stmts[i].key
-			}
-		}
-	}
-	return firstErrKey, firstErr
-}
-
-var (
-	errNotFound   = errors.New("not found")
-	errLockFailed = errors.New("lock failed")
-)
-
-// cacheReadResult is tryGet's return: value, client-side PTTL, recorded
-// compute delta (0 for legacy values).
-type cacheReadResult struct {
-	val   string
-	pttl  int64
-	delta time.Duration
-}
-
-func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string) (cacheReadResult, error) {
-	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), ttl)
-	val, err := resp.ToString()
-	if rueidis.IsRedisNil(err) || strings.HasPrefix(val, rca.lockPrefix) {
-		return cacheReadResult{}, errNotFound
-	}
-	if err != nil {
-		rca.emitRedisError("read")
-		return cacheReadResult{}, fmt.Errorf("read key %q: %w", key, err)
-	}
-	plain, delta := unwrapEnvelope(val)
-	return cacheReadResult{val: plain, pttl: resp.CachePTTL(), delta: delta}, nil
-}
-
-func (rca *cacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key string, fn func(ctx context.Context, key string) (string, error)) (val string, err error) {
-	setVal := false
-	lockVal, err := rca.tryLock(ctx, key)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if !setVal {
-			toCtx, cancel := rca.cleanupCtx(ctx)
-			defer cancel()
-			if err := rca.unlock(toCtx, key, lockVal); err != nil {
-				rca.logger.Error("failed to unlock key", "key", key, "error", err)
-			}
-		}
-	}()
-	start := time.Now()
-	val, err = fn(ctx, key)
-	rca.emitLoaderDuration(time.Since(start))
-	if err == nil {
-		wrapped := wrapEnvelope(val, time.Since(start))
-		if _, err = rca.setWithLock(ctx, ttl, key, valAndLock{wrapped, lockVal}); err == nil {
-			setVal = true
-		}
-		return val, err
-	}
-	rca.emitLoaderErrors(1)
-	return "", err
-}
-
-func (rca *cacheAside) tryLock(ctx context.Context, key string) (string, error) {
-	lockVal := rca.lockPool.Generate()
-	err := rca.client.Do(ctx, rca.client.B().Set().Key(key).Value(lockVal).Nx().Get().Px(rca.lockTTL).Build()).Error()
-	// SET NX GET: IsRedisNil = lock acquired; nil = NX rejected; other = real
-	// error — propagate so callers fail fast instead of waiting on a channel
-	// that never closes.
-	if rueidis.IsRedisNil(err) {
-		return lockVal, nil
-	}
-	if err == nil {
-		return "", fmt.Errorf("lock key %q: %w", key, errLockFailed)
-	}
-	rca.emitRedisError("lock")
-	return "", fmt.Errorf("lock key %q: %w", key, err)
-}
-
-func (rca *cacheAside) setWithLock(ctx context.Context, ttl time.Duration, key string, valLock valAndLock) (string, error) {
-	resp := setKeyLua.Exec(ctx, rca.client, []string{key}, []string{valLock.lockVal, valLock.val, strconv.FormatInt(ttl.Milliseconds(), 10)})
-	if err := resp.Error(); err != nil {
-		if !rueidis.IsRedisNil(err) {
-			rca.emitRedisError("set")
-			return "", fmt.Errorf("set key %q: %w", key, err)
-		}
-		rca.emitLockLost(key)
-		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
-	}
-	// 0 = CAS lost; 1 = success. Anything else = script drift.
-	val, ierr := resp.AsInt64()
-	if ierr != nil {
-		rca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
-		return "", fmt.Errorf("set key %q: parse response: %w", key, ierr)
-	}
-	if val == 0 {
-		rca.emitLockLost(key)
-		return "", fmt.Errorf("lock lost for key %q: %w", key, ErrLockLost)
-	}
-	return valLock.val, nil
-}
-
-func (rca *cacheAside) unlock(ctx context.Context, key string, lock string) error {
-	return delKeyLua.Exec(ctx, rca.client, []string{key}, []string{lock}).Error()
-}
-
-// getMulti returns cached values for keys, calling fn for misses. SETs are
-// grouped by cluster slot.
-func (rca *cacheAside) getMulti(
-	ctx context.Context,
-	ttl time.Duration,
-	keys []string,
-	fn func(ctx context.Context, key []string) (val map[string]string, err error),
-) (map[string]string, error) {
-	if len(keys) == 0 {
-		return map[string]string{}, nil
-	}
-	res := make(map[string]string, len(keys))
-
-	// pending[i] / chans[i] are index-aligned: unresolved key + its wait channel.
-	pendingP := stringPool.Get(len(keys))
-	defer stringPool.Put(pendingP)
-	pending := *pendingP
-	copy(pending, keys)
-
-	chansP := chanPool.Get(len(keys))
-	defer chanPool.Put(chansP)
-	chans := *chansP
-
-	// triggerMultiRefresh copies into its own slice, so we can reuse the buffer.
-	needRefreshP := stringPool.GetCap(len(keys))
-	defer stringPool.Put(needRefreshP)
-
-	// Leader keys are rebuilt each retry: a leader created the lockEntry and
-	// drives Redis-side work; followers skip SET NX and wait on chans[i].
-	leaderKeysP := stringPool.GetCap(len(keys))
-	defer stringPool.Put(leaderKeysP)
-
-retry:
-	chans = chans[:len(pending)]
-	leaderKeys := (*leaderKeysP)[:0]
-	for i, key := range pending {
-		var isLeader bool
-		chans[i], isLeader = rca.register(key)
-		if isLeader {
-			leaderKeys = append(leaderKeys, key)
-		}
-	}
-	*leaderKeysP = leaderKeys
-
-	hitsBefore := len(res)
-	*needRefreshP = (*needRefreshP)[:0]
-	needRefresh, err := rca.tryGetMulti(ctx, ttl, pending, res, *needRefreshP)
 	if err != nil {
 		return nil, err
 	}
-	*needRefreshP = needRefresh
-	rca.emitCacheHits(len(res) - hitsBefore)
 
-	if len(needRefresh) > 0 {
-		rca.triggerMultiRefresh(ctx, ttl, needRefresh, fn)
-	}
-
-	pending, chans = filterResolved(pending, chans, res)
-
-	if len(pending) > 0 {
-		rca.emitCacheMisses(len(pending))
-		if err := rca.runLeaderSets(ctx, ttl, leaderKeys, fn, res); err != nil {
-			return nil, err
-		}
-		pending, chans = filterResolved(pending, chans, res)
-	}
-
-	if len(pending) > 0 {
-		// Followers + leaders whose NX lost: wait for the holder's invalidation
-		// (or lockTTL).
-		rca.emitLockContended(len(pending))
-		if err = rca.awaitLockMulti(ctx, chans); err != nil {
-			return nil, err
-		}
-		goto retry
-	}
-	return res, nil
-}
-
-// runLeaderSets filters out leaderKeys that tryGetMulti already populated
-// (CSC invalidation can land mid-call), then SETs the rest.
-func (rca *cacheAside) runLeaderSets(
-	ctx context.Context,
-	ttl time.Duration,
-	leaderKeys []string,
-	fn func(ctx context.Context, key []string) (val map[string]string, err error),
-	res map[string]string,
-) error {
-	n := 0
-	for _, k := range leaderKeys {
-		if _, ok := res[k]; !ok {
-			leaderKeys[n] = k
-			n++
-		}
-	}
-	leaderKeys = leaderKeys[:n]
-	if len(leaderKeys) == 0 {
-		return nil
-	}
-	return rca.trySetMultiKeyFn(ctx, ttl, leaderKeys, fn, res)
-}
-
-// filterResolved drops keys present in resolved from pending+chans in place,
-// keeping the slices index-aligned.
-func filterResolved(pending []string, chans []<-chan struct{}, resolved map[string]string) ([]string, []<-chan struct{}) {
-	n := 0
-	for i, k := range pending {
-		if _, ok := resolved[k]; !ok {
-			pending[n] = pending[i]
-			chans[n] = chans[i]
-			n++
-		}
-	}
-	return pending[:n], chans[:n]
-}
-
-// tryGetMulti reads keys via DoMultiCache, writes non-lock values into res,
-// and appends refresh-ahead candidates onto needRefresh (returned so callers
-// can update their pool handle).
-func (rca *cacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string, res map[string]string, needRefresh []string) ([]string, error) {
-	multiP := cacheableTTLPool.Get(len(keys))
-	defer cacheableTTLPool.Put(multiP)
-	multi := *multiP
-	for i, key := range keys {
-		multi[i] = rueidis.CacheableTTL{
-			Cmd: rca.client.B().Get().Key(key).Cache(),
-			TTL: ttl,
-		}
-	}
-	resps := rca.client.DoMultiCache(ctx, multi...)
-
-	for i, resp := range resps {
-		val, err := resp.ToString()
-		if rueidis.IsRedisNil(err) {
+	out := make(map[K]V, len(raw))
+	for s, payload := range raw {
+		k, ok := byEnc[s]
+		if !ok {
 			continue
 		}
+		v, derr := c.valCodec.Decode(stringToBytes(payload))
+		if derr != nil {
+			return nil, fmt.Errorf("redcache: decode key %q: %w: %w", s, ErrDecode, derr)
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// DelMulti removes keys, triggering invalidation.
+func (c *cache[K, V]) DelMulti(ctx context.Context, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	encKeys, err := c.encodeKeys(keys)
+	if err != nil {
+		return err
+	}
+	return c.core.delMulti(ctx, encKeys...)
+}
+
+// TouchMulti extends the TTL of cached values.
+func (c *cache[K, V]) TouchMulti(ctx context.Context, ttl time.Duration, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	encKeys, err := c.encodeKeys(keys)
+	if err != nil {
+		return err
+	}
+	return c.core.touchMulti(ctx, ttl, encKeys...)
+}
+
+func (c *cache[K, V]) encodeKeys(keys []K) ([]string, error) {
+	if c.keyIsString {
+		return asStringSlice(keys), nil
+	}
+	encKeys := make([]string, len(keys))
+	for i, k := range keys {
+		s, err := c.keyCodec.EncodeKey(k)
 		if err != nil {
-			return needRefresh, fmt.Errorf("key %q: %w", keys[i], err)
+			return nil, fmt.Errorf("redcache: encode key: %w", err)
 		}
-		if !strings.HasPrefix(val, rca.lockPrefix) {
-			plain, delta := unwrapEnvelope(val)
-			res[keys[i]] = plain
-			if rca.shouldRefresh(resp.CachePTTL(), ttl, delta) {
-				needRefresh = append(needRefresh, keys[i])
-			}
-		}
+		encKeys[i] = s
 	}
-	return needRefresh, nil
+	return encKeys, nil
 }
 
-// trySetMultiKeyFn locks each pending key, calls fn, writes the values, and
-// records successes in res.
-func (rca *cacheAside) trySetMultiKeyFn(
-	ctx context.Context,
-	ttl time.Duration,
-	keys []string,
-	fn func(ctx context.Context, key []string) (val map[string]string, err error),
-	res map[string]string,
-) error {
-	lockVals, err := rca.tryLockMulti(ctx, keys)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		toUnlock := make(map[string]string)
-		for key, lockVal := range lockVals {
-			if _, ok := res[key]; !ok {
-				toUnlock[key] = lockVal
-			}
-		}
-		if len(toUnlock) > 0 {
-			toCtx, cancel := rca.cleanupCtx(ctx)
-			defer cancel()
-			rca.unlockMulti(toCtx, toUnlock)
-		}
-	}()
-
-	if len(lockVals) == 0 {
-		return nil
-	}
-
-	fnKeys := slices.Collect(maps.Keys(lockVals))
-	start := time.Now()
-	vals, err := fn(ctx, fnKeys)
-	rca.emitLoaderDuration(time.Since(start))
-	if err != nil {
-		rca.emitLoaderErrors(len(fnKeys))
-		return err
-	}
-	// Amortise fn time across returned values for XFetch sampling. Skewed but
-	// better than 0 — slow batches get proportionally more refresh headroom.
-	delta := perValueDelta(time.Since(start), len(vals))
-
-	vL := make(map[string]valAndLock, len(vals))
-	for k, v := range vals {
-		vL[k] = valAndLock{wrapEnvelope(v, delta), lockVals[k]}
-	}
-
-	keysSet, err := rca.setMultiWithLock(ctx, ttl, vL)
-	if err != nil {
-		return err
-	}
-
-	for _, keySet := range keysSet {
-		res[keySet] = vals[keySet]
-	}
-
-	return nil
-}
-
-// perValueDelta divides total by n. Returns 0 when n<=0 (shouldRefresh then
-// falls back to the floor check).
-func perValueDelta(total time.Duration, n int) time.Duration {
-	if n <= 0 {
-		return 0
-	}
-	return total / time.Duration(n)
-}
-
-func (rca *cacheAside) tryLockMulti(ctx context.Context, keys []string) (map[string]string, error) {
-	lockVals := make(map[string]string, len(keys))
-	cmdsP := commandsPool.GetCap(len(keys))
-	defer commandsPool.Put(cmdsP)
-	for _, k := range keys {
-		lockVals[k] = rca.lockPool.Generate()
-		*cmdsP = append(*cmdsP, rca.client.B().Set().Key(k).Value(lockVals[k]).Nx().Get().Px(rca.lockTTL).Build())
-	}
-	resps := rca.client.DoMulti(ctx, *cmdsP...)
-	// Drain every response: DoMulti has already executed all SET NXs in the
-	// pipeline, so an early return would leak the later acquires for lockTTL.
-	// IsRedisNil = acquired; nil = NX rejected; other = propagate.
-	var firstErr error
-	var firstErrKey string
-	for i, r := range resps {
-		err := r.Error()
-		if rueidis.IsRedisNil(err) {
-			continue
-		}
-		if err == nil {
-			delete(lockVals, keys[i])
-			continue
-		}
-		delete(lockVals, keys[i])
-		rca.emitRedisError("lock")
-		if firstErr == nil {
-			firstErr = err
-			firstErrKey = keys[i]
+func (c *cache[K, V]) encodeMultiResult(result map[K]V) (map[string]string, error) {
+	out := make(map[string]string, len(result))
+	for k, v := range result {
+		var s string
+		if c.keyIsString {
+			s = asString(k)
 		} else {
-			rca.logger.Error("additional tryLockMulti error", "key", keys[i], "error", err)
-		}
-	}
-	if firstErr != nil {
-		if len(lockVals) > 0 {
-			cleanupCtx, cancel := rca.cleanupCtx(ctx)
-			rca.unlockMulti(cleanupCtx, lockVals)
-			cancel()
-		}
-		return nil, fmt.Errorf("lock key %q: %w", firstErrKey, firstErr)
-	}
-	return lockVals, nil
-}
-
-type valAndLock struct {
-	val     string
-	lockVal string
-}
-
-type keyOrderAndSet struct {
-	keyOrder []string
-	setStmts []rueidis.LuaExec
-}
-
-func groupBySlot(keyValLock map[string]valAndLock, ttl time.Duration) map[uint16]keyOrderAndSet {
-	stmts := make(map[uint16]keyOrderAndSet)
-	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
-
-	for k, vl := range keyValLock {
-		slot := cmdx.Slot(k)
-		kos := stmts[slot]
-		kos.keyOrder = append(kos.keyOrder, k)
-		kos.setStmts = append(kos.setStmts, rueidis.LuaExec{
-			Keys: []string{k},
-			Args: []string{vl.lockVal, vl.val, ttlMs},
-		})
-		stmts[slot] = kos
-	}
-
-	return stmts
-}
-
-type slotSetResult struct {
-	keys []string
-	err  error
-}
-
-// runSlotSet executes one slot's CAS-set scripts. Every response is inspected
-// so successes survive a sibling error; Lua=0 (or nil) is a lock-lost.
-func (rca *cacheAside) runSlotSet(ctx context.Context, kos keyOrderAndSet) slotSetResult {
-	var keys []string
-	var firstErr error
-	setResps := setKeyLua.ExecMulti(ctx, rca.client, kos.setStmts...)
-	for j, resp := range setResps {
-		ok, err := rca.inspectSlotSetResponse(kos.keyOrder[j], resp)
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-		if ok {
-			keys = append(keys, kos.keyOrder[j])
-		}
-	}
-	return slotSetResult{keys: keys, err: firstErr}
-}
-
-// inspectSlotSetResponse classifies one CAS-set response: success, silent
-// lock-lost, or surfaceable error. Parse errors are surfaced so script drift
-// can't trigger an infinite retry loop.
-func (rca *cacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResult) (bool, error) {
-	if err := resp.Error(); err != nil {
-		if rueidis.IsRedisNil(err) {
-			rca.emitLockLost(key)
-			return false, nil
-		}
-		return false, fmt.Errorf("set key %q: %w", key, err)
-	}
-	val, ierr := resp.AsInt64()
-	if ierr != nil {
-		rca.logger.Error("unexpected non-integer in CAS-set response", "key", key, "error", ierr)
-		return false, fmt.Errorf("set key %q: parse response: %w", key, ierr)
-	}
-	if val == 0 {
-		rca.emitLockLost(key)
-		return false, nil
-	}
-	return true, nil
-}
-
-// executeSetStatements runs the per-slot scripts then reduces to (keys, err).
-// Slot work runs to completion before the reduce so an error in one slot
-// can't mask successes in another.
-func (rca *cacheAside) executeSetStatements(ctx context.Context, stmts map[uint16]keyOrderAndSet) ([]string, error) {
-	return rca.collectSlotSetResults(rca.runSlotSets(ctx, stmts))
-}
-
-// runSlotSets fans out to goroutines only when there's real parallelism;
-// single-slot deployments hit the inline path (ExecMulti pipelines per-slot).
-func (rca *cacheAside) runSlotSets(ctx context.Context, stmts map[uint16]keyOrderAndSet) []slotSetResult {
-	results := make([]slotSetResult, 0, len(stmts))
-	if len(stmts) <= 1 {
-		for _, kos := range stmts {
-			results = append(results, rca.runSlotSet(ctx, kos))
-		}
-		return results
-	}
-	var (
-		mu sync.Mutex
-		wg sync.WaitGroup
-	)
-	for _, kos := range stmts {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sr := rca.runSlotSet(ctx, kos)
-			mu.Lock()
-			results = append(results, sr)
-			mu.Unlock()
-		}()
-	}
-	wg.Wait()
-	return results
-}
-
-// collectSlotSetResults reduces per-slot outcomes. On error, succeeded keys
-// are logged for operator reconciliation.
-func (rca *cacheAside) collectSlotSetResults(results []slotSetResult) ([]string, error) {
-	var succeeded []string
-	var firstErr error
-	for _, sr := range results {
-		succeeded = append(succeeded, sr.keys...)
-		if sr.err != nil && firstErr == nil {
-			firstErr = sr.err
-		}
-	}
-	if firstErr != nil {
-		if len(succeeded) > 0 {
-			rca.logger.Error("setMulti partial completion before error", "completedKeys", succeeded, "error", firstErr)
-		}
-		return nil, firstErr
-	}
-	return succeeded, nil
-}
-
-func (rca *cacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, keyValLock map[string]valAndLock) ([]string, error) {
-	stmts := groupBySlot(keyValLock, ttl)
-	return rca.executeSetStatements(ctx, stmts)
-}
-
-func (rca *cacheAside) unlockMulti(ctx context.Context, lockVals map[string]string) {
-	if len(lockVals) == 0 {
-		return
-	}
-	type keyedExec struct {
-		key  string
-		exec rueidis.LuaExec
-	}
-	delStmts := make(map[uint16][]keyedExec)
-	for key, lockVal := range lockVals {
-		slot := cmdx.Slot(key)
-		delStmts[slot] = append(delStmts[slot], keyedExec{
-			key: key,
-			exec: rueidis.LuaExec{
-				Keys: []string{key},
-				Args: []string{lockVal},
-			},
-		})
-	}
-	var wg sync.WaitGroup
-	for slot, stmts := range delStmts {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			execsP := luaExecPool.Get(len(stmts))
-			defer luaExecPool.Put(execsP)
-			execs := *execsP
-			for i, s := range stmts {
-				execs[i] = s.exec
+			ks, kerr := c.keyCodec.EncodeKey(k)
+			if kerr != nil {
+				return nil, fmt.Errorf("redcache: encode key: %w", kerr)
 			}
-			// Best effort — locks expire on lockTTL anyway.
-			resps := delKeyLua.ExecMulti(ctx, rca.client, execs...)
-			for i, resp := range resps {
-				if err := resp.Error(); err != nil {
-					rca.logger.Error("failed to unlock key in batch", "key", stmts[i].key, "slot", slot, "error", err)
-				}
-			}
-		}()
+			s = ks
+		}
+		b, eerr := c.valCodec.Encode(v)
+		if eerr != nil {
+			return nil, fmt.Errorf("redcache: encode value for key %q: %w", s, eerr)
+		}
+		out[s] = bytesToString(b)
 	}
-	wg.Wait()
+	return out, nil
+}
+
+// Set populates the cache via fn under a write lock.
+func (c *cache[K, V]) Set(
+	ctx context.Context,
+	ttl time.Duration,
+	k K,
+	fn func(ctx context.Context, k K) (V, error),
+) error {
+	if ttl <= 0 {
+		return ErrInvalidTTL
+	}
+	encKey, err := c.keyCodec.EncodeKey(k)
+	if err != nil {
+		return fmt.Errorf("redcache: encode key: %w", err)
+	}
+	return c.core.set(ctx, ttl, encKey, func(ctx context.Context, _ string) (string, error) {
+		v, ferr := fn(ctx, k)
+		if ferr != nil {
+			return "", ferr
+		}
+		b, eerr := c.valCodec.Encode(v)
+		if eerr != nil {
+			return "", fmt.Errorf("redcache: encode value: %w", eerr)
+		}
+		return bytesToString(b), nil
+	})
+}
+
+// ForceSet writes v unconditionally.
+func (c *cache[K, V]) ForceSet(ctx context.Context, ttl time.Duration, k K, v V) error {
+	if ttl <= 0 {
+		return ErrInvalidTTL
+	}
+	encKey, err := c.keyCodec.EncodeKey(k)
+	if err != nil {
+		return fmt.Errorf("redcache: encode key: %w", err)
+	}
+	b, err := c.valCodec.Encode(v)
+	if err != nil {
+		return fmt.Errorf("redcache: encode value: %w", err)
+	}
+	return c.core.forceSet(ctx, ttl, encKey, bytesToString(b))
+}
+
+// SetMulti populates the cache via fn under write locks. Partial failures
+// surface as *BatchKeyError[K].
+func (c *cache[K, V]) SetMulti(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []K,
+	fn func(ctx context.Context, keys []K) (map[K]V, error),
+) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if ttl <= 0 {
+		return ErrInvalidTTL
+	}
+	if c.keyIsString {
+		return c.setMultiString(ctx, ttl, keys, fn)
+	}
+	return c.setMultiKeyed(ctx, ttl, keys, fn)
+}
+
+// K=string fast path: aliases keys to []string, skips the reverse-lookup map.
+func (c *cache[K, V]) setMultiString(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []K,
+	fn func(ctx context.Context, keys []K) (map[K]V, error),
+) error {
+	encKeys := asStringSlice(keys)
+
+	err := c.core.setMulti(ctx, ttl, encKeys, func(ctx context.Context, encArg []string) (map[string]string, error) {
+		result, ferr := fn(ctx, asKSlice[K](encArg))
+		if ferr != nil {
+			return nil, ferr
+		}
+		return c.encodeMultiResult(result)
+	})
+	if err == nil {
+		return nil
+	}
+	var be *batchError
+	if !errors.As(err, &be) {
+		return err
+	}
+	return convertBatchErrorToTypedString[K](be)
+}
+
+func (c *cache[K, V]) setMultiKeyed(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []K,
+	fn func(ctx context.Context, keys []K) (map[K]V, error),
+) error {
+	encKeys := make([]string, len(keys))
+	byEnc := make(map[string]K, len(keys))
+	for i, k := range keys {
+		s, err := c.keyCodec.EncodeKey(k)
+		if err != nil {
+			return fmt.Errorf("redcache: encode key: %w", err)
+		}
+		encKeys[i] = s
+		byEnc[s] = k
+	}
+
+	err := c.core.setMulti(ctx, ttl, encKeys, func(ctx context.Context, encArg []string) (map[string]string, error) {
+		argK := make([]K, len(encArg))
+		for i, s := range encArg {
+			argK[i] = byEnc[s]
+		}
+		result, ferr := fn(ctx, argK)
+		if ferr != nil {
+			return nil, ferr
+		}
+		return c.encodeMultiResult(result)
+	})
+	if err == nil {
+		return nil
+	}
+	var be *batchError
+	if !errors.As(err, &be) {
+		return err
+	}
+	return convertBatchErrorToTyped(be, byEnc)
+}
+
+// ForceSetMulti writes values unconditionally. Encode failures are collected
+// per-key; successfully-encoded entries are still written. Partial failures
+// (encode or write) surface as *BatchKeyError[K].
+func (c *cache[K, V]) ForceSetMulti(
+	ctx context.Context,
+	ttl time.Duration,
+	values map[K]V,
+) error {
+	if len(values) == 0 {
+		return nil
+	}
+	if ttl <= 0 {
+		return ErrInvalidTTL
+	}
+	if c.keyIsString {
+		return c.forceSetMultiString(ctx, ttl, values)
+	}
+	return c.forceSetMultiKeyed(ctx, ttl, values)
+}
+
+// K=string fast path: aliases each K to string, skips the reverse-lookup map.
+func (c *cache[K, V]) forceSetMultiString(
+	ctx context.Context,
+	ttl time.Duration,
+	values map[K]V,
+) error {
+	encVals := make(map[string]string, len(values))
+	failed := make(map[K]error)
+	for k, v := range values {
+		s := asString(k)
+		b, err := c.valCodec.Encode(v)
+		if err != nil {
+			failed[k] = fmt.Errorf("redcache: encode value: %w", err)
+			continue
+		}
+		encVals[s] = bytesToString(b)
+	}
+	if len(encVals) == 0 {
+		return newBatchKeyError(failed, nil)
+	}
+	err := c.core.forceSetMulti(ctx, ttl, encVals)
+	if err == nil && len(failed) == 0 {
+		return nil
+	}
+	succeeded := mergeForceSetResultString[K](err, encVals, failed)
+	return newBatchKeyError(failed, succeeded)
+}
+
+func (c *cache[K, V]) forceSetMultiKeyed(
+	ctx context.Context,
+	ttl time.Duration,
+	values map[K]V,
+) error {
+	encVals := make(map[string]string, len(values))
+	failed := make(map[K]error)
+	byEnc := make(map[string]K, len(values))
+	for k, v := range values {
+		s, err := c.keyCodec.EncodeKey(k)
+		if err != nil {
+			failed[k] = fmt.Errorf("redcache: encode key: %w", err)
+			continue
+		}
+		b, err := c.valCodec.Encode(v)
+		if err != nil {
+			failed[k] = fmt.Errorf("redcache: encode value: %w", err)
+			continue
+		}
+		encVals[s] = bytesToString(b)
+		byEnc[s] = k
+	}
+	if len(encVals) == 0 {
+		return newBatchKeyError(failed, nil)
+	}
+	err := c.core.forceSetMulti(ctx, ttl, encVals)
+	if err == nil && len(failed) == 0 {
+		return nil
+	}
+	succeeded := mergeForceSetResult(err, byEnc, failed)
+	return newBatchKeyError(failed, succeeded)
+}
+
+// mergeForceSetResult merges per-key outcomes from forceSetMulti into failed
+// (encode errors are preserved) and returns the succeeded slice. A non-*batchError
+// err is treated as a total failure.
+func mergeForceSetResult[K comparable](err error, byEnc map[string]K, failed map[K]error) []K {
+	succeeded := make([]K, 0, len(byEnc))
+	if err == nil {
+		for _, k := range byEnc {
+			succeeded = append(succeeded, k)
+		}
+		return succeeded
+	}
+	var be *batchError
+	if !errors.As(err, &be) {
+		for _, k := range byEnc {
+			failed[k] = err
+		}
+		return succeeded
+	}
+	for s, ferr := range be.Failed {
+		if k, ok := byEnc[s]; ok {
+			failed[k] = ferr
+		}
+	}
+	for _, s := range be.Succeeded {
+		if k, ok := byEnc[s]; ok {
+			succeeded = append(succeeded, k)
+		}
+	}
+	return succeeded
+}
+
+// convertBatchErrorToTyped maps a *batchError's string keys back to typed K
+// using byEnc. Keys not in byEnc are silently skipped — surfacing a partial
+// BatchKeyError is safer than panicking on an invariant violation.
+func convertBatchErrorToTyped[K comparable](be *batchError, byEnc map[string]K) error {
+	failedK := make(map[K]error, len(be.Failed))
+	for s, ferr := range be.Failed {
+		if k, ok := byEnc[s]; ok {
+			failedK[k] = ferr
+		}
+	}
+	succeededK := make([]K, 0, len(be.Succeeded))
+	for _, s := range be.Succeeded {
+		if k, ok := byEnc[s]; ok {
+			succeededK = append(succeededK, k)
+		}
+	}
+	return newBatchKeyError(failedK, succeededK)
+}
+
+// convertBatchErrorToTypedString is the K=string fast path: cast each encoded
+// key directly to K via asK.
+func convertBatchErrorToTypedString[K comparable](be *batchError) error {
+	failedK := make(map[K]error, len(be.Failed))
+	for s, ferr := range be.Failed {
+		failedK[asK[K](s)] = ferr
+	}
+	succeededK := make([]K, 0, len(be.Succeeded))
+	for _, s := range be.Succeeded {
+		succeededK = append(succeededK, asK[K](s))
+	}
+	return newBatchKeyError(failedK, succeededK)
+}
+
+// mergeForceSetResultString is the K=string fast path of mergeForceSetResult.
+// encVals provides the successfully-encoded set (its keys are encoded keys, K
+// is the same string).
+func mergeForceSetResultString[K comparable](err error, encVals map[string]string, failed map[K]error) []K {
+	succeeded := make([]K, 0, len(encVals))
+	if err == nil {
+		for s := range encVals {
+			succeeded = append(succeeded, asK[K](s))
+		}
+		return succeeded
+	}
+	var be *batchError
+	if !errors.As(err, &be) {
+		for s := range encVals {
+			failed[asK[K](s)] = err
+		}
+		return succeeded
+	}
+	for s, ferr := range be.Failed {
+		failed[asK[K](s)] = ferr
+	}
+	for _, s := range be.Succeeded {
+		succeeded = append(succeeded, asK[K](s))
+	}
+	return succeeded
+}
+
+// The asK / asString family aliases between K and string under the invariant
+// that K=string — callers (gated on cache.keyIsString) must guarantee that.
+
+func asStringSlice[K comparable](keys []K) []string {
+	return *(*[]string)(unsafe.Pointer(&keys))
+}
+
+func asKSlice[K comparable](s []string) []K {
+	return *(*[]K)(unsafe.Pointer(&s))
+}
+
+func asK[K comparable](s string) K {
+	return *(*K)(unsafe.Pointer(&s))
+}
+
+func asString[K comparable](k K) string {
+	return *(*string)(unsafe.Pointer(&k))
+}
+
+// stringToBytes / bytesToString alias without copying. The result is read-only;
+// codecs treat both Decode input and post-Encode bytes as borrowed.
+
+func stringToBytes(s string) []byte {
+	if s == "" {
+		return nil
+	}
+	return unsafe.Slice(unsafe.StringData(s), len(s))
+}
+
+func bytesToString(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(b), len(b))
 }
