@@ -163,7 +163,7 @@ func BenchmarkCache_DelMulti(b *testing.B) {
 
 	b.ResetTimer()
 	for range b.N {
-		if err := client.DelMulti(ctx, keys...); err != nil {
+		if err := client.DelMulti(ctx, keys); err != nil {
 			b.Fatal(err)
 		}
 	}

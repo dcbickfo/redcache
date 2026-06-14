@@ -49,11 +49,11 @@ type Cache[K comparable, V any] interface {
 	// Del removes a key, triggering invalidation on all subscribed clients.
 	Del(ctx context.Context, k K) error
 	// DelMulti removes keys, triggering invalidation.
-	DelMulti(ctx context.Context, keys ...K) error
+	DelMulti(ctx context.Context, keys []K) error
 	// Touch sets the TTL of a cached value. No-ops on a missing key or lock value.
 	Touch(ctx context.Context, ttl time.Duration, k K) error
 	// TouchMulti extends the TTL of cached values.
-	TouchMulti(ctx context.Context, ttl time.Duration, keys ...K) error
+	TouchMulti(ctx context.Context, ttl time.Duration, keys []K) error
 }
 
 // Conn owns one rueidis client, its invalidation stream, and a lock namespace.
@@ -310,7 +310,7 @@ func (c *cache[K, V]) getMultiKeyed(
 }
 
 // DelMulti removes keys, triggering invalidation.
-func (c *cache[K, V]) DelMulti(ctx context.Context, keys ...K) error {
+func (c *cache[K, V]) DelMulti(ctx context.Context, keys []K) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -322,7 +322,7 @@ func (c *cache[K, V]) DelMulti(ctx context.Context, keys ...K) error {
 }
 
 // TouchMulti extends the TTL of cached values.
-func (c *cache[K, V]) TouchMulti(ctx context.Context, ttl time.Duration, keys ...K) error {
+func (c *cache[K, V]) TouchMulti(ctx context.Context, ttl time.Duration, keys []K) error {
 	if len(keys) == 0 {
 		return nil
 	}

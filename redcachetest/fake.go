@@ -262,7 +262,7 @@ func (f *Fake[K, V]) Del(_ context.Context, k K) error {
 }
 
 // DelMulti removes the given keys from the cache. Missing keys are a no-op.
-func (f *Fake[K, V]) DelMulti(_ context.Context, keys ...K) error {
+func (f *Fake[K, V]) DelMulti(_ context.Context, keys []K) error {
 	f.mu.Lock()
 	for _, k := range keys {
 		delete(f.data, k)
@@ -284,7 +284,7 @@ func (f *Fake[K, V]) Touch(_ context.Context, ttl time.Duration, k K) error {
 
 // TouchMulti resets the expiry of each present key to now+ttl. Absent or expired
 // keys are skipped.
-func (f *Fake[K, V]) TouchMulti(_ context.Context, ttl time.Duration, keys ...K) error {
+func (f *Fake[K, V]) TouchMulti(_ context.Context, ttl time.Duration, keys []K) error {
 	deadline := f.deadlineFor(ttl)
 	f.mu.Lock()
 	for _, k := range keys {

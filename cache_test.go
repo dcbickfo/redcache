@@ -624,7 +624,7 @@ func TestCache_DelMulti(t *testing.T) {
 		require.NoErrorf(t, err, "expected no error, got %v", err)
 	}
 
-	err := client.DelMulti(ctx, slices.Collect(maps.Keys(keyAndVals))...)
+	err := client.DelMulti(ctx, slices.Collect(maps.Keys(keyAndVals)))
 	require.NoError(t, err)
 
 	for key := range keyAndVals {
@@ -703,7 +703,7 @@ func TestCache_TouchMulti_ExtendsTTLs(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, client.TouchMulti(ctx, 5*time.Second, keys...))
+	require.NoError(t, client.TouchMulti(ctx, 5*time.Second, keys))
 
 	for _, k := range keys {
 		pttl, err := conn.Client().Do(ctx, conn.Client().B().Pttl().Key(k).Build()).AsInt64()
@@ -715,7 +715,7 @@ func TestCache_TouchMulti_ExtendsTTLs(t *testing.T) {
 func TestCache_TouchMulti_EmptyKeysIsNoOp(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	require.NoError(t, client.TouchMulti(context.Background(), 5*time.Second))
+	require.NoError(t, client.TouchMulti(context.Background(), 5*time.Second, nil))
 }
 
 func TestCache_GetParentContextCancellation(t *testing.T) {

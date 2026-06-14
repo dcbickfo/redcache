@@ -18,7 +18,9 @@ settles.
   `PrimeableTyped[K, V]`. Read methods (`Get`/`GetMulti`/`Peek`), write/prime
   methods (`Set`/`SetMulti`/`ForceSet`/`ForceSetMulti`), invalidation
   (`Del`/`DelMulti`), and TTL extension (`Touch`/`TouchMulti`) are all methods
-  on `Cache[K, V]`.
+  on `Cache[K, V]`. The multi-key methods are uniformly slice-based: `GetMulti`,
+  `SetMulti`, `DelMulti`, and `TouchMulti` all take a `[]K` keys argument (not
+  variadic `...K`).
 - **`Cache[K, V]` is now a pure operational interface: `Close()` and `Client()`
   moved to the new `Conn` owner** — lifecycle and raw-client access belong to
   whoever holds the connection, not to injected views.

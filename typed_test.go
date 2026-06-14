@@ -291,7 +291,7 @@ func TestTyped_DelMulti_RemovesAll(t *testing.T) {
 	if _, err := users.GetMulti(context.Background(), time.Second, keys, loader); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := users.DelMulti(context.Background(), keys...); err != nil {
+	if err := users.DelMulti(context.Background(), keys); err != nil {
 		t.Fatalf("delmulti: %v", err)
 	}
 	calls := 0
@@ -322,7 +322,7 @@ func TestTyped_TouchMulti_ExtendsTTL(t *testing.T) {
 	if _, err := users.GetMulti(context.Background(), 200*time.Millisecond, keys, loader); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := users.TouchMulti(context.Background(), 5*time.Second, keys...); err != nil {
+	if err := users.TouchMulti(context.Background(), 5*time.Second, keys); err != nil {
 		t.Fatalf("touchmulti: %v", err)
 	}
 	time.Sleep(400 * time.Millisecond)

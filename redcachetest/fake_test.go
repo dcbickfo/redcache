@@ -122,7 +122,7 @@ func TestDel_Evicts(t *testing.T) {
 func TestDelMulti_Evicts(t *testing.T) {
 	f := redcachetest.New[string, int]()
 	require.NoError(t, f.ForceSetMulti(context.Background(), time.Minute, map[string]int{"a": 1, "b": 2, "c": 3}))
-	require.NoError(t, f.DelMulti(context.Background(), "a", "c", "missing"))
+	require.NoError(t, f.DelMulti(context.Background(), []string{"a", "c", "missing"}))
 
 	var missing []string
 	out, err := f.GetMulti(context.Background(), time.Minute, []string{"a", "b", "c"}, func(_ context.Context, m []string) (map[string]int, error) {
@@ -173,7 +173,7 @@ func TestTouchMulti_ExtendsPresentKeysOnly(t *testing.T) {
 	require.NoError(t, f.ForceSet(context.Background(), 20*time.Millisecond, "live", 1))
 
 	time.Sleep(10 * time.Millisecond)
-	require.NoError(t, f.TouchMulti(context.Background(), time.Minute, "live", "absent"))
+	require.NoError(t, f.TouchMulti(context.Background(), time.Minute, []string{"live", "absent"}))
 	time.Sleep(20 * time.Millisecond)
 
 	// "live" survives.
