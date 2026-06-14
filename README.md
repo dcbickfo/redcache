@@ -97,6 +97,15 @@ users, err := cache.GetMulti(ctx, time.Minute, []string{"u-1", "u-2", "u-3"},
 )
 ```
 
+`Peek` is a read-only, client-side-cached lookup — no loader, no lock. It returns
+`(value, true, nil)` on a cached hit and `(zero, false, nil)` on a miss (or when
+the key currently holds a lock value), for warm-cache checks without populating:
+
+```go
+u, ok, err := cache.Peek(ctx, time.Minute, "u-123")
+// ok == false means not currently cached; Peek never runs your loader.
+```
+
 ## Typed keys
 
 Use `New[K, V]` with a `KeyCodec[K]` to key the cache by a domain type. `KeyCodecFunc[K]` adapts a plain function into a `KeyCodec[K]`.
@@ -222,28 +231,31 @@ redcache adds, on top of that shared foundation:
 - **Refresh-ahead + XFetch** — probabilistic early refresh of stale-but-valid entries, decoupling reload latency from request latency.
 - **Typed keys, not just values** — a `KeyCodec[K]` maps a domain key type to the Redis key, and multi-key write failures come back as a typed, per-key `*BatchKeyError[K]`.
 - **Write-through priming** — `Set` / `ForceSet` / `Touch` (and multi variants) populate or extend entries without a read-through miss.
-- **`View`** — derive sibling typed caches that share one client, engine, and invalidation stream, so you can cache multiple value types over a single connection.
+- **`Conn` + `Of`** — open one connection and derive sibling typed caches that share its client, engine, and invalidation stream, so you can cache multiple value types over a single connection.
 
 This is an honest superset for those specific needs, not a claim that `rueidisaside` is deficient — it deliberately keeps a smaller surface.
 
 ## Sharing one client across value types
 
-`View` derives a sibling `Cache[K2, V2]` that shares a parent cache's engine — one rueidis client, one invalidation stream — with different key/value types and codecs. Use it to cache several value types over a single Redis connection instead of opening one connection per type. Closing any view (or the parent) closes the shared engine, so treat them as one lifecycle.
+Open a `Conn` once, then derive typed `Cache[K, V]` views over it with `Of` (or `StringOf` / `BytesOf`). Every view shares the `Conn`'s rueidis client and invalidation stream, with its own key/value types and codecs. Use it to cache several value types over a single Redis connection instead of opening one connection per type. The `Conn` and every view it spawns share one client; closing any of them closes it, so treat them as one lifecycle — open the `Conn`, derive all the views you need, and close the `Conn` when done.
 
 ```go
-// users is the parent cache. sessions and orders share its connection
-// and invalidation stream, with their own key/value types and codecs.
-sessions, err := redcache.View[string, Session](
-    users,
-    redcache.StringKeyCodec{},
-    redcache.JSONCodec[Session]{},
+// One connection backs several typed views.
+conn, err := redcache.Open(
+    rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 )
 if err != nil {
     log.Fatal(err)
 }
+defer conn.Close() // closes the shared client and all views
 
-orders, err := redcache.View[OrderID, Order](
-    users,
+sessions, err := redcache.StringOf[Session](conn, redcache.JSONCodec[Session]{})
+if err != nil {
+    log.Fatal(err)
+}
+
+orders, err := redcache.Of[OrderID, Order](
+    conn,
     orderIDCodec,
     redcache.JSONCodec[Order]{},
 )
@@ -252,13 +264,13 @@ if err != nil {
 }
 ```
 
-`View` returns an error only if `parent` is not a cache built by `New`, `NewString`, or `NewBytes` (for example a third-party or test `Cache` implementation, which has no shareable engine). Derive views from one long-lived parent and close the parent last, since closing any view closes the shared client.
+`Of` (and `StringOf` / `BytesOf`) returns an error only on nil codecs. One-shot `New` / `NewString` / `NewBytes` open their own `Conn` internally and return a single view whose `Close` still closes the underlying client.
 
 ## Metrics
 
 Implement `Metrics`, or embed `NoopMetrics` and override only the methods you care about, to wire counters into Prometheus, OpenTelemetry, or any other backend. Methods run on the hot path and must be concurrent-safe.
 
-High-volume events (`CacheHits`, `CacheMisses`, `LockContended`, `RefreshTriggered`, `RefreshSkipped`, `RefreshDropped`) are aggregated per operation and emitted once with a count rather than once per key. `LockWaitDuration` fires once per resolved wait. Diagnostic events (`LockLost`, `RefreshError`, `RefreshPanicked`, `InvalidationError`) carry the affected key where applicable.
+High-volume events (`CacheHits`, `CacheMisses`, `LockContended`, `RefreshTriggered`, `RefreshSkipped`, `RefreshDropped`) are aggregated per operation and emitted once with a count rather than once per key. `LockWaitDuration` fires once per resolved wait, and `LoaderDuration` once per foreground origin-loader call (`Get`/`GetMulti` miss, `Set`/`SetMulti` — background refresh excluded). `LoaderErrors(n)` fires when a foreground loader returns an error, with `n` the number of keys it was responsible for. `RedisError(op)` fires when a Redis command fails, tagged with `op` (`"read"`, `"lock"`, `"set"`, `"del"`, `"touch"`). Diagnostic events (`LockLost`, `RefreshError`, `RefreshPanicked`, `InvalidationError`) carry the affected key where applicable.
 
 ```go
 type myMetrics struct {
@@ -276,6 +288,22 @@ cache, err := redcache.NewString[User](
 )
 ```
 
+### OpenTelemetry
+
+For OpenTelemetry, use the `redcacheotel` subpackage — a drop-in `Metrics` adapter. It lives in its own module, so the core library takes no OpenTelemetry dependency:
+
+```go
+import "github.com/dcbickfo/redcache/redcacheotel"
+
+m, err := redcacheotel.NewMetrics(meterProvider) // *otel/metric.MeterProvider
+if err != nil {
+    log.Fatal(err)
+}
+cache, err := redcache.NewString[User](opt, redcache.JSONCodec[User]{}, redcache.WithMetrics(m))
+```
+
+It records counters (hits, misses, lock contention, refresh and error events) and histograms (`lock.wait.duration`, `loader.duration`, in seconds). High-cardinality keys are deliberately not attached as labels; `RedisError`'s bounded `op` is.
+
 ## Testing code that depends on redcache
 
 Depend on the `redcache.Cache[K, V]` interface in your own code, not on a concrete type. Then in unit tests substitute the in-memory fake from the `redcachetest` subpackage — no Redis required:
@@ -290,7 +318,7 @@ func TestUserService(t *testing.T) {
 }
 ```
 
-`redcachetest.New[K, V]()` returns a `*Fake[K, V]` that satisfies `redcache.Cache[K, V]`, backed by a map with TTL semantics. It validates the observable single-process contract — your loader runs once per miss, a present unexpired entry is a hit, TTLs expire — which is enough to test loaders, wiring, and call shape.
+`redcachetest.New[K, V]()` returns a `*Fake[K, V]` that satisfies `redcache.Cache[K, V]`, backed by a map with TTL semantics. It validates the observable single-process contract — your loader runs once per miss, a present unexpired entry is a hit, TTLs expire — which is enough to test loaders, wiring, and call shape. For deterministic expiry tests, construct it with `redcachetest.NewWithClock[K, V](clk)` and advance a `redcachetest.Clock` by hand instead of sleeping.
 
 What the fake does **not** model: distributed single-flight, the `SET NX` lock layer, client-side-cache invalidation pushes, the stored envelope, or refresh-ahead. Those only emerge against real Redis. For fuller fidelity, drive the real `redcache.Cache` against [`rueidis/mock`](https://github.com/redis/rueidis/tree/main/mock) via `WithClientBuilder` (note: miniredis cannot emulate RESP3 client-side invalidation, so it is unsuitable here).
 

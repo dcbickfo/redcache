@@ -137,24 +137,28 @@ func ExampleNew() {
 	fmt.Println(u.Name)
 }
 
-// View derives a second typed cache that shares the first cache's Redis
-// connection and invalidation stream — one client backing multiple value types.
-func ExampleView() {
-	users, err := redcache.NewString[string](
+// A Conn owns one Redis client and invalidation stream; Of/StringOf derive
+// typed views over it — one client backing multiple value types.
+func ExampleOf() {
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.StringCodec{},
 		redcache.WithLockTTL(5*time.Second),
 	)
 	if err != nil {
 		panic(err)
 	}
-	defer users.Close() // closing the parent closes the shared client
+	defer conn.Close() // closing the Conn closes the shared client (and all views)
 
-	// loginCounts shares users' client, connection, and invalidation stream.
-	loginCounts, err := redcache.View[string, int](users, redcache.StringKeyCodec{}, redcache.JSONCodec[int]{})
+	// users and loginCounts share one client, connection, and invalidation stream.
+	users, err := redcache.StringOf[string](conn, redcache.StringCodec{})
 	if err != nil {
 		panic(err)
 	}
+	loginCounts, err := redcache.Of[string, int](conn, redcache.StringKeyCodec{}, redcache.JSONCodec[int]{})
+	if err != nil {
+		panic(err)
+	}
+	_ = users
 
 	n, err := loginCounts.Get(context.Background(), time.Minute, "u-123",
 		func(ctx context.Context, key string) (int, error) {

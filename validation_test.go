@@ -10,8 +10,8 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-// New and View reject nil codecs at construction rather than panicking on the
-// first hot-path call. The nil check runs before any client is built, so this
+// New and Of reject nil codecs at construction rather than panicking on the
+// first hot-path call. New's nil check runs before any client is built, so this
 // needs no Redis.
 func TestNew_NilCodecRejected(t *testing.T) {
 	t.Parallel()

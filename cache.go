@@ -202,6 +202,24 @@ func (rca *cacheAside) emitLockWaitDuration(d time.Duration) {
 	}
 }
 
+func (rca *cacheAside) emitLoaderDuration(d time.Duration) {
+	if rca.metricsEnabled {
+		rca.metrics.LoaderDuration(d)
+	}
+}
+
+func (rca *cacheAside) emitLoaderErrors(n int) {
+	if rca.metricsEnabled && n > 0 {
+		rca.metrics.LoaderErrors(int64(n))
+	}
+}
+
+func (rca *cacheAside) emitRedisError(op string) {
+	if rca.metricsEnabled {
+		rca.metrics.RedisError(op)
+	}
+}
+
 func (rca *cacheAside) emitLockContended(n int) {
 	if rca.metricsEnabled && n > 0 {
 		rca.metrics.LockContended(int64(n))
@@ -357,9 +375,29 @@ retry:
 	return "", err
 }
 
+// peek is a read-only client-side-cached lookup: no loader, no lock. It reuses
+// tryGet (which subscribes via DoCache and treats missing-or-lock values as
+// errNotFound). Returns (val,true,nil) on a hit, ("",false,nil) on a miss or
+// lock value, and ("",false,err) on a real Redis or decode error.
+func (rca *cacheAside) peek(ctx context.Context, ttl time.Duration, key string) (string, bool, error) {
+	res, err := rca.tryGet(ctx, ttl, key)
+	if errors.Is(err, errNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		// tryGet already emitted RedisError("read") for the real-read failure.
+		return "", false, err
+	}
+	return res.val, true, nil
+}
+
 // del removes a key, triggering invalidation on all subscribed clients.
 func (rca *cacheAside) del(ctx context.Context, key string) error {
-	return rca.client.Do(ctx, rca.client.B().Del().Key(key).Build()).Error()
+	if err := rca.client.Do(ctx, rca.client.B().Del().Key(key).Build()).Error(); err != nil {
+		rca.emitRedisError("del")
+		return err
+	}
+	return nil
 }
 
 // delMulti deletes keys. Per-key errors are logged; the first is returned.
@@ -378,6 +416,7 @@ func (rca *cacheAside) delMulti(ctx context.Context, keys ...string) error {
 	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
 			rca.logger.Error("DelMulti key failed", "key", keys[i], "error", err)
+			rca.emitRedisError("del")
 			if firstErr == nil {
 				firstErr = err
 				firstErrKey = keys[i]
@@ -396,6 +435,7 @@ func (rca *cacheAside) delMulti(ctx context.Context, keys ...string) error {
 func (rca *cacheAside) touch(ctx context.Context, ttl time.Duration, key string) error {
 	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
 	if err := touchScript.Exec(ctx, rca.client, []string{key}, []string{ttlMs, rca.lockPrefix}).Error(); err != nil {
+		rca.emitRedisError("touch")
 		return fmt.Errorf("touch key %q: %w", key, err)
 	}
 	return nil
@@ -474,6 +514,7 @@ func (rca *cacheAside) touchSlot(ctx context.Context, stmts []touchExec) (string
 	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
 			rca.logger.Error("TouchMulti key failed", "key", stmts[i].key, "error", err)
+			rca.emitRedisError("touch")
 			if firstErr == nil {
 				firstErr, firstErrKey = err, stmts[i].key
 			}
@@ -502,6 +543,7 @@ func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 		return cacheReadResult{}, errNotFound
 	}
 	if err != nil {
+		rca.emitRedisError("read")
 		return cacheReadResult{}, fmt.Errorf("read key %q: %w", key, err)
 	}
 	plain, delta := unwrapEnvelope(val)
@@ -524,13 +566,16 @@ func (rca *cacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key
 		}
 	}()
 	start := time.Now()
-	if val, err = fn(ctx, key); err == nil {
+	val, err = fn(ctx, key)
+	rca.emitLoaderDuration(time.Since(start))
+	if err == nil {
 		wrapped := wrapEnvelope(val, time.Since(start))
 		if _, err = rca.setWithLock(ctx, ttl, key, valAndLock{wrapped, lockVal}); err == nil {
 			setVal = true
 		}
 		return val, err
 	}
+	rca.emitLoaderErrors(1)
 	return "", err
 }
 
@@ -546,6 +591,7 @@ func (rca *cacheAside) tryLock(ctx context.Context, key string) (string, error) 
 	if err == nil {
 		return "", fmt.Errorf("lock key %q: %w", key, errLockFailed)
 	}
+	rca.emitRedisError("lock")
 	return "", fmt.Errorf("lock key %q: %w", key, err)
 }
 
@@ -553,6 +599,7 @@ func (rca *cacheAside) setWithLock(ctx context.Context, ttl time.Duration, key s
 	resp := setKeyLua.Exec(ctx, rca.client, []string{key}, []string{valLock.lockVal, valLock.val, strconv.FormatInt(ttl.Milliseconds(), 10)})
 	if err := resp.Error(); err != nil {
 		if !rueidis.IsRedisNil(err) {
+			rca.emitRedisError("set")
 			return "", fmt.Errorf("set key %q: %w", key, err)
 		}
 		rca.emitLockLost(key)
@@ -757,9 +804,12 @@ func (rca *cacheAside) trySetMultiKeyFn(
 		return nil
 	}
 
+	fnKeys := mapsx.Keys(lockVals)
 	start := time.Now()
-	vals, err := fn(ctx, mapsx.Keys(lockVals))
+	vals, err := fn(ctx, fnKeys)
+	rca.emitLoaderDuration(time.Since(start))
 	if err != nil {
+		rca.emitLoaderErrors(len(fnKeys))
 		return err
 	}
 	// Amortise fn time across returned values for XFetch sampling. Skewed but
@@ -816,6 +866,7 @@ func (rca *cacheAside) tryLockMulti(ctx context.Context, keys []string) (map[str
 			continue
 		}
 		delete(lockVals, keys[i])
+		rca.emitRedisError("lock")
 		if firstErr == nil {
 			firstErr = err
 			firstErrKey = keys[i]

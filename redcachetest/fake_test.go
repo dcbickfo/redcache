@@ -309,17 +309,19 @@ func TestSetMulti_StoresAllViaFn(t *testing.T) {
 }
 
 func TestExpiry_CausesRefetch(t *testing.T) {
-	f := redcachetest.New[string, int]()
+	clk := &redcachetest.Clock{}
+	f := redcachetest.NewWithClock[string, int](clk)
 	fn, calls := countingLoader(7)
 
-	got, err := f.Get(context.Background(), 10*time.Millisecond, "k", fn)
+	ttl := time.Minute
+	got, err := f.Get(context.Background(), ttl, "k", fn)
 	require.NoError(t, err)
 	assert.Equal(t, 7, got)
 	assert.Equal(t, int64(1), calls.Load())
 
-	time.Sleep(20 * time.Millisecond)
+	clk.Advance(ttl + time.Second) // step past the deadline; no real sleep.
 
-	got, err = f.Get(context.Background(), 10*time.Millisecond, "k", fn)
+	got, err = f.Get(context.Background(), ttl, "k", fn)
 	require.NoError(t, err)
 	assert.Equal(t, 7, got)
 	assert.Equal(t, int64(2), calls.Load(), "expired entry should trigger a re-fetch")
@@ -339,6 +341,59 @@ func TestForceSet_TTLZeroNeverExpires(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 9, got)
 	assert.False(t, ran.Load(), "ttl<=0 should store without expiry")
+}
+
+func TestPeek_HitAfterStoreMissWhenAbsent(t *testing.T) {
+	f := redcachetest.New[string, int]()
+
+	// Absent key: miss, zero value, no error, no loader.
+	v, ok, err := f.Peek(context.Background(), time.Minute, "k")
+	require.NoError(t, err)
+	assert.False(t, ok, "absent key is a Peek miss")
+	assert.Equal(t, 0, v)
+
+	require.NoError(t, f.ForceSet(context.Background(), time.Minute, "k", 13))
+
+	// Present key: hit returning the stored value.
+	v, ok, err = f.Peek(context.Background(), time.Minute, "k")
+	require.NoError(t, err)
+	assert.True(t, ok, "stored key is a Peek hit")
+	assert.Equal(t, 13, v)
+}
+
+func TestPeek_ExpiredIsMiss(t *testing.T) {
+	clk := &redcachetest.Clock{}
+	f := redcachetest.NewWithClock[string, int](clk)
+
+	ttl := time.Minute
+	require.NoError(t, f.ForceSet(context.Background(), ttl, "k", 21))
+
+	v, ok, err := f.Peek(context.Background(), ttl, "k")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, 21, v)
+
+	clk.Advance(ttl + time.Second) // expire deterministically; no real sleep.
+
+	v, ok, err = f.Peek(context.Background(), ttl, "k")
+	require.NoError(t, err)
+	assert.False(t, ok, "expired entry is a Peek miss")
+	assert.Equal(t, 0, v)
+}
+
+func TestPeek_DoesNotMutate(t *testing.T) {
+	f := redcachetest.New[string, int]()
+
+	// Peeking an absent key must not create it: a following Get still runs fn.
+	_, ok, err := f.Peek(context.Background(), time.Minute, "k")
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	fn, calls := countingLoader(5)
+	got, err := f.Get(context.Background(), time.Minute, "k", fn)
+	require.NoError(t, err)
+	assert.Equal(t, 5, got)
+	assert.Equal(t, int64(1), calls.Load(), "Peek must not populate the cache")
 }
 
 func TestClientIsNilAndCloseIsIdempotent(t *testing.T) {

@@ -14,6 +14,17 @@ type Metrics interface {
 	// LockWaitDuration fires once per resolved wait, regardless of outcome
 	// (invalidation, ctx cancel, or lockTTL). Typically histogrammed.
 	LockWaitDuration(d time.Duration)
+	// LoaderDuration measures foreground origin-loader latency (Get/GetMulti
+	// miss, Set/SetMulti). Background refresh is excluded. Typically histogrammed.
+	LoaderDuration(d time.Duration)
+	// LoaderErrors fires when a foreground loader returns an error; n is the
+	// number of keys the loader was responsible for (1 for single, len(missing)
+	// for multi).
+	LoaderErrors(n int64)
+	// RedisError fires when a Redis command fails. op is one of "read", "lock",
+	// "set", "del", "touch". Lock-lost, redis-nil, and script-drift parse
+	// failures are not Redis errors and do not fire it.
+	RedisError(op string)
 	RefreshTriggered(n int64)
 	// RefreshSkipped covers both local and distributed dedup.
 	RefreshSkipped(n int64)
@@ -35,6 +46,9 @@ func (NoopMetrics) CacheHits(int64)                {}
 func (NoopMetrics) CacheMisses(int64)              {}
 func (NoopMetrics) LockContended(int64)            {}
 func (NoopMetrics) LockWaitDuration(time.Duration) {}
+func (NoopMetrics) LoaderDuration(time.Duration)   {}
+func (NoopMetrics) LoaderErrors(int64)             {}
+func (NoopMetrics) RedisError(string)              {}
 func (NoopMetrics) RefreshTriggered(int64)         {}
 func (NoopMetrics) RefreshSkipped(int64)           {}
 func (NoopMetrics) RefreshDropped(int64)           {}

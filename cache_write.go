@@ -37,7 +37,9 @@ func (rca *cacheAside) set(
 
 		start := time.Now()
 		newVal, err := fn(ctx, key)
+		rca.emitLoaderDuration(time.Since(start))
 		if err != nil {
+			rca.emitLoaderErrors(1)
 			// bestEffortRestore so a cancelled request still rolls back the
 			// lock instead of letting it linger until lockTTL expires.
 			rca.bestEffortRestore(ctx, key, lockVal, saved)
@@ -124,9 +126,12 @@ func (rca *cacheAside) setMulti(
 		return err
 	}
 
+	fnKeys := mapsx.Keys(lockValues)
 	start := time.Now()
-	vals, err := fn(ctx, mapsx.Keys(lockValues))
+	vals, err := fn(ctx, fnKeys)
+	rca.emitLoaderDuration(time.Since(start))
 	if err != nil {
+		rca.emitLoaderErrors(len(fnKeys))
 		rca.restoreMultiValues(ctx, lockValues, savedValues)
 		return err
 	}
@@ -168,7 +173,11 @@ func (rca *cacheAside) setMulti(
 // delta=0, so refresh-ahead falls back to the simple floor check. Prefer set
 // when you need callback-error rollback.
 func (rca *cacheAside) forceSet(ctx context.Context, ttl time.Duration, key, value string) error {
-	return rca.client.Do(ctx, rca.client.B().Set().Key(key).Value(wrapEnvelope(value, 0)).Px(ttl).Build()).Error()
+	if err := rca.client.Do(ctx, rca.client.B().Set().Key(key).Value(wrapEnvelope(value, 0)).Px(ttl).Build()).Error(); err != nil {
+		rca.emitRedisError("set")
+		return err
+	}
+	return nil
 }
 
 // forceSetMulti unconditionally writes values, bypassing locks. In-progress
@@ -191,6 +200,7 @@ func (rca *cacheAside) forceSetMulti(ctx context.Context, ttl time.Duration, val
 	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
 			rca.logger.Error("ForceSetMulti key failed", "key", keyOrder[i], "error", err)
+			rca.emitRedisError("set")
 			if failed == nil {
 				failed = make(map[string]error)
 			}
@@ -240,6 +250,7 @@ func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string) erro
 		}
 		if err != nil {
 			rca.logger.Error("waitForReadLocks read failed", "key", keys[i], "error", err)
+			rca.emitRedisError("read")
 			if firstErr == nil {
 				firstErr = err
 				firstErrKey = keys[i]

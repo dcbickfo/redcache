@@ -33,28 +33,66 @@ type entry[V any] struct {
 	deadline time.Time // zero == no expiry
 }
 
+// Clock is a manually-advanced time source for deterministic expiry tests. Pass
+// one to NewWithClock and move time forward with Advance instead of sleeping.
+// Its zero value starts at the wall-clock time of the first Now call. A Clock is
+// safe for concurrent use.
+type Clock struct {
+	mu   sync.Mutex
+	base time.Time     // wall-clock anchor, set lazily on first use.
+	off  time.Duration // accumulated Advance.
+}
+
+// Now returns the Clock's current time: its anchor plus all advances so far. The
+// anchor is captured on the first Now call, so a fresh Clock reads as "now".
+func (c *Clock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.base.IsZero() {
+		c.base = time.Now()
+	}
+	return c.base.Add(c.off)
+}
+
+// Advance moves the Clock forward by d. Negative durations move it backward.
+func (c *Clock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.base.IsZero() {
+		c.base = time.Now()
+	}
+	c.off += d
+}
+
 // Fake is an in-memory redcache.Cache[K, V] for unit tests. It honours the
 // observable single-process cache-aside contract (see package docs) and is safe
 // for concurrent use. The zero value is not usable; construct one with New.
 type Fake[K comparable, V any] struct {
 	mu   sync.RWMutex
 	data map[K]entry[V]
+	now  func() time.Time // time source for TTL deadlines; defaults to time.Now.
 }
 
 var _ redcache.Cache[string, []byte] = (*Fake[string, []byte])(nil)
 
-// New returns an empty Fake[K, V] ready for use.
+// New returns an empty Fake[K, V] backed by the real wall clock.
 func New[K comparable, V any]() *Fake[K, V] {
-	return &Fake[K, V]{data: make(map[K]entry[V])}
+	return &Fake[K, V]{data: make(map[K]entry[V]), now: time.Now}
 }
 
-// deadlineFor converts a ttl to an absolute deadline. A ttl <= 0 yields a zero
-// deadline, meaning the entry never expires.
-func deadlineFor(ttl time.Duration) time.Time {
+// NewWithClock returns an empty Fake[K, V] whose TTL deadlines are measured
+// against clk. Advance clk to expire entries deterministically, with no sleeps.
+func NewWithClock[K comparable, V any](clk *Clock) *Fake[K, V] {
+	return &Fake[K, V]{data: make(map[K]entry[V]), now: clk.Now}
+}
+
+// deadlineFor converts a ttl to an absolute deadline against the Fake's clock. A
+// ttl <= 0 yields a zero deadline, meaning the entry never expires.
+func (f *Fake[K, V]) deadlineFor(ttl time.Duration) time.Time {
 	if ttl <= 0 {
 		return time.Time{}
 	}
-	return time.Now().Add(ttl)
+	return f.now().Add(ttl)
 }
 
 // load returns the live value for k. It treats an expired entry as a miss and
@@ -65,7 +103,7 @@ func (f *Fake[K, V]) load(k K) (V, bool) {
 		var zero V
 		return zero, false
 	}
-	if !e.deadline.IsZero() && time.Now().After(e.deadline) {
+	if !e.deadline.IsZero() && f.now().After(e.deadline) {
 		var zero V
 		return zero, false
 	}
@@ -95,7 +133,7 @@ func (f *Fake[K, V]) Get(
 	}
 
 	f.mu.Lock()
-	f.data[k] = entry[V]{value: v, deadline: deadlineFor(ttl)}
+	f.data[k] = entry[V]{value: v, deadline: f.deadlineFor(ttl)}
 	f.mu.Unlock()
 	return v, nil
 }
@@ -131,7 +169,7 @@ func (f *Fake[K, V]) GetMulti(
 		return nil, err
 	}
 
-	deadline := deadlineFor(ttl)
+	deadline := f.deadlineFor(ttl)
 	f.mu.Lock()
 	for k, v := range loaded {
 		f.data[k] = entry[V]{value: v, deadline: deadline}
@@ -139,6 +177,17 @@ func (f *Fake[K, V]) GetMulti(
 	}
 	f.mu.Unlock()
 	return out, nil
+}
+
+// Peek reports whether k is present and unexpired without a loader. It returns
+// (value, true, nil) on a hit (a stored zero value still counts) and
+// (zero, false, nil) on a miss. ttl is accepted to satisfy the Cache contract
+// but the Fake never mutates state on a Peek.
+func (f *Fake[K, V]) Peek(_ context.Context, _ time.Duration, k K) (V, bool, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	v, ok := f.load(k)
+	return v, ok, nil
 }
 
 // Set calls fn and stores its result under k with ttl, unconditionally
@@ -154,7 +203,7 @@ func (f *Fake[K, V]) Set(
 		return err
 	}
 	f.mu.Lock()
-	f.data[k] = entry[V]{value: v, deadline: deadlineFor(ttl)}
+	f.data[k] = entry[V]{value: v, deadline: f.deadlineFor(ttl)}
 	f.mu.Unlock()
 	return nil
 }
@@ -174,7 +223,7 @@ func (f *Fake[K, V]) SetMulti(
 	if err != nil {
 		return err
 	}
-	deadline := deadlineFor(ttl)
+	deadline := f.deadlineFor(ttl)
 	f.mu.Lock()
 	for k, v := range loaded {
 		f.data[k] = entry[V]{value: v, deadline: deadline}
@@ -186,7 +235,7 @@ func (f *Fake[K, V]) SetMulti(
 // ForceSet stores v under k with ttl, bypassing any loader.
 func (f *Fake[K, V]) ForceSet(_ context.Context, ttl time.Duration, k K, v V) error {
 	f.mu.Lock()
-	f.data[k] = entry[V]{value: v, deadline: deadlineFor(ttl)}
+	f.data[k] = entry[V]{value: v, deadline: f.deadlineFor(ttl)}
 	f.mu.Unlock()
 	return nil
 }
@@ -197,7 +246,7 @@ func (f *Fake[K, V]) ForceSetMulti(_ context.Context, ttl time.Duration, values 
 	if len(values) == 0 {
 		return nil
 	}
-	deadline := deadlineFor(ttl)
+	deadline := f.deadlineFor(ttl)
 	f.mu.Lock()
 	for k, v := range values {
 		f.data[k] = entry[V]{value: v, deadline: deadline}
@@ -229,7 +278,7 @@ func (f *Fake[K, V]) DelMulti(_ context.Context, keys ...K) error {
 func (f *Fake[K, V]) Touch(_ context.Context, ttl time.Duration, k K) error {
 	f.mu.Lock()
 	if v, ok := f.load(k); ok {
-		f.data[k] = entry[V]{value: v, deadline: deadlineFor(ttl)}
+		f.data[k] = entry[V]{value: v, deadline: f.deadlineFor(ttl)}
 	}
 	f.mu.Unlock()
 	return nil
@@ -238,7 +287,7 @@ func (f *Fake[K, V]) Touch(_ context.Context, ttl time.Duration, k K) error {
 // TouchMulti resets the expiry of each present key to now+ttl. Absent or expired
 // keys are skipped.
 func (f *Fake[K, V]) TouchMulti(_ context.Context, ttl time.Duration, keys ...K) error {
-	deadline := deadlineFor(ttl)
+	deadline := f.deadlineFor(ttl)
 	f.mu.Lock()
 	for _, k := range keys {
 		if v, ok := f.load(k); ok {

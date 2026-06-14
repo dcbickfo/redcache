@@ -25,10 +25,17 @@ settles.
   - `New[K, V](clientOption, keyCodec, valCodec, opts...)`
   - `NewString[V](clientOption, valCodec, opts...)` — `StringKeyCodec` preset.
   - `NewBytes(clientOption, opts...)` — zero-copy `Cache[string, []byte]`.
-  - `View[K, V](parent, keyCodec, valCodec)` — derive a sibling typed view sharing
-    one client/engine/invalidation stream, for caching multiple value types over a
-    single connection.
   Constructors take a `rueidis.ClientOption` and build the client internally.
+- **Shared-client sharing via `Conn`.** To cache multiple value types over a
+  single client/invalidation stream, `Open(clientOption, opts...) (*Conn, error)`
+  and derive typed views with `Of[K, V](conn, keyCodec, valCodec)`,
+  `StringOf[V](conn, valCodec)`, or `BytesOf(conn)` — all compile-time typed.
+- **`Cache[K, V]` gained `Peek(ctx, ttl, k) (V, bool, error)`** — a read-only,
+  client-side-cached lookup with no loader and no lock. Adding it to the interface
+  is a breaking change for external implementers.
+- **`Metrics` interface gained `LoaderDuration(d)`, `LoaderErrors(n)`, and
+  `RedisError(op)`.** Implementers that embed `NoopMetrics` are unaffected; those
+  that implement `Metrics` directly must add the three methods.
 - **Functional options replace the `CacheAsideOption` struct.** Removed
   `CacheAsideOption`. Configure with `WithLockTTL`, `WithLogger`, `WithMetrics`,
   `WithLockPrefix`, `WithRefreshLockPrefix`, `WithRefreshAfterFraction`,
@@ -41,10 +48,18 @@ settles.
 - **`BytesCodec` renamed to `UnsafeBytesCodec`** — the name now states the
   zero-copy retention hazard: the decoded slice aliases borrowed library memory
   and must not be mutated or retained past the call.
-- **`New` and `View` reject nil codecs at construction** rather than panicking on
+- **`New` and `Of` reject nil codecs at construction** rather than panicking on
   the first call.
 
 ### Added
+- **Observability signals on `Metrics`**: `LoaderDuration(d)` (foreground
+  origin-loader latency), `LoaderErrors(n)` (loader failures by key count), and
+  `RedisError(op)` (Redis-command failures, `op` ∈ `read`/`lock`/`set`/`del`/`touch`).
+- **`redcacheotel`** submodule — a drop-in OpenTelemetry `Metrics` adapter
+  (`redcacheotel.NewMetrics(meterProvider)`). It has its own `go.mod`, so the core
+  module gains no OpenTelemetry dependency.
+- **`redcachetest` injectable clock** — `redcachetest.NewWithClock[K, V](clk)` with
+  a `Clock` (`Advance`/`Now`) for deterministic TTL/expiry tests without `time.Sleep`.
 - `WithRefreshTimeout(d)` — bounds how long a refresh-ahead callback may run,
   defaulting to the data `ttl` passed to `Get`/`GetMulti` rather than `LockTTL`.
 - `ErrInvalidTTL` — write methods (`Set`/`SetMulti`/`ForceSet`/`ForceSetMulti`)

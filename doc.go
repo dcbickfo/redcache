@@ -21,8 +21,8 @@
 //   - [NewString] — Cache[string, V]: string keys, typed values. The common case.
 //   - [NewBytes]  — Cache[string, []byte]: zero-copy opaque payloads.
 //   - [New]       — Cache[K, V]: typed keys via a [KeyCodec] (and typed values).
-//   - [View]      — derive a sibling Cache with different K/V sharing one client,
-//     connection, and invalidation stream.
+//   - [Open] + [Of]/[StringOf]/[BytesOf] — open one [Conn] and derive several
+//     typed views with different K/V over a single client and invalidation stream.
 //
 // # Minimal example
 //
