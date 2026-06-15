@@ -11,6 +11,11 @@ non-trivial before sending a large PR.
   real Redis at `127.0.0.1:6379` — they exercise RESP3 client-side
   invalidation, which can't be faked.
 
+The Go and golangci-lint versions are pinned in `.tool-versions`. With
+[asdf](https://asdf-vm.com) installed, `make setup` (or `asdf install`) gets the
+exact toolchain CI uses. Common tasks are wrapped in the `Makefile`; run
+`make help` to list them.
+
 ## Running Redis
 
 ```bash
@@ -18,9 +23,12 @@ docker compose up -d
 ```
 
 This starts the Redis defined in `docker-compose.yml` on port 6379. Stop it with
-`docker compose down`.
+`docker compose down`. (`make redis-up` / `make redis-down` wrap these.)
 
 ## Tests, lint, format, bench
+
+These are wrapped as `make` targets (`make test-race`, `make lint`, `make fmt`,
+`make bench`, or `make check` for the full gate). The raw commands:
 
 ```bash
 # Tests (race detector on; needs Redis running)

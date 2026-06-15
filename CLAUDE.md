@@ -8,6 +8,8 @@ redcache is a Go library that provides a cache-aside implementation for Redis, b
 
 ## Commands
 
+Tool versions (Go, golangci-lint) are pinned in `.tool-versions`; with [asdf](https://asdf-vm.com) installed, run `make setup` (or `asdf install`). Common tasks are wrapped in the `Makefile` — `make help` lists them, and `make check` runs the full build/vet/lint/test gate. Raw equivalents:
+
 ```bash
 # Run all tests (requires Redis on localhost:6379)
 go test ./...
