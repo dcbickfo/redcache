@@ -121,7 +121,7 @@ func (rca *cacheAside) tryAcquireRemaining(
 		entries[i] = lockAcquireEntry{key: key, lockVal: rca.lockPool.Generate()}
 	}
 
-	acquired, backups, firstFailed, err := rca.batchAcquireWithBackup(ctx, entries, rca.lockTTLMs)
+	acquired, backups, firstFailed, err := rca.batchAcquireWithBackup(ctx, entries)
 	if err != nil {
 		return "", err
 	}
@@ -201,16 +201,14 @@ type lockAcquireEntry struct {
 func (rca *cacheAside) batchAcquireWithBackup(
 	ctx context.Context,
 	entries []lockAcquireEntry,
-	lockTTLMs string,
 ) (acquired map[string]string, backups map[string]savedValue, firstFailed string, err error) {
 	acquired = make(map[string]string, len(entries))
+	backups = make(map[string]savedValue, len(entries))
 
 	slotGroups := cmdx.GroupBySlot(entries, func(e lockAcquireEntry) string { return e.key })
 
 	for _, group := range slotGroups {
-		var slotErr error
-		backups, slotErr = rca.execSlotAcquire(ctx, group, lockTTLMs, acquired, backups)
-		if slotErr != nil {
+		if slotErr := rca.execSlotAcquire(ctx, group, acquired, backups); slotErr != nil {
 			return nil, nil, "", slotErr
 		}
 	}
@@ -224,15 +222,14 @@ func (rca *cacheAside) batchAcquireWithBackup(
 	return acquired, backups, "", nil
 }
 
-// execSlotAcquire executes lock acquisitions for a single slot group. backups
-// is lazy-initialized via the returned map; callers must use the return value.
+// execSlotAcquire executes lock acquisitions for a single slot group, recording
+// successes in acquired and any prior values in backups (both mutated in place).
 func (rca *cacheAside) execSlotAcquire(
 	ctx context.Context,
 	group []lockAcquireEntry,
-	lockTTLMs string,
 	acquired map[string]string,
 	backups map[string]savedValue,
-) (map[string]savedValue, error) {
+) error {
 	n := len(group)
 	stmtsP := luaExecPool.Get(n)
 	defer luaExecPool.Put(stmtsP)
@@ -248,7 +245,7 @@ func (rca *cacheAside) execSlotAcquire(
 	for i, entry := range group {
 		keysBuf[i] = entry.key
 		argsBuf[i*3] = entry.lockVal
-		argsBuf[i*3+1] = lockTTLMs
+		argsBuf[i*3+1] = rca.lockTTLMs
 		argsBuf[i*3+2] = rca.lockPrefix
 		stmts[i] = rueidis.LuaExec{
 			Keys: keysBuf[i : i+1 : i+1],
@@ -259,7 +256,7 @@ func (rca *cacheAside) execSlotAcquire(
 	// ExecMulti is a pipeline: every script has already executed in Redis.
 	// Drain all responses so successes can be released before bailing — an
 	// early return would leak later-index acquires for the full lockTTL.
-	backups, firstErrKey, firstErr := rca.drainSlotAcquireResponses(group, resps, acquired, backups)
+	firstErrKey, firstErr := rca.drainSlotAcquireResponses(group, resps, acquired, backups)
 	if firstErr != nil {
 		// Restore prior values where the acquire captured one (plain unlock
 		// would DEL and drop a real cached entry the acquire just overwrote).
@@ -274,9 +271,9 @@ func (rca *cacheAside) execSlotAcquire(
 			}
 			delete(acquired, k)
 		}
-		return backups, fmt.Errorf("lock key %q: %w", firstErrKey, firstErr)
+		return fmt.Errorf("lock key %q: %w", firstErrKey, firstErr)
 	}
-	return backups, nil
+	return nil
 }
 
 // drainSlotAcquireResponses parses all responses from a pipelined slot
@@ -287,7 +284,7 @@ func (rca *cacheAside) drainSlotAcquireResponses(
 	resps []rueidis.RedisResult,
 	acquired map[string]string,
 	backups map[string]savedValue,
-) (map[string]savedValue, string, error) {
+) (string, error) {
 	var firstErrKey string
 	var firstErr error
 	capture := func(key string, err error) {
@@ -308,13 +305,11 @@ func (rca *cacheAside) drainSlotAcquireResponses(
 			capture(group[i].key, fmt.Errorf("malformed response (len=%d)", len(arr)))
 			continue
 		}
-		var rerr error
-		backups, rerr = rca.recordSlotAcquireResult(group[i], arr, acquired, backups)
-		if rerr != nil {
+		if rerr := rca.recordSlotAcquireResult(group[i], arr, acquired, backups); rerr != nil {
 			capture(group[i].key, rerr)
 		}
 	}
-	return backups, firstErrKey, firstErr
+	return firstErrKey, firstErr
 }
 
 // recordSlotAcquireResult parses one acquire response and updates acquired/backups.
@@ -326,24 +321,21 @@ func (rca *cacheAside) recordSlotAcquireResult(
 	arr []rueidis.RedisMessage,
 	acquired map[string]string,
 	backups map[string]savedValue,
-) (map[string]savedValue, error) {
+) error {
 	success, ierr := arr[0].AsInt64()
 	if ierr != nil {
 		rca.logger.Error("unexpected non-integer in lock-acquire response", "key", entry.key, "error", ierr)
-		return backups, fmt.Errorf("parse success: %w", ierr)
+		return fmt.Errorf("parse success: %w", ierr)
 	}
 	if success != 1 {
-		return backups, nil
+		return nil
 	}
 	acquired[entry.key] = entry.lockVal
 	saved := parseBackup(rca.logger, entry.key, arr[1], arr[2])
 	if saved.present {
-		if backups == nil {
-			backups = make(map[string]savedValue)
-		}
 		backups[entry.key] = saved
 	}
-	return backups, nil
+	return nil
 }
 
 // rollbackAfterFirstFailure releases locks acquired AFTER the first failed
