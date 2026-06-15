@@ -13,7 +13,7 @@ var (
 	setKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then redis.call("SET",KEYS[1],ARGV[2],"PX",ARGV[3]) return 1 else return 0 end`)
 )
 
-// Lua scripts for Cache write-lock operations (Set/SetMulti).
+// Lua scripts for write-lock, touch, and refresh-ahead operations.
 var (
 	// acquireWriteLockWithBackupScript atomically acquires a write lock and
 	// returns the previous value plus its PTTL for rollback. Allows overwriting

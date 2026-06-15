@@ -81,7 +81,7 @@ func newBatchError(failed map[string]error, succeeded []string) error {
 // ErrDecode is returned (wrapped) from typed reads when a stored value
 // cannot be decoded. The library does not auto-evict — the caller decides
 // whether to log, Del, or retry.
-var ErrDecode = errors.New("redcache: decode failed")
+var ErrDecode = errors.New("decode failed")
 
 // BatchKeyError is the typed, key-preserving error returned via errors.As from
 // the multi-key write methods (SetMulti, ForceSetMulti) on partial failure. K
@@ -90,6 +90,8 @@ type BatchKeyError[K comparable] struct {
 	Failed    map[K]error
 	Succeeded []K
 }
+
+var _ error = (*BatchKeyError[string])(nil)
 
 // Error formats the batch outcome with failed keys sorted by their %v
 // rendering for stable output.

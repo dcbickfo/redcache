@@ -127,7 +127,7 @@ func (rca *cacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key
 	rca.emitLoaderDuration(time.Since(start))
 	if err == nil {
 		wrapped := wrapEnvelope(val, time.Since(start))
-		if _, err = rca.setWithLock(ctx, ttl, key, valAndLock{wrapped, lockVal}); err == nil {
+		if _, err = rca.setWithLock(ctx, ttl, key, valAndLock{val: wrapped, lockVal: lockVal}); err == nil {
 			setVal = true
 		}
 		return val, err

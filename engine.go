@@ -24,8 +24,10 @@ var (
 )
 
 // lockEntry tracks a key's wait channel and its TTL timer. cancel and
-// timerExpired close done idempotently; timerExpired skips reading le.timer
-// because doing so would race the write in register's slow path.
+// timerExpired each close done exactly once via once. timerExpired, run from
+// the timer's own AfterFunc, doesn't touch le.timer: the timer has already
+// fired (nothing to Stop), and reading the field could race its assignment in
+// register.
 type lockEntry struct {
 	done  chan struct{}
 	once  sync.Once
@@ -204,8 +206,9 @@ retry:
 		}
 	}
 
-	// timer must be assigned before LoadOrStore publishes newEntry — otherwise
-	// a concurrent cancel could see the field still nil.
+	// timer must be assigned before LoadOrStore publishes newEntry: once
+	// published, a concurrent cancel (via onInvalidate or Close) reads le.timer,
+	// so the write must be ordered before the store to avoid a data race.
 	newEntry := &lockEntry{done: make(chan struct{})}
 	newEntry.timer = time.AfterFunc(rca.lockTTL, func() {
 		newEntry.timerExpired()

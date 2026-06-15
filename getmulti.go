@@ -21,7 +21,7 @@ func (rca *cacheAside) getMulti(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []string,
-	fn func(ctx context.Context, key []string) (val map[string]string, err error),
+	fn func(ctx context.Context, keys []string) (map[string]string, error),
 ) (map[string]string, error) {
 	if len(keys) == 0 {
 		return map[string]string{}, nil
@@ -100,7 +100,7 @@ func (rca *cacheAside) runLeaderSets(
 	ctx context.Context,
 	ttl time.Duration,
 	leaderKeys []string,
-	fn func(ctx context.Context, key []string) (val map[string]string, err error),
+	fn func(ctx context.Context, keys []string) (map[string]string, error),
 	res map[string]string,
 ) error {
 	n := 0
@@ -171,7 +171,7 @@ func (rca *cacheAside) trySetMultiKeyFn(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []string,
-	fn func(ctx context.Context, key []string) (val map[string]string, err error),
+	fn func(ctx context.Context, keys []string) (map[string]string, error),
 	res map[string]string,
 ) error {
 	lockVals, err := rca.tryLockMulti(ctx, keys)
@@ -211,7 +211,7 @@ func (rca *cacheAside) trySetMultiKeyFn(
 
 	vL := make(map[string]valAndLock, len(vals))
 	for k, v := range vals {
-		vL[k] = valAndLock{wrapEnvelope(v, delta), lockVals[k]}
+		vL[k] = valAndLock{val: wrapEnvelope(v, delta), lockVal: lockVals[k]}
 	}
 
 	keysSet, err := rca.setMultiWithLock(ctx, ttl, vL)

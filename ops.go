@@ -98,6 +98,13 @@ func (rca *cacheAside) groupTouchExecs(ttl time.Duration, keys []string) map[uin
 }
 
 func (rca *cacheAside) runTouchSlots(ctx context.Context, slots map[uint16][]touchExec) (string, error) {
+	// Single-slot fast path: skip the goroutine fan-out (mirrors runSlotSets).
+	if len(slots) <= 1 {
+		for _, stmts := range slots {
+			return rca.touchSlot(ctx, stmts)
+		}
+		return "", nil
+	}
 	var (
 		mu          sync.Mutex
 		wg          sync.WaitGroup
