@@ -120,9 +120,10 @@ var (
 	`)
 
 	// refreshAheadSetScript writes a refreshed value only if the current value
-	// is a real (non-lock) value. Skips on missing key (let Get-on-miss handle
-	// it) or lock value (a Get/Set will write its own value). Returns 1 on
-	// write, 0 if skipped.
+	// is the same real (non-lock) value observed when the refresh was triggered.
+	// Skips on missing key (let Get-on-miss handle it), lock value (a Get/Set
+	// will write its own value), or any newer real value. Returns 1 on write,
+	// 0 if skipped.
 	refreshAheadSetScript = rueidis.NewLuaScript(`
 		local cur = redis.call("GET", KEYS[1])
 		if cur == false then
@@ -130,6 +131,9 @@ var (
 		end
 		local lock_prefix = ARGV[3]
 		if string.sub(cur, 1, string.len(lock_prefix)) == lock_prefix then
+			return 0
+		end
+		if cur ~= ARGV[4] then
 			return 0
 		end
 		redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])

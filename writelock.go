@@ -28,6 +28,7 @@ func (rca *cacheAside) tryAcquireWriteLock(ctx context.Context, key, lockVal, lo
 	resp := acquireWriteLockWithBackupScript.Exec(ctx, rca.client, []string{key}, []string{lockVal, lockTTLMs, rca.lockPrefix})
 	arr, err := resp.ToArray()
 	if err != nil {
+		rca.emitRedisError("lock")
 		return false, savedValue{}, fmt.Errorf("write lock for key %q: %w", key, err)
 	}
 	if len(arr) != 3 {
@@ -163,6 +164,7 @@ func (rca *cacheAside) waitForFailedKey(
 	if rerr != nil {
 		// Real Redis error — fail fast rather than blocking on a wait channel
 		// for the full lockTTL.
+		rca.emitRedisError("read")
 		rca.restoreMultiValues(ctx, lockValues, savedValues)
 		return fmt.Errorf("read key %q: %w", firstFailed, rerr)
 	}

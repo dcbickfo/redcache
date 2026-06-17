@@ -182,6 +182,38 @@ func TestCache_GetMulti_Partial(t *testing.T) {
 	require.False(t, called)
 }
 
+func TestCache_GetMulti_IgnoresLoaderExtraKeys(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	ctx := context.Background()
+	key := "key:" + uuid.New().String()
+	extra := "extra:" + uuid.New().String()
+
+	res, err := client.GetMulti(ctx, 10*time.Second, []string{key}, func(_ context.Context, _ []string) (map[string]string, error) {
+		return map[string]string{
+			key:   "wanted",
+			extra: "ignored",
+		}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{key: "wanted"}, res)
+	assert.Zero(t, metrics.lost.Load(), "extra loader keys must not be attempted as lock-owned writes")
+
+	err = conn.Client().Do(ctx, conn.Client().B().Get().Key(extra).Build()).Error()
+	require.True(t, rueidis.IsRedisNil(err), "extra loader keys must not be written")
+}
+
 func TestCache_GetMulti_PartLock(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
@@ -1075,6 +1107,62 @@ func TestCache_Close(t *testing.T) {
 	}
 }
 
+func TestCache_CloseCancelsRefreshCallback(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(150*time.Millisecond),
+		redcache.WithRefreshAfterFraction(0.5),
+		redcache.WithRefreshBeta(0),
+		redcache.WithRefreshWorkers(1),
+		redcache.WithRefreshQueueSize(4),
+		redcache.WithRefreshTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	ctx := context.Background()
+	key := "close-refresh:" + uuid.New().String()
+	ttl := time.Second
+
+	_, err = client.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
+		return "initial", nil
+	})
+	require.NoError(t, err)
+
+	time.Sleep(600 * time.Millisecond)
+
+	refreshStarted := make(chan struct{})
+	_, err = client.Get(ctx, ttl, key, func(ctx context.Context, _ string) (string, error) {
+		close(refreshStarted)
+		<-ctx.Done()
+		return "", ctx.Err()
+	})
+	require.NoError(t, err)
+
+	select {
+	case <-refreshStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh callback did not start")
+	}
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		conn.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		require.Less(t, time.Since(start), 500*time.Millisecond)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Close did not cancel the refresh callback promptly")
+	}
+}
+
 func makeRefreshClient(t *testing.T, addr []string, fraction float64) (redcache.Cache[string, string], *redcache.Conn) {
 	t.Helper()
 	skipIfNoRedis(t)
@@ -1378,6 +1466,149 @@ func TestRefreshAhead_DoesNotStompLockValue(t *testing.T) {
 	got, gErr := verify.Do(ctx, verify.B().Get().Key(key).Build()).ToString()
 	require.NoError(t, gErr)
 	assert.Equal(t, lockVal, got, "refresh-ahead must skip the SET when a lock value is present")
+}
+
+func TestRefreshAhead_DoesNotStompNewerRealValue(t *testing.T) {
+	t.Parallel()
+	client, conn := makeRefreshClient(t, addr, 0.5)
+	ctx := context.Background()
+
+	key := "key:" + uuid.New().String()
+	callbackStarted := make(chan struct{})
+	callbackProceed := make(chan struct{})
+	var calls atomic.Int32
+
+	cb := func(_ context.Context, _ string) (string, error) {
+		n := calls.Add(1)
+		if n == 1 {
+			return "initial", nil
+		}
+		close(callbackStarted)
+		<-callbackProceed
+		return "refreshed", nil
+	}
+
+	ttl := 2 * time.Second
+
+	_, err := client.Get(ctx, ttl, key, cb)
+	require.NoError(t, err)
+
+	time.Sleep(1200 * time.Millisecond)
+
+	_, err = client.Get(ctx, ttl, key, cb)
+	require.NoError(t, err)
+
+	select {
+	case <-callbackStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh callback did not start")
+	}
+
+	require.NoError(t, client.ForceSet(ctx, ttl, key, "newer"))
+
+	close(callbackProceed)
+
+	verify, vErr := rueidis.NewClient(rueidis.ClientOption{InitAddress: addr})
+	require.NoError(t, vErr)
+	defer verify.Close()
+
+	conn.Close()
+
+	got, gErr := verify.Do(ctx, verify.B().Get().Key(key).Build()).ToString()
+	require.NoError(t, gErr)
+	assert.Equal(t, "__redcache:v1:0:newer", got, "refresh-ahead must not overwrite a newer real value")
+}
+
+func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+
+	open := func(t *testing.T) (redcache.Cache[string, string], *redcache.Conn) {
+		t.Helper()
+		conn, err := redcache.Open(
+			rueidis.ClientOption{InitAddress: addr},
+			redcache.WithLockTTL(150*time.Millisecond),
+			redcache.WithRefreshAfterFraction(0.5),
+			redcache.WithRefreshBeta(0),
+			redcache.WithRefreshWorkers(1),
+			redcache.WithRefreshQueueSize(4),
+			redcache.WithRefreshTimeout(2*time.Second),
+		)
+		require.NoError(t, err)
+		return redcache.NewString[string](conn, redcache.StringCodec{}), conn
+	}
+
+	client1, conn1 := open(t)
+	client2, conn2 := open(t)
+	client3, conn3 := open(t)
+	t.Cleanup(conn1.Close)
+	t.Cleanup(conn2.Close)
+	t.Cleanup(conn3.Close)
+
+	ctx := context.Background()
+	key := "refresh-lock:" + uuid.New().String()
+	ttl := time.Second
+
+	_, err := client1.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
+		return "initial", nil
+	})
+	require.NoError(t, err)
+
+	time.Sleep(600 * time.Millisecond)
+
+	firstStarted := make(chan struct{})
+	firstProceed := make(chan struct{})
+	releaseFirst := sync.OnceFunc(func() { close(firstProceed) })
+	defer releaseFirst()
+	firstErr := errors.New("first refresh failed")
+	_, err = client1.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
+		close(firstStarted)
+		<-firstProceed
+		return "", firstErr
+	})
+	require.NoError(t, err)
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first refresh did not start")
+	}
+
+	time.Sleep(250 * time.Millisecond)
+
+	secondStarted := make(chan struct{})
+	secondProceed := make(chan struct{})
+	releaseSecond := sync.OnceFunc(func() { close(secondProceed) })
+	defer releaseSecond()
+	_, err = client2.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
+		close(secondStarted)
+		<-secondProceed
+		return "second", nil
+	})
+	require.NoError(t, err)
+	select {
+	case <-secondStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second refresh did not start")
+	}
+
+	releaseFirst()
+	time.Sleep(50 * time.Millisecond)
+
+	thirdStarted := make(chan struct{})
+	_, err = client3.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
+		close(thirdStarted)
+		return "third", nil
+	})
+	require.NoError(t, err)
+
+	select {
+	case <-thirdStarted:
+		releaseSecond()
+		t.Fatal("third refresh started while the second refresh lock should still be owned")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	releaseSecond()
 }
 
 func TestRefreshAhead_GetMulti(t *testing.T) {

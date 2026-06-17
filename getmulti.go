@@ -61,7 +61,8 @@ retry:
 
 	hitsBefore := len(res)
 	*needRefreshP = (*needRefreshP)[:0]
-	needRefresh, err := rca.tryGetMulti(ctx, ttl, pending, res, *needRefreshP)
+	needRefreshExpected := make(map[string]string, len(pending))
+	needRefresh, err := rca.tryGetMulti(ctx, ttl, pending, res, *needRefreshP, needRefreshExpected)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +70,7 @@ retry:
 	rca.emitCacheHits(len(res) - hitsBefore)
 
 	if len(needRefresh) > 0 {
-		rca.triggerMultiRefresh(ctx, ttl, needRefresh, fn)
+		rca.triggerMultiRefresh(ctx, ttl, needRefresh, needRefreshExpected, fn)
 	}
 
 	pending, chans = filterResolved(pending, chans, res)
@@ -134,7 +135,7 @@ func filterResolved(pending []string, chans []<-chan struct{}, resolved map[stri
 // tryGetMulti reads keys via DoMultiCache, writes non-lock values into res,
 // and appends refresh-ahead candidates onto needRefresh (returned so callers
 // can update their pool handle).
-func (rca *cacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string, res map[string]string, needRefresh []string) ([]string, error) {
+func (rca *cacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string, res map[string]string, needRefresh []string, needRefreshExpected map[string]string) ([]string, error) {
 	multiP := cacheableTTLPool.Get(len(keys))
 	defer cacheableTTLPool.Put(multiP)
 	multi := *multiP
@@ -152,6 +153,7 @@ func (rca *cacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys 
 			continue
 		}
 		if err != nil {
+			rca.emitRedisError("read")
 			return needRefresh, fmt.Errorf("key %q: %w", keys[i], err)
 		}
 		if !strings.HasPrefix(val, rca.lockPrefix) {
@@ -159,6 +161,7 @@ func (rca *cacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys 
 			res[keys[i]] = plain
 			if rca.shouldRefresh(resp.CachePTTL(), ttl, delta) {
 				needRefresh = append(needRefresh, keys[i])
+				needRefreshExpected[keys[i]] = val
 			}
 		}
 	}
@@ -211,7 +214,11 @@ func (rca *cacheAside) trySetMultiKeyFn(
 
 	vL := make(map[string]valAndLock, len(vals))
 	for k, v := range vals {
-		vL[k] = valAndLock{val: wrapEnvelope(v, delta), lockVal: lockVals[k]}
+		lockVal, ok := lockVals[k]
+		if !ok {
+			continue
+		}
+		vL[k] = valAndLock{val: wrapEnvelope(v, delta), lockVal: lockVal}
 	}
 
 	keysSet, err := rca.setMultiWithLock(ctx, ttl, vL)
@@ -338,6 +345,7 @@ func (rca *cacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResu
 			rca.emitLockLost(key)
 			return false, nil
 		}
+		rca.emitRedisError("set")
 		return false, fmt.Errorf("set key %q: %w", key, err)
 	}
 	val, ierr := resp.AsInt64()

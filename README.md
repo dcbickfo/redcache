@@ -377,15 +377,18 @@ For workloads that already use `WithRefreshAfterFraction` + `WithRefreshBeta`, X
 ## Local Development
 
 ```bash
+# Install pinned Go/golangci-lint versions via asdf
+make setup
+
 # Start Redis
 docker compose up -d
 
 # Run tests (requires Redis on localhost:6379)
-go test -race ./...
+make test-race
 
 # Lint
-golangci-lint run
+make lint
 
 # Benchmarks
-go test -bench=. -benchtime=3s ./...
+make bench
 ```

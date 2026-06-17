@@ -432,6 +432,60 @@ func TestMetrics_RedisError(t *testing.T) {
 	require.Contains(t, metrics.redisErrOps, "set", "ForceSet failure must be tagged op=set")
 }
 
+func TestMetrics_RedisErrorOnGetMultiReadFailure(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	conn.Close()
+
+	_, err = client.GetMulti(context.Background(), time.Second, []string{"k"}, func(context.Context, []string) (map[string]string, error) {
+		t.Fatal("loader must not run when the read fails")
+		return nil, nil
+	})
+	require.Error(t, err)
+
+	require.GreaterOrEqual(t, metrics.redisErrors.Load(), int64(1), "expected RedisError to fire")
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	require.Contains(t, metrics.redisErrOps, "read", "GetMulti read failure must be tagged op=read")
+}
+
+func TestMetrics_RedisErrorOnSetReadFailure(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	conn.Close()
+
+	err = client.Set(context.Background(), time.Second, "k", func(context.Context, string) (string, error) {
+		t.Fatal("loader must not run when the read fails")
+		return "", nil
+	})
+	require.Error(t, err)
+
+	require.GreaterOrEqual(t, metrics.redisErrors.Load(), int64(1), "expected RedisError to fire")
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	require.Contains(t, metrics.redisErrOps, "read", "Set read failure must be tagged op=read")
+}
+
 // TestMetrics_NoopRedisError ensures the NoopMetrics RedisError/Loader no-ops
 // exist and are safe to call (compile + zero-cost path).
 func TestMetrics_NoopRedisError(t *testing.T) {

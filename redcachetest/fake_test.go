@@ -327,20 +327,35 @@ func TestExpiry_CausesRefetch(t *testing.T) {
 	assert.Equal(t, int64(2), calls.Load(), "expired entry should trigger a re-fetch")
 }
 
-func TestForceSet_TTLZeroNeverExpires(t *testing.T) {
+func TestForceSet_TTLZeroRejected(t *testing.T) {
 	f := redcachetest.New[string, int]()
-	require.NoError(t, f.ForceSet(context.Background(), 0, "k", 9))
+	require.ErrorIs(t, f.ForceSet(context.Background(), 0, "k", 9), redcache.ErrInvalidTTL)
+}
 
-	time.Sleep(15 * time.Millisecond)
+func TestInvalidTTLRejected(t *testing.T) {
+	f := redcachetest.New[string, int]()
+	ctx := context.Background()
 
-	var ran atomic.Bool
-	got, err := f.Get(context.Background(), time.Minute, "k", func(context.Context, string) (int, error) {
-		ran.Store(true)
+	_, err := f.Get(ctx, 0, "k", func(context.Context, string) (int, error) {
+		t.Fatal("Get loader must not run for invalid ttl")
 		return 0, nil
 	})
-	require.NoError(t, err)
-	assert.Equal(t, 9, got)
-	assert.False(t, ran.Load(), "ttl<=0 should store without expiry")
+	require.ErrorIs(t, err, redcache.ErrInvalidTTL)
+	_, err = f.GetMulti(ctx, 0, []string{"k"}, func(context.Context, []string) (map[string]int, error) {
+		t.Fatal("GetMulti loader must not run for invalid ttl")
+		return nil, nil
+	})
+	require.ErrorIs(t, err, redcache.ErrInvalidTTL)
+	_, _, err = f.Peek(ctx, 0, "k")
+	require.ErrorIs(t, err, redcache.ErrInvalidTTL)
+	require.ErrorIs(t, f.Set(ctx, 0, "k", func(context.Context, string) (int, error) { return 1, nil }), redcache.ErrInvalidTTL)
+	require.ErrorIs(t, f.SetMulti(ctx, 0, []string{"k"}, func(context.Context, []string) (map[string]int, error) {
+		return map[string]int{"k": 1}, nil
+	}), redcache.ErrInvalidTTL)
+	require.ErrorIs(t, f.ForceSet(ctx, 0, "k", 1), redcache.ErrInvalidTTL)
+	require.ErrorIs(t, f.ForceSetMulti(ctx, 0, map[string]int{"k": 1}), redcache.ErrInvalidTTL)
+	require.ErrorIs(t, f.Touch(ctx, 0, "k"), redcache.ErrInvalidTTL)
+	require.ErrorIs(t, f.TouchMulti(ctx, 0, []string{"k"}), redcache.ErrInvalidTTL)
 }
 
 func TestPeek_HitAfterStoreMissWhenAbsent(t *testing.T) {

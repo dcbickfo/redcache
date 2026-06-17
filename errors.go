@@ -11,8 +11,8 @@ import (
 // before the value could be written.
 var ErrLockLost = errors.New("lock was lost or expired before value could be set")
 
-// ErrInvalidTTL is returned by write methods when ttl is not positive. Redis
-// rejects PX 0; use Del to remove an entry.
+// ErrInvalidTTL is returned by TTL-bearing methods when ttl is not positive.
+// Redis rejects PX 0; use Del to remove an entry.
 var ErrInvalidTTL = errors.New("redcache: ttl must be positive; use Del to remove")
 
 // batchError carries per-key results of a multi-key engine operation, keyed by

@@ -130,6 +130,13 @@ type cache[K comparable, V any] struct {
 
 var _ Cache[string, []byte] = (*cache[string, []byte])(nil)
 
+func validateTTL(ttl time.Duration) error {
+	if ttl <= 0 {
+		return ErrInvalidTTL
+	}
+	return nil
+}
+
 // isStringKeyCodec reports whether keyCodec is StringKeyCodec, which guarantees
 // K=string and so gates the unsafe []K↔[]string fast path.
 func isStringKeyCodec[K comparable](keyCodec KeyCodec[K]) bool {
@@ -146,6 +153,9 @@ func (c *cache[K, V]) Get(
 	fn func(ctx context.Context, k K) (V, error),
 ) (V, error) {
 	var zero V
+	if err := validateTTL(ttl); err != nil {
+		return zero, err
+	}
 	encKey, err := c.keyCodec.EncodeKey(k)
 	if err != nil {
 		return zero, fmt.Errorf("redcache: encode key: %w", err)
@@ -179,6 +189,9 @@ func (c *cache[K, V]) Get(
 // errors are wrapped with ErrDecode like Get.
 func (c *cache[K, V]) Peek(ctx context.Context, ttl time.Duration, k K) (V, bool, error) {
 	var zero V
+	if err := validateTTL(ttl); err != nil {
+		return zero, false, err
+	}
 	encKey, err := c.keyCodec.EncodeKey(k)
 	if err != nil {
 		return zero, false, fmt.Errorf("redcache: encode key: %w", err)
@@ -210,6 +223,9 @@ func (c *cache[K, V]) Del(ctx context.Context, k K) error {
 
 // Touch sets the TTL of a cached value.
 func (c *cache[K, V]) Touch(ctx context.Context, ttl time.Duration, k K) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	encKey, err := c.keyCodec.EncodeKey(k)
 	if err != nil {
 		return fmt.Errorf("redcache: encode key: %w", err)
@@ -225,6 +241,9 @@ func (c *cache[K, V]) GetMulti(
 	keys []K,
 	fn func(ctx context.Context, missing []K) (map[K]V, error),
 ) (map[K]V, error) {
+	if err := validateTTL(ttl); err != nil {
+		return nil, err
+	}
 	if len(keys) == 0 {
 		return map[K]V{}, nil
 	}
@@ -326,6 +345,9 @@ func (c *cache[K, V]) DelMulti(ctx context.Context, keys []K) error {
 
 // TouchMulti extends the TTL of cached values.
 func (c *cache[K, V]) TouchMulti(ctx context.Context, ttl time.Duration, keys []K) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	if len(keys) == 0 {
 		return nil
 	}
@@ -380,8 +402,8 @@ func (c *cache[K, V]) Set(
 	k K,
 	fn func(ctx context.Context, k K) (V, error),
 ) error {
-	if ttl <= 0 {
-		return ErrInvalidTTL
+	if err := validateTTL(ttl); err != nil {
+		return err
 	}
 	encKey, err := c.keyCodec.EncodeKey(k)
 	if err != nil {
@@ -402,8 +424,8 @@ func (c *cache[K, V]) Set(
 
 // ForceSet writes v unconditionally.
 func (c *cache[K, V]) ForceSet(ctx context.Context, ttl time.Duration, k K, v V) error {
-	if ttl <= 0 {
-		return ErrInvalidTTL
+	if err := validateTTL(ttl); err != nil {
+		return err
 	}
 	encKey, err := c.keyCodec.EncodeKey(k)
 	if err != nil {
@@ -424,11 +446,11 @@ func (c *cache[K, V]) SetMulti(
 	keys []K,
 	fn func(ctx context.Context, keys []K) (map[K]V, error),
 ) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	if len(keys) == 0 {
 		return nil
-	}
-	if ttl <= 0 {
-		return ErrInvalidTTL
 	}
 	if c.keyIsString {
 		return c.setMultiString(ctx, ttl, keys, fn)
@@ -508,11 +530,11 @@ func (c *cache[K, V]) ForceSetMulti(
 	ttl time.Duration,
 	values map[K]V,
 ) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	if len(values) == 0 {
 		return nil
-	}
-	if ttl <= 0 {
-		return ErrInvalidTTL
 	}
 	if c.keyIsString {
 		return c.forceSetMultiString(ctx, ttl, values)

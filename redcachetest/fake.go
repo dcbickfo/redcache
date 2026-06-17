@@ -84,13 +84,16 @@ func NewWithClock[K comparable, V any](clk *Clock) *Fake[K, V] {
 	return &Fake[K, V]{data: make(map[K]entry[V]), now: clk.Now}
 }
 
-// deadlineFor converts a ttl to an absolute deadline against the Fake's clock. A
-// ttl <= 0 yields a zero deadline, meaning the entry never expires.
+// deadlineFor converts a ttl to an absolute deadline against the Fake's clock.
 func (f *Fake[K, V]) deadlineFor(ttl time.Duration) time.Time {
-	if ttl <= 0 {
-		return time.Time{}
-	}
 	return f.now().Add(ttl)
+}
+
+func validateTTL(ttl time.Duration) error {
+	if ttl <= 0 {
+		return redcache.ErrInvalidTTL
+	}
+	return nil
 }
 
 // load returns the live value for k. It treats an expired entry as a miss and
@@ -117,6 +120,10 @@ func (f *Fake[K, V]) Get(
 	k K,
 	fn func(ctx context.Context, k K) (V, error),
 ) (V, error) {
+	if err := validateTTL(ttl); err != nil {
+		var zero V
+		return zero, err
+	}
 	f.mu.RLock()
 	if v, ok := f.load(k); ok {
 		f.mu.RUnlock()
@@ -145,6 +152,9 @@ func (f *Fake[K, V]) GetMulti(
 	keys []K,
 	fn func(ctx context.Context, missing []K) (map[K]V, error),
 ) (map[K]V, error) {
+	if err := validateTTL(ttl); err != nil {
+		return nil, err
+	}
 	out := make(map[K]V, len(keys))
 	var missing []K
 
@@ -179,9 +189,13 @@ func (f *Fake[K, V]) GetMulti(
 
 // Peek reports whether k is present and unexpired without a loader. It returns
 // (value, true, nil) on a hit (a stored zero value still counts) and
-// (zero, false, nil) on a miss. ttl is accepted to satisfy the Cache contract
-// but the Fake never mutates state on a Peek.
-func (f *Fake[K, V]) Peek(_ context.Context, _ time.Duration, k K) (V, bool, error) {
+// (zero, false, nil) on a miss. ttl must be positive to match the real Cache
+// contract, but the Fake never mutates state on a Peek.
+func (f *Fake[K, V]) Peek(_ context.Context, ttl time.Duration, k K) (V, bool, error) {
+	if err := validateTTL(ttl); err != nil {
+		var zero V
+		return zero, false, err
+	}
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	v, ok := f.load(k)
@@ -196,6 +210,9 @@ func (f *Fake[K, V]) Set(
 	k K,
 	fn func(ctx context.Context, k K) (V, error),
 ) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	v, err := fn(ctx, k)
 	if err != nil {
 		return err
@@ -214,6 +231,9 @@ func (f *Fake[K, V]) SetMulti(
 	keys []K,
 	fn func(ctx context.Context, keys []K) (map[K]V, error),
 ) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	if len(keys) == 0 {
 		return nil
 	}
@@ -232,6 +252,9 @@ func (f *Fake[K, V]) SetMulti(
 
 // ForceSet stores v under k with ttl, bypassing any loader.
 func (f *Fake[K, V]) ForceSet(_ context.Context, ttl time.Duration, k K, v V) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	f.data[k] = entry[V]{value: v, deadline: f.deadlineFor(ttl)}
 	f.mu.Unlock()
@@ -241,6 +264,9 @@ func (f *Fake[K, V]) ForceSet(_ context.Context, ttl time.Duration, k K, v V) er
 // ForceSetMulti stores every key/value in values under ttl, bypassing any
 // loader.
 func (f *Fake[K, V]) ForceSetMulti(_ context.Context, ttl time.Duration, values map[K]V) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	if len(values) == 0 {
 		return nil
 	}
@@ -274,6 +300,9 @@ func (f *Fake[K, V]) DelMulti(_ context.Context, keys []K) error {
 // Touch resets the expiry of k to now+ttl. It is a no-op when k is absent or
 // already expired (it does not resurrect an expired entry).
 func (f *Fake[K, V]) Touch(_ context.Context, ttl time.Duration, k K) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	if v, ok := f.load(k); ok {
 		f.data[k] = entry[V]{value: v, deadline: f.deadlineFor(ttl)}
@@ -285,6 +314,9 @@ func (f *Fake[K, V]) Touch(_ context.Context, ttl time.Duration, k K) error {
 // TouchMulti resets the expiry of each present key to now+ttl. Absent or expired
 // keys are skipped.
 func (f *Fake[K, V]) TouchMulti(_ context.Context, ttl time.Duration, keys []K) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	deadline := f.deadlineFor(ttl)
 	f.mu.Lock()
 	for _, k := range keys {

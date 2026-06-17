@@ -2,8 +2,9 @@
 # Tool versions (Go, golangci-lint) are pinned in .tool-versions; `make setup`
 # installs them via asdf.
 
-GO            ?= go
-GOLANGCI_LINT ?= golangci-lint
+ASDF          ?= asdf
+GO            ?= $(ASDF) exec go
+GOLANGCI_LINT ?= $(ASDF) exec golangci-lint
 PKG           ?= ./...
 
 .DEFAULT_GOAL := help
@@ -15,7 +16,11 @@ help: ## List available targets
 
 .PHONY: setup
 setup: ## Install pinned tool versions via asdf (.tool-versions)
-	asdf install
+	@command -v $(ASDF) >/dev/null || { echo "asdf is required; install it first: https://asdf-vm.com"; exit 1; }
+	@awk 'NF && $$1 !~ /^#/ { print $$1 }' .tool-versions | while read -r plugin; do \
+		$(ASDF) plugin list | grep -qx "$$plugin" || $(ASDF) plugin add "$$plugin"; \
+	done
+	$(ASDF) install
 
 .PHONY: build
 build: ## Compile all packages

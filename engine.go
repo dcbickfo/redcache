@@ -69,6 +69,8 @@ type cacheAside struct {
 	refreshPrefix  string
 	refreshQueue   chan refreshJob // worker pool job queue (nil when disabled).
 	refreshDone    chan struct{}   // closed by Close to signal workers/senders.
+	refreshCtx     context.Context
+	refreshCancel  context.CancelFunc
 	refreshWg      sync.WaitGroup
 	closing        atomic.Bool // set true at the start of Close to gate refresh sends.
 	closeOnce      sync.Once
@@ -115,6 +117,8 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	}
 
 	if rca.refreshAfter > 0 {
+		//nolint:gosec // refreshCancel is retained on the engine and called by Close.
+		rca.refreshCtx, rca.refreshCancel = context.WithCancel(context.Background())
 		rca.refreshQueue = make(chan refreshJob, cfg.refreshQueueSize)
 		rca.refreshDone = make(chan struct{})
 		rca.startRefreshWorkers(cfg.refreshWorkers)
@@ -141,6 +145,7 @@ func (rca *cacheAside) Close() {
 			return true
 		})
 		if rca.refreshQueue != nil {
+			rca.refreshCancel()
 			close(rca.refreshDone)
 			rca.refreshWg.Wait()
 		}

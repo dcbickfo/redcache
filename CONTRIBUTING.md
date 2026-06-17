@@ -12,8 +12,9 @@ non-trivial before sending a large PR.
   invalidation, which can't be faked.
 
 The Go and golangci-lint versions are pinned in `.tool-versions`. With
-[asdf](https://asdf-vm.com) installed, `make setup` (or `asdf install`) gets the
-exact toolchain CI uses. Common tasks are wrapped in the `Makefile`; run
+[asdf](https://asdf-vm.com) installed, `make setup` installs any missing asdf
+plugins and then gets the exact toolchain CI uses. Common tasks are wrapped in
+the `Makefile`; run
 `make help` to list them.
 
 ## Running Redis

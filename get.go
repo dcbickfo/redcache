@@ -27,7 +27,7 @@ retry:
 	if err == nil {
 		rca.emitCacheHits(1)
 		if rca.shouldRefresh(res.pttl, ttl, res.delta) {
-			rca.triggerRefresh(ctx, ttl, key, fn)
+			rca.triggerRefresh(ctx, ttl, key, res.raw, fn)
 		}
 		return res.val, nil
 	}
@@ -88,6 +88,7 @@ var (
 // cacheReadResult is tryGet's return: value, client-side PTTL, recorded
 // compute delta (0 for legacy values).
 type cacheReadResult struct {
+	raw   string
 	val   string
 	pttl  int64
 	delta time.Duration
@@ -104,7 +105,7 @@ func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 		return cacheReadResult{}, fmt.Errorf("read key %q: %w", key, err)
 	}
 	plain, delta := unwrapEnvelope(val)
-	return cacheReadResult{val: plain, pttl: resp.CachePTTL(), delta: delta}, nil
+	return cacheReadResult{raw: val, val: plain, pttl: resp.CachePTTL(), delta: delta}, nil
 }
 
 func (rca *cacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key string, fn func(ctx context.Context, key string) (string, error)) (val string, err error) {

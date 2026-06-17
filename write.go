@@ -53,6 +53,7 @@ func (rca *cacheAside) set(
 			// CAS Lua errored mid-call; we may still hold the lock. Restore
 			// the prior value (DEL if none) — bestEffortUnlock would wipe a
 			// real prior value captured during acquire.
+			rca.emitRedisError("set")
 			rca.bestEffortRestore(ctx, key, lockVal, saved)
 			return fmt.Errorf("set key %q: %w", key, err)
 		}
@@ -84,6 +85,7 @@ func (rca *cacheAside) acquireSingleWriteLock(
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), rca.lockTTL)
 	val, rerr := resp.ToString()
 	if rerr != nil && !rueidis.IsRedisNil(rerr) {
+		rca.emitRedisError("read")
 		return savedValue{}, false, fmt.Errorf("read key %q: %w", key, rerr)
 	}
 
