@@ -35,6 +35,121 @@ raising tail latency under contention.
 go get github.com/dcbickfo/redcache
 ```
 
+## Migrating from v0.2.x
+
+redcache is still pre-1.0, and the next minor release intentionally breaks the
+old string-only API. Existing integrations on `*CacheAside` or
+`*PrimeableCacheAside` do **not** need to adopt typed domain keys immediately.
+The direct replacement is usually one `Conn` plus a `Cache[string, string]`
+view:
+
+```go
+// v0.2.x
+client, err := redcache.NewRedCacheAside(
+    rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+    redcache.CacheAsideOption{
+        LockTTL:              5 * time.Second,
+        RefreshAfterFraction: 0.8,
+        RefreshWorkers:       4,
+        RefreshQueueSize:     64,
+    },
+)
+if err != nil {
+    return err
+}
+defer client.Client().Close()
+
+val, err := client.Get(ctx, time.Minute, "user:123", loadString)
+```
+
+```go
+// v0.3.x
+conn, err := redcache.Open(
+    rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+    redcache.WithLockTTL(5*time.Second),
+    redcache.WithRefreshAfterFraction(0.8),
+    redcache.WithRefreshWorkers(4),
+    redcache.WithRefreshQueueSize(64),
+)
+if err != nil {
+    return err
+}
+defer conn.Close()
+
+cache := redcache.NewString[string](conn, redcache.StringCodec{})
+val, err := cache.Get(ctx, time.Minute, "user:123", loadString)
+```
+
+`NewPrimeableCacheAside` goes away too. You use the same `Cache[string, string]`
+view for read-through and write-through methods:
+
+```go
+// v0.2.x
+client, err := redcache.NewPrimeableCacheAside(opt, redcache.CacheAsideOption{
+    LockTTL: 5 * time.Second,
+})
+if err != nil {
+    return err
+}
+defer client.Client().Close()
+
+err = client.Set(ctx, time.Minute, "config:greeting", func(ctx context.Context, key string) (string, error) {
+    return "hello", nil
+})
+```
+
+```go
+// v0.3.x
+conn, err := redcache.Open(opt, redcache.WithLockTTL(5*time.Second))
+if err != nil {
+    return err
+}
+defer conn.Close()
+
+cache := redcache.NewString[string](conn, redcache.StringCodec{})
+err = cache.Set(ctx, time.Minute, "config:greeting", func(ctx context.Context, key string) (string, error) {
+    return "hello", nil
+})
+```
+
+### Migration checklist
+
+- Replace `NewRedCacheAside` / `NewPrimeableCacheAside` with `Open`, then derive
+  one or more views with `NewString`, `New`, or `NewBytes`.
+- Keep old string-key integrations on `redcache.NewString[string](conn,
+  redcache.StringCodec{})`. Move to `New[K, V]` and a `KeyCodec[K]` only when
+  you want domain-typed keys.
+- Move lifecycle and raw Redis access to the `Conn`: `cache.Close()` /
+  `cache.Client()` become `conn.Close()` / `conn.Client()`. A derived
+  `Cache[K, V]` is operations-only and safe to inject into application code.
+- Replace `CacheAsideOption{...}` fields with functional options:
+  `LockTTL` -> `WithLockTTL`, `Logger` -> `WithLogger`, `Metrics` ->
+  `WithMetrics`, `LockPrefix` -> `WithLockPrefix`, `RefreshLockPrefix` ->
+  `WithRefreshLockPrefix`, `RefreshAfterFraction` ->
+  `WithRefreshAfterFraction`, `RefreshBeta` -> `WithRefreshBeta`,
+  `RefreshWorkers` -> `WithRefreshWorkers`, `RefreshQueueSize` ->
+  `WithRefreshQueueSize`, and `ClientBuilder` -> `WithClientBuilder`.
+  `WithRefreshTimeout` is new; omit it to use the data `ttl` as the refresh
+  callback budget, or set it explicitly for slower refresh functions.
+- If you implemented `Metrics` directly, add `LoaderDuration`,
+  `LoaderErrors`, and `RedisError`. Implementations that embed `NoopMetrics`
+  only need to override the methods they care about.
+- `DelMulti` and `TouchMulti` now take `[]K`, matching `GetMulti` and
+  `SetMulti`: change `cache.DelMulti(ctx, "a", "b")` to
+  `cache.DelMulti(ctx, []string{"a", "b"})`.
+- Partial multi-key write errors are now `*BatchKeyError[K]`. For string-key
+  caches, migrate `var be *redcache.BatchError` checks to
+  `var be *redcache.BatchKeyError[string]`.
+- TTL-bearing methods now reject `ttl <= 0` with `ErrInvalidTTL` before touching
+  Redis. Use `Del` / `DelMulti` to remove entries.
+- The Go floor is now 1.24.
+
+Once the string-key migration compiles, you can opt into typed values by
+choosing a value codec, for example `NewString[User](conn,
+redcache.JSONCodec[User]{})`. That changes loaders from returning strings to
+returning `User` directly, but it is not required for a straight v0.2.x
+migration.
+
 ## Quickstart
 
 `Open` builds a `Conn` that owns a rueidis client; `NewString[V]` derives a `Cache[string, V]` view over it. Pair it with `JSONCodec[V]` to store JSON-encoded values. `Get` returns the cached value, calling your loader only on a miss — and only on one caller per key.
