@@ -12,8 +12,16 @@ import (
 
 var helperAddr = []string{"127.0.0.1:6379"}
 
+func skipIfShort(tb testing.TB) {
+	tb.Helper()
+	if testing.Short() {
+		tb.Skip("requires Redis")
+	}
+}
+
 func newHelperPCA(t *testing.T) *cacheAside {
 	t.Helper()
+	skipIfShort(t)
 	pca, err := newCacheAside(
 		rueidis.ClientOption{InitAddress: helperAddr},
 		newConfig(WithLockTTL(2*time.Second)),

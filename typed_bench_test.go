@@ -62,12 +62,13 @@ func BenchmarkTypedGet_Parallel(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
+	runBenchParallel(b, func(pb *testing.PB) error {
 		for pb.Next() {
 			if _, err := users.Get(ctx, time.Minute, key, benchTypedUnreachableFn); err != nil {
-				b.Fatal(err)
+				return err
 			}
 		}
+		return nil
 	})
 }
 
@@ -110,12 +111,13 @@ func BenchmarkTypedGetMulti_Parallel(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
+	runBenchParallel(b, func(pb *testing.PB) error {
 		for pb.Next() {
 			if _, err := users.GetMulti(ctx, time.Minute, keys, benchTypedUnreachableMultiFn); err != nil {
-				b.Fatal(err)
+				return err
 			}
 		}
+		return nil
 	})
 }
 

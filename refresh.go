@@ -22,9 +22,9 @@ type refreshJob struct {
 	multiFn  func(ctx context.Context, keys []string) (map[string]string, error)
 }
 
-// startRefreshWorkers launches n workers that drain refreshQueue, exiting when
-// refreshDone is closed. The data channel is never closed because concurrent
-// send + close races even with recover.
+// startRefreshWorkers launches n workers that drain refreshQueue until Close
+// begins. The data channel is never closed because concurrent send + close races
+// even with recover.
 func (rca *cacheAside) startRefreshWorkers(n int) {
 	for range n {
 		rca.refreshWg.Add(1)
@@ -35,6 +35,9 @@ func (rca *cacheAside) startRefreshWorkers(n int) {
 				case <-rca.refreshDone:
 					return
 				case job := <-rca.refreshQueue:
+					if !rca.shouldRunRefreshJob(job) {
+						return
+					}
 					rca.runRefreshJob(job)
 				}
 			}
@@ -43,10 +46,33 @@ func (rca *cacheAside) startRefreshWorkers(n int) {
 }
 
 // refreshKeyFor returns the distributed refresh-lock key for a data key.
-// The data key is wrapped in a hash tag ("{key}") so the refresh lock hashes
-// to the same cluster slot as the data key.
+// The data key is embedded for uniqueness. The wrapper also co-locates plain
+// keys by cluster slot, but refresh-ahead correctness does not rely on
+// co-location and keys containing Redis hash-tag metacharacters may hash by
+// their first tag.
 func (rca *cacheAside) refreshKeyFor(key string) string {
 	return rca.refreshPrefix + "{" + key + "}"
+}
+
+func (rca *cacheAside) shouldRunRefreshJob(job refreshJob) bool {
+	if rca.closing.Load() {
+		rca.dropRefreshJob(job)
+		return false
+	}
+	select {
+	case <-rca.refreshDone:
+		rca.dropRefreshJob(job)
+		return false
+	default:
+		return true
+	}
+}
+
+func (rca *cacheAside) dropRefreshJob(job refreshJob) {
+	for _, key := range job.keys {
+		rca.refreshing.Delete(key)
+	}
+	rca.emitRefreshDropped(len(job.keys))
 }
 
 // refreshFnTimeout returns the timeout bounding a refresh-ahead callback. It
@@ -156,19 +182,24 @@ func (rca *cacheAside) triggerRefresh(
 // refreshDone case so a concurrent Close unblocks senders without ever
 // closing the data channel (sends on closed channels panic).
 func (rca *cacheAside) enqueueRefresh(job refreshJob, keys []string) {
+	if rca.closing.Load() {
+		rca.dropRefreshJob(job)
+		return
+	}
+	select {
+	case <-rca.refreshDone:
+		rca.dropRefreshJob(job)
+		return
+	default:
+	}
+
 	select {
 	case rca.refreshQueue <- job:
 		rca.emitRefreshTriggered(len(keys))
 	case <-rca.refreshDone:
-		for _, key := range keys {
-			rca.refreshing.Delete(key)
-		}
-		rca.emitRefreshDropped(len(keys))
+		rca.dropRefreshJob(job)
 	default:
-		for _, key := range keys {
-			rca.refreshing.Delete(key)
-		}
-		rca.emitRefreshDropped(len(keys))
+		rca.dropRefreshJob(job)
 	}
 }
 

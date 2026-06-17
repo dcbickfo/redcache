@@ -132,8 +132,9 @@ func (rca *cacheAside) Client() rueidis.Client {
 	return rca.client
 }
 
-// Close cancels pending lock entries and drains refresh workers (bounded by
-// LockTTL). The underlying rueidis.Client is closed too. Idempotent.
+// Close cancels pending lock entries, cancels refresh callback contexts, waits
+// for in-flight refresh workers, and closes the underlying rueidis.Client.
+// Refresh callbacks must observe their context for prompt shutdown. Idempotent.
 //
 // Shutdown signals workers via refreshDone; closing refreshQueue would race
 // concurrent senders.

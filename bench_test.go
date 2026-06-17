@@ -3,6 +3,7 @@ package redcache_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +29,25 @@ func makeBenchClient(b *testing.B) (redcache.Cache[string, string], *redcache.Co
 	}
 	b.Cleanup(conn.Close)
 	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
+}
+
+func runBenchParallel(b *testing.B, body func(*testing.PB) error) {
+	b.Helper()
+
+	var (
+		once     sync.Once
+		firstErr error
+	)
+	b.RunParallel(func(pb *testing.PB) {
+		if err := body(pb); err != nil {
+			once.Do(func() {
+				firstErr = err
+			})
+		}
+	})
+	if firstErr != nil {
+		b.Fatal(firstErr)
+	}
 }
 
 // Hoisted to package scope so per-iteration loops don't allocate closures.
@@ -78,12 +98,13 @@ func BenchmarkCache_Get_Parallel(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
+	runBenchParallel(b, func(pb *testing.PB) error {
 		for pb.Next() {
 			if _, err := client.Get(ctx, time.Minute, key, benchUnreachableFn); err != nil {
-				b.Fatal(err)
+				return err
 			}
 		}
+		return nil
 	})
 }
 
@@ -126,12 +147,13 @@ func BenchmarkCache_GetMulti_Parallel(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
+	runBenchParallel(b, func(pb *testing.PB) error {
 		for pb.Next() {
 			if _, err := client.GetMulti(ctx, time.Minute, keys, benchUnreachableMultiFn); err != nil {
-				b.Fatal(err)
+				return err
 			}
 		}
+		return nil
 	})
 }
 

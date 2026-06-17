@@ -205,3 +205,42 @@ func TestRefreshKeyFor(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldRunRefreshJob_DropsDequeuedJobAfterClose(t *testing.T) {
+	t.Parallel()
+
+	rca := &cacheAside{refreshDone: make(chan struct{})}
+	key := "queued-after-close"
+	rca.refreshing.Store(key, struct{}{})
+	close(rca.refreshDone)
+
+	if rca.shouldRunRefreshJob(refreshJob{keys: []string{key}}) {
+		t.Fatal("refresh job should not run after Close begins")
+	}
+	if _, ok := rca.refreshing.Load(key); ok {
+		t.Fatal("dropped refresh job did not clear local dedup marker")
+	}
+}
+
+func TestEnqueueRefresh_DropsInsteadOfQueueingAfterClose(t *testing.T) {
+	t.Parallel()
+
+	for range 1000 {
+		rca := &cacheAside{
+			refreshQueue: make(chan refreshJob, 1),
+			refreshDone:  make(chan struct{}),
+		}
+		key := "enqueue-after-close"
+		rca.refreshing.Store(key, struct{}{})
+		close(rca.refreshDone)
+
+		rca.enqueueRefresh(refreshJob{keys: []string{key}}, []string{key})
+
+		if len(rca.refreshQueue) != 0 {
+			t.Fatal("refresh job was queued after Close began")
+		}
+		if _, ok := rca.refreshing.Load(key); ok {
+			t.Fatal("dropped refresh job did not clear local dedup marker")
+		}
+	}
+}

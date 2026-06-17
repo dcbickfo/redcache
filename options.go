@@ -68,8 +68,8 @@ func WithLockPrefix(p string) Option {
 }
 
 // WithRefreshLockPrefix sets the prefix for refresh-ahead dedup keys. Defaults
-// to DefaultRefreshPrefix. The data key is wrapped in a hash tag so the refresh
-// lock hashes to the same cluster slot.
+// to DefaultRefreshPrefix. Refresh lock keys embed the data key for uniqueness;
+// refresh-ahead correctness does not require Redis cluster-slot co-location.
 func WithRefreshLockPrefix(p string) Option {
 	return func(c *config) { c.refreshLockPrefix = p }
 }
