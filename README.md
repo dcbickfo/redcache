@@ -1,7 +1,12 @@
 # redcache
 
-[![CI](https://github.com/dcbickfo/redcache/actions/workflows/CI.yml/badge.svg)](https://github.com/dcbickfo/redcache/actions/workflows/CI.yml)
+[![Build](https://github.com/dcbickfo/redcache/actions/workflows/CI.yml/badge.svg)](https://github.com/dcbickfo/redcache/actions/workflows/CI.yml)
+[![CodeQL](https://github.com/dcbickfo/redcache/actions/workflows/codeql.yml/badge.svg)](https://github.com/dcbickfo/redcache/actions/workflows/codeql.yml)
+[![Govulncheck](https://github.com/dcbickfo/redcache/actions/workflows/govulncheck.yml/badge.svg)](https://github.com/dcbickfo/redcache/actions/workflows/govulncheck.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/dcbickfo/redcache/badge)](https://scorecard.dev/viewer/?uri=github.com/dcbickfo/redcache)
 [![Go Reference](https://pkg.go.dev/badge/github.com/dcbickfo/redcache.svg)](https://pkg.go.dev/github.com/dcbickfo/redcache)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/dcbickfo/redcache)](go.mod)
+[![Latest Release](https://img.shields.io/github/v/release/dcbickfo/redcache?sort=semver)](https://github.com/dcbickfo/redcache/releases)
 [![Go Report Card](https://goreportcard.com/badge/github.com/dcbickfo/redcache)](https://goreportcard.com/report/github.com/dcbickfo/redcache)
 [![codecov](https://codecov.io/gh/dcbickfo/redcache/branch/main/graph/badge.svg)](https://codecov.io/gh/dcbickfo/redcache)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -21,7 +26,7 @@ A typed cache-aside for Redis, built on the [rueidis](https://github.com/redis/r
 
 ## Requirements
 
-- Go 1.24+
+- Go 1.25+
 - Redis 7+ with RESP3 and client-side caching (tracking) enabled
 
 RESP3 client-side caching is load-bearing, not optional: redcache wakes waiters
@@ -155,7 +160,7 @@ err = cache.Set(ctx, time.Minute, "config:greeting", func(ctx context.Context, k
   `var be *redcache.BatchKeyError[string]`.
 - TTL-bearing methods now reject `ttl <= 0` with `ErrInvalidTTL` before touching
   Redis. Use `Del` / `DelMulti` to remove entries.
-- The Go floor is now 1.24.
+- The Go floor is now 1.25.
 
 Once the string-key migration compiles, you can opt into typed values by
 choosing a value codec, for example `NewString[User](conn,
@@ -476,7 +481,7 @@ cache := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
 
 It records counters (hits, misses, lock contention, refresh and error events) and histograms (`lock.wait.duration`, `loader.duration`, in seconds). High-cardinality keys are deliberately not attached as labels; `RedisError`'s bounded `op` is.
 
-Importing redcache's core does **not** pull OpenTelemetry into your binary (verified: zero otel symbols linked) — OTel is only compiled in if you import `redcacheotel`. It does appear in the module graph, since it lives in the main module. OpenTelemetry is pinned at v1.41 because it is the last release supporting Go 1.24; v1.42+ require Go 1.25.
+Importing redcache's core does **not** pull OpenTelemetry into your binary (verified: zero otel symbols linked) — OTel is only compiled in if you import `redcacheotel`. It does appear in the module graph, since it lives in the main module.
 
 ## Testing code that depends on redcache
 

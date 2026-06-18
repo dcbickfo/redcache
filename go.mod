@@ -1,18 +1,15 @@
 module github.com/dcbickfo/redcache
 
-go 1.24.9
+go 1.25.0
 
 require (
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
-	github.com/redis/rueidis v1.0.74
+	github.com/redis/rueidis v1.0.75
 	github.com/stretchr/testify v1.11.1
-	// OTel is pinned at v1.41: it is the last release supporting Go 1.24.
-	// v1.42+ require Go 1.25, which would raise redcache's core Go floor to
-	// 1.25 for all consumers. See .github/dependabot.yml for the bump guard.
-	go.opentelemetry.io/otel v1.41.0
-	go.opentelemetry.io/otel/metric v1.41.0
-	go.opentelemetry.io/otel/sdk/metric v1.41.0
+	go.opentelemetry.io/otel v1.44.0
+	go.opentelemetry.io/otel/metric v1.44.0
+	go.opentelemetry.io/otel/sdk/metric v1.44.0
 )
 
 require (
@@ -22,8 +19,8 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
-	go.opentelemetry.io/otel/sdk v1.41.0 // indirect
-	go.opentelemetry.io/otel/trace v1.41.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.44.0 // indirect
+	go.opentelemetry.io/otel/trace v1.44.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

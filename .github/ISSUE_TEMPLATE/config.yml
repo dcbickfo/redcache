@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/dcbickfo/redcache/security/policy
+    about: Please report vulnerabilities privately instead of opening a public issue.
+  - name: Runnable examples
+    url: https://github.com/dcbickfo/redcache/tree/main/examples
+    about: Start here for complete example programs.

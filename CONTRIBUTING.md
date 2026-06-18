@@ -6,7 +6,8 @@ non-trivial before sending a large PR.
 
 ## Prerequisites
 
-- Go 1.24+ (the module targets `go 1.24.9`; rueidis requires it — don't lower it).
+- Go 1.25+ (the module targets `go 1.25.0`; `.tool-versions` pins the local
+  toolchain to Go 1.25.11).
 - Docker, to run a local Redis. The tests are integration tests that need a
   real Redis at `127.0.0.1:6379` — they exercise RESP3 client-side
   invalidation, which can't be faked.
