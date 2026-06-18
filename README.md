@@ -35,6 +35,19 @@ raising tail latency and Redis read traffic under contention.
 go get github.com/dcbickfo/redcache
 ```
 
+## Runnable examples
+
+Standalone examples live under [`examples/`](examples/). They compile with the
+module and can be run directly against a local Redis:
+
+```bash
+go run ./examples/string-cache
+go run ./examples/typed-cache
+go run ./examples/metrics
+```
+
+Set `REDIS_ADDR` to point them at a non-default Redis address.
+
 ## Migrating from v0.2.x
 
 redcache is still pre-1.0, and the next minor release intentionally breaks the
