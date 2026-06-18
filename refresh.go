@@ -149,7 +149,7 @@ func (rca *cacheAside) shouldRefresh(cachePTTL int64, ttl time.Duration, delta t
 
 // triggerRefresh enqueues a single-key refresh job to the worker pool.
 // Two-level dedup: local syncx.Map + distributed SET NX on a separate refresh key.
-// If the queue is full, the refresh is silently dropped.
+// If the queue is full, the refresh is dropped and counted via RefreshDropped.
 //
 // Safe against concurrent Close: the closing flag is a fast-exit optimization;
 // correctness comes from enqueueRefresh's select on refreshDone.
@@ -264,8 +264,9 @@ func (rca *cacheAside) doSingleRefresh(
 }
 
 // triggerMultiRefresh enqueues a multi-key refresh job. Two-level dedup: local
-// syncx.Map + distributed SET NX on separate refresh keys. Drops silently when
-// the queue is full. Safe against concurrent Close (see triggerRefresh).
+// syncx.Map + distributed SET NX on separate refresh keys. Drops are counted via
+// RefreshDropped when the queue is full. Safe against concurrent Close (see
+// triggerRefresh).
 func (rca *cacheAside) triggerMultiRefresh(
 	ctx context.Context,
 	ttl time.Duration,

@@ -26,8 +26,8 @@ A typed cache-aside for Redis, built on the [rueidis](https://github.com/redis/r
 
 RESP3 client-side caching is load-bearing, not optional: redcache wakes waiters
 through Redis invalidation pushes. Without RESP3 (or with tracking disabled)
-there are no pushes — waiters fall back to polling at the lock TTL, sharply
-raising tail latency under contention.
+there are no pushes — waiters fall back to jittered polling until the lock TTL,
+raising tail latency and Redis read traffic under contention.
 
 ## Installation
 
@@ -337,7 +337,7 @@ cache := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
 
 ### XFetch probabilistic refresh
 
-Set `WithRefreshBeta(b)` with `b > 0` to add the [XFetch](https://en.wikipedia.org/wiki/Cache_stampede#Probabilistic_early_expiration) sampling layer on top of the floor. Below the floor, each read fires a refresh with probability proportional to how close the value is to expiry, weighted by how long the previous value took to compute. Slow-to-compute values get more headroom and refresh earlier; cheap values defer until closer to expiry. This smooths refresh load instead of bunching it at the floor crossing. `1.0` matches the canonical XFetch beta (Vattani et al.); for multi-key writes the recorded compute time is divided evenly across the returned values.
+Set `WithRefreshBeta(b)` with `b > 0` to add the [XFetch](https://en.wikipedia.org/wiki/Cache_stampede#Probabilistic_early_expiration) sampling layer on top of the floor. Below the floor, each read fires a refresh with probability proportional to how close the value is to expiry, weighted by how long the previous value took to compute. Slow-to-compute values get more headroom and refresh earlier; cheap values defer until closer to expiry. This smooths refresh load instead of bunching it at the floor crossing. `1.0` matches the canonical XFetch beta (Vattani et al.); for multi-key writes the recorded compute time is divided evenly across the returned values. That is an approximation: if one key in a batch dominates loader time and per-key XFetch precision matters, split that workload into separate `Get` calls or smaller `GetMulti` groups.
 
 ### Decoupled refresh budget
 

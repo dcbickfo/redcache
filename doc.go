@@ -12,9 +12,9 @@
 // caller wins a distributed lock (SET NX with a UUIDv7 value), runs the loader,
 // and atomically replaces the lock with the real value via a Lua CAS. Every
 // other caller — in this process or another — waits for the resulting
-// invalidation (or the lock TTL) and then reads the populated value. In-process
-// leader/follower coordination collapses a thundering herd on one key to a
-// single Redis SET NX.
+// invalidation, with jittered polling as a fallback until the lock TTL, and then
+// reads the populated value. In-process leader/follower coordination collapses a
+// thundering herd on one key to a single Redis SET NX.
 //
 // # Choosing a constructor
 //

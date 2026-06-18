@@ -172,13 +172,11 @@ func (rca *cacheAside) waitForFailedKey(
 		return nil
 	}
 
-	select {
-	case <-waitChan:
-		return nil
-	case <-ctx.Done():
+	if err := rca.waitForWriteLockRelease(ctx, firstFailed, waitChan); err != nil {
 		rca.restoreMultiValues(ctx, lockValues, savedValues)
-		return ctx.Err()
+		return err
 	}
+	return nil
 }
 
 // computeRemaining returns the sorted keys that haven't been locked yet.

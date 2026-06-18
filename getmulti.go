@@ -84,15 +84,67 @@ retry:
 	}
 
 	if len(pending) > 0 {
-		// Followers + leaders whose NX lost: wait for the holder's invalidation
-		// (or lockTTL).
-		rca.emitLockContended(len(pending))
-		if err = rca.awaitLockMulti(ctx, chans); err != nil {
+		var done bool
+		pending, chans, done, err = rca.waitForGetMulti(ctx, ttl, pending, chans, res, needRefreshP, fn)
+		if err != nil {
 			return nil, err
+		}
+		if done {
+			return res, nil
 		}
 		goto retry
 	}
 	return res, nil
+}
+
+func (rca *cacheAside) waitForGetMulti(
+	ctx context.Context,
+	ttl time.Duration,
+	pending []string,
+	chans []<-chan struct{},
+	res map[string]string,
+	needRefreshP *[]string,
+	fn func(ctx context.Context, keys []string) (map[string]string, error),
+) ([]string, []<-chan struct{}, bool, error) {
+	// Followers + leaders whose NX lost: wait for the holder's invalidation
+	// (or the jittered poll fallback / lockTTL).
+	rca.emitLockContended(len(pending))
+	polled, err := rca.awaitGetMulti(ctx, ttl, pending, chans, res, needRefreshP, fn)
+	if err != nil {
+		return pending, chans, false, err
+	}
+	if !polled {
+		return pending, chans, false, nil
+	}
+	pending, chans = filterResolved(pending, chans, res)
+	return pending, chans, len(pending) == 0, nil
+}
+
+func (rca *cacheAside) awaitGetMulti(
+	ctx context.Context,
+	ttl time.Duration,
+	pending []string,
+	chans []<-chan struct{},
+	res map[string]string,
+	needRefreshP *[]string,
+	fn func(ctx context.Context, keys []string) (map[string]string, error),
+) (bool, error) {
+	return rca.awaitLockMultiOrPoll(ctx, chans, func() (bool, error) {
+		hitsBefore := len(res)
+		*needRefreshP = (*needRefreshP)[:0]
+		needRefreshExpected := make(map[string]string, len(pending))
+		needRefresh, err := rca.tryGetMulti(ctx, ttl, pending, res, *needRefreshP, needRefreshExpected)
+		if err != nil {
+			return false, err
+		}
+		*needRefreshP = needRefresh
+		hits := len(res) - hitsBefore
+		rca.emitCacheHits(hits)
+		if len(needRefresh) > 0 {
+			rca.triggerMultiRefresh(ctx, ttl, needRefresh, needRefreshExpected, fn)
+		}
+		return hits > 0, nil
+	})
 }
 
 // runLeaderSets filters out leaderKeys that tryGetMulti already populated

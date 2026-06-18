@@ -1,6 +1,8 @@
 package redcache
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -177,6 +179,93 @@ func TestValidateRefreshDefaults(t *testing.T) {
 				t.Errorf("refreshQueueSize = %d, want %d", cfg.refreshQueueSize, tt.wantQSize)
 			}
 		})
+	}
+}
+
+func TestAwaitLockOrPoll_PollCanResolveBeforeWaitChannel(t *testing.T) {
+	t.Parallel()
+	rca := &cacheAside{lockTTL: 100 * time.Millisecond}
+	wait := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	polls := 0
+	start := time.Now()
+	resolved, err := rca.awaitLockOrPoll(ctx, wait, func() (bool, error) {
+		polls++
+		return true, nil
+	})
+
+	if err != nil {
+		t.Fatalf("awaitLockOrPoll returned error: %v", err)
+	}
+	if !resolved {
+		t.Fatal("awaitLockOrPoll did not report poll resolution")
+	}
+	if polls != 1 {
+		t.Fatalf("polls = %d, want 1", polls)
+	}
+	if elapsed := time.Since(start); elapsed >= rca.lockTTL {
+		t.Fatalf("poll fallback took %v, want less than lockTTL %v", elapsed, rca.lockTTL)
+	}
+}
+
+func TestAwaitLockOrPoll_WaitChannelWins(t *testing.T) {
+	t.Parallel()
+	rca := &cacheAside{lockTTL: time.Second}
+	wait := make(chan struct{})
+	close(wait)
+
+	resolved, err := rca.awaitLockOrPoll(context.Background(), wait, func() (bool, error) {
+		t.Fatal("poll should not run after wait channel closes")
+		return false, nil
+	})
+
+	if err != nil {
+		t.Fatalf("awaitLockOrPoll returned error: %v", err)
+	}
+	if resolved {
+		t.Fatal("awaitLockOrPoll reported poll resolution after wait channel closed")
+	}
+}
+
+func TestAwaitLockOrPoll_PollError(t *testing.T) {
+	t.Parallel()
+	rca := &cacheAside{lockTTL: 100 * time.Millisecond}
+	wait := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	wantErr := errors.New("poll failed")
+
+	resolved, err := rca.awaitLockOrPoll(ctx, wait, func() (bool, error) {
+		return false, wantErr
+	})
+
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("awaitLockOrPoll error = %v, want %v", err, wantErr)
+	}
+	if resolved {
+		t.Fatal("awaitLockOrPoll reported poll resolution on poll error")
+	}
+}
+
+func TestAwaitLockMultiOrPoll_PollCanResolveBeforeAllWaitChannels(t *testing.T) {
+	t.Parallel()
+	rca := &cacheAside{lockTTL: 100 * time.Millisecond}
+	wait1 := make(chan struct{})
+	wait2 := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	resolved, err := rca.awaitLockMultiOrPoll(ctx, []<-chan struct{}{wait1, wait2}, func() (bool, error) {
+		return true, nil
+	})
+
+	if err != nil {
+		t.Fatalf("awaitLockMultiOrPoll returned error: %v", err)
+	}
+	if !resolved {
+		t.Fatal("awaitLockMultiOrPoll did not report poll resolution")
 	}
 }
 

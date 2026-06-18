@@ -103,8 +103,8 @@ func WithRefreshWorkers(n int) Option {
 	return func(c *config) { c.refreshWorkers = n }
 }
 
-// WithRefreshQueueSize bounds pending refresh jobs; over-full drops silently.
-// Defaults to 64.
+// WithRefreshQueueSize bounds pending refresh jobs; over-full drops are counted
+// via RefreshDropped. Defaults to 64.
 func WithRefreshQueueSize(n int) Option {
 	return func(c *config) { c.refreshQueueSize = n }
 }

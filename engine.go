@@ -3,6 +3,7 @@ package redcache
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,11 @@ import (
 	"github.com/dcbickfo/redcache/internal/lockpool"
 	"github.com/dcbickfo/redcache/internal/poolx"
 	"github.com/dcbickfo/redcache/internal/syncx"
+)
+
+const (
+	minLockPollDelay = 25 * time.Millisecond
+	maxLockPollDelay = time.Second
 )
 
 var (
@@ -54,7 +60,7 @@ func (le *lockEntry) timerExpired() {
 // K/V and delegates here.
 type cacheAside struct {
 	client         rueidis.Client
-	locks          syncx.Map[string, *lockEntry]
+	locks          syncx.ShardedMap[*lockEntry]
 	lockPool       *lockpool.Pool
 	lockTTL        time.Duration
 	lockTTLMs      string // pre-formatted lockTTL.Milliseconds() for Lua args.
@@ -62,10 +68,10 @@ type cacheAside struct {
 	metrics        Metrics
 	metricsEnabled bool // false when metrics is NoopMetrics{}, gates hot-path emits.
 	lockPrefix     string
-	refreshAfter   float64                     // 0 = disabled.
-	refreshBeta    float64                     // XFetch beta; 0 = simple floor only.
-	refreshTimeout time.Duration               // 0 = use the data ttl per call.
-	refreshing     syncx.Map[string, struct{}] // local dedup of in-flight refreshes.
+	refreshAfter   float64                    // 0 = disabled.
+	refreshBeta    float64                    // XFetch beta; 0 = simple floor only.
+	refreshTimeout time.Duration              // 0 = use the data ttl per call.
+	refreshing     syncx.ShardedMap[struct{}] // local dedup of in-flight refreshes.
 	refreshPrefix  string
 	refreshQueue   chan refreshJob // worker pool job queue (nil when disabled).
 	refreshDone    chan struct{}   // closed by Close to signal workers/senders.
@@ -161,25 +167,65 @@ func (rca *cacheAside) cleanupCtx(ctx context.Context) (context.Context, context
 	return context.WithTimeout(context.WithoutCancel(ctx), rca.lockTTL)
 }
 
-// awaitLock blocks on waitChan or ctx. Emits the wait duration regardless.
-func (rca *cacheAside) awaitLock(ctx context.Context, waitChan <-chan struct{}) error {
+// awaitLock blocks on waitChan, a jittered poll fallback, or ctx. It returns
+// polled=true when poll resolved the wait before Redis invalidation arrived.
+func (rca *cacheAside) awaitLockOrPoll(ctx context.Context, waitChan <-chan struct{}, poll func() (bool, error)) (polled bool, err error) {
 	start := time.Now()
-	select {
-	case <-waitChan:
+	defer func() {
 		rca.emitLockWaitDuration(time.Since(start))
-		return nil
-	case <-ctx.Done():
-		rca.emitLockWaitDuration(time.Since(start))
-		return ctx.Err()
+	}()
+
+	timer := time.NewTimer(rca.nextLockPollDelay())
+	defer timer.Stop()
+	for {
+		select {
+		case <-waitChan:
+			return false, nil
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-timer.C:
+			ok, err := poll()
+			if ok || err != nil {
+				return ok, err
+			}
+			timer.Reset(rca.nextLockPollDelay())
+		}
 	}
 }
 
-// awaitLockMulti is awaitLock for many channels.
-func (rca *cacheAside) awaitLockMulti(ctx context.Context, chans []<-chan struct{}) error {
+// awaitLockMultiOrPoll is awaitLockOrPoll for many channels. The WaitForAll
+// goroutine is cancelled when poll resolves first, so fallback reads do not
+// leave a waiter behind until every stale channel closes.
+func (rca *cacheAside) awaitLockMultiOrPoll(ctx context.Context, chans []<-chan struct{}, poll func() (bool, error)) (polled bool, err error) {
 	start := time.Now()
-	err := syncx.WaitForAll(ctx, chans)
-	rca.emitLockWaitDuration(time.Since(start))
-	return err
+	defer func() {
+		rca.emitLockWaitDuration(time.Since(start))
+	}()
+
+	waitCtx, waitCancel := context.WithCancel(ctx)
+	defer waitCancel()
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- syncx.WaitForAll(waitCtx, chans)
+	}()
+
+	timer := time.NewTimer(rca.nextLockPollDelay())
+	defer timer.Stop()
+	for {
+		select {
+		case err := <-waitDone:
+			return false, err
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-timer.C:
+			ok, err := poll()
+			if ok || err != nil {
+				waitCancel()
+				return ok, err
+			}
+			timer.Reset(rca.nextLockPollDelay())
+		}
+	}
 }
 
 func (rca *cacheAside) onInvalidate(messages []rueidis.RedisMessage) {
@@ -195,6 +241,28 @@ func (rca *cacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 			entry.cancel()
 		}
 	}
+}
+
+func (rca *cacheAside) nextLockPollDelay() time.Duration {
+	maxDelay := rca.lockTTL / 10
+	if maxDelay < minLockPollDelay {
+		maxDelay = minLockPollDelay
+	}
+	if maxDelay > maxLockPollDelay {
+		maxDelay = maxLockPollDelay
+	}
+	if maxDelay >= rca.lockTTL && rca.lockTTL > 0 {
+		maxDelay = rca.lockTTL / 2
+		if maxDelay <= 0 {
+			maxDelay = rca.lockTTL
+		}
+	}
+	minDelay := maxDelay / 2
+	if minDelay <= 0 || maxDelay <= minDelay {
+		return maxDelay
+	}
+	//nolint:gosec // This jitter only spreads Redis polling; it is not security-sensitive.
+	return minDelay + time.Duration(rand.Int64N(int64(maxDelay-minDelay)))
 }
 
 // register publishes a per-key lockEntry. leader=true means the caller drives

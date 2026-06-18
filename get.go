@@ -25,11 +25,7 @@ retry:
 	res, err := rca.tryGet(ctx, ttl, key)
 
 	if err == nil {
-		rca.emitCacheHits(1)
-		if rca.shouldRefresh(res.pttl, ttl, res.delta) {
-			rca.triggerRefresh(ctx, ttl, key, res.raw, fn)
-		}
-		return res.val, nil
+		return rca.returnGetHit(ctx, ttl, key, fn, res)
 	}
 	if !errors.Is(err, errNotFound) {
 		return "", err
@@ -38,9 +34,9 @@ retry:
 	rca.emitCacheMisses(1)
 
 	if !leader {
-		rca.emitLockContended(1)
-		if werr := rca.awaitLock(ctx, wait); werr != nil {
-			return "", werr
+		val, done, err := rca.waitForGet(ctx, ttl, key, wait, fn)
+		if done {
+			return val, err
 		}
 		goto retry
 	}
@@ -54,14 +50,63 @@ retry:
 		// errLockFailed: another process holds the Redis lock — wait alongside
 		// followers (cancelling our entry would wake them to race the same NX).
 		// ErrLockLost: a ForceSet stole our lock; retry to read its value.
-		rca.emitLockContended(1)
-		if werr := rca.awaitLock(ctx, wait); werr != nil {
-			return "", werr
+		val, done, err := rca.waitForGet(ctx, ttl, key, wait, fn)
+		if done {
+			return val, err
 		}
 		goto retry
 	}
 
 	return "", err
+}
+
+func (rca *cacheAside) waitForGet(
+	ctx context.Context,
+	ttl time.Duration,
+	key string,
+	wait <-chan struct{},
+	fn func(ctx context.Context, key string) (string, error),
+) (val string, done bool, err error) {
+	rca.emitLockContended(1)
+	res, ok, err := rca.awaitGet(ctx, ttl, key, wait)
+	if err != nil {
+		return "", true, err
+	}
+	if ok {
+		val, err := rca.returnGetHit(ctx, ttl, key, fn, res)
+		return val, true, err
+	}
+	return "", false, nil
+}
+
+func (rca *cacheAside) returnGetHit(
+	ctx context.Context,
+	ttl time.Duration,
+	key string,
+	fn func(ctx context.Context, key string) (string, error),
+	res cacheReadResult,
+) (string, error) {
+	rca.emitCacheHits(1)
+	if rca.shouldRefresh(res.pttl, ttl, res.delta) {
+		rca.triggerRefresh(ctx, ttl, key, res.raw, fn)
+	}
+	return res.val, nil
+}
+
+func (rca *cacheAside) awaitGet(ctx context.Context, ttl time.Duration, key string, wait <-chan struct{}) (cacheReadResult, bool, error) {
+	var polled cacheReadResult
+	ok, err := rca.awaitLockOrPoll(ctx, wait, func() (bool, error) {
+		res, err := rca.tryGet(ctx, ttl, key)
+		if errors.Is(err, errNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		polled = res
+		return true, nil
+	})
+	return polled, ok, err
 }
 
 // peek is a read-only client-side-cached lookup: no loader, no lock. It reuses
