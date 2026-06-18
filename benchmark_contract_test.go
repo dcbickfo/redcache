@@ -16,7 +16,6 @@ func TestBenchmarksDoNotFailNowInsideRunParallel(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, file := range files {
-		file := file
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 			assertNoFailNowInsideRunParallel(t, file)

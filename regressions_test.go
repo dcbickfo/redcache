@@ -167,7 +167,7 @@ func TestCache_EmptyValueIsCacheHit(t *testing.T) {
 		return "", nil
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "", res, "stored empty value should be returned as-is")
+	assert.Empty(t, res, "stored empty value should be returned as-is")
 	assert.GreaterOrEqual(t, metrics.hits.Load(), int64(1), "expected CacheHit metric for empty value")
 	assert.Zero(t, metrics.misses.Load(), "no CacheMiss should be recorded for an empty value")
 }
@@ -194,7 +194,7 @@ func TestCache_Set_RollbackPreservesEmptyValue(t *testing.T) {
 		return "", nil
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "", res, "rollback should preserve the empty-string value, not DEL the key")
+	assert.Empty(t, res, "rollback should preserve the empty-string value, not DEL the key")
 }
 
 // TestCache_Set_RollbackPreservesPTTL verifies the prior value's
@@ -222,7 +222,7 @@ func TestCache_Set_RollbackPreservesPTTL(t *testing.T) {
 
 	pttl, err := conn.Client().Do(ctx, conn.Client().B().Pttl().Key(key).Build()).AsInt64()
 	require.NoError(t, err)
-	assert.Greater(t, pttl, int64(0), "key should exist with a finite TTL after rollback")
+	assert.Positive(t, pttl, "key should exist with a finite TTL after rollback")
 	assert.Less(t, pttl, int64(1800), "rollback must preserve the original remaining TTL, not refresh it")
 
 	val, err := conn.Client().Do(ctx, conn.Client().B().Get().Key(key).Build()).ToString()

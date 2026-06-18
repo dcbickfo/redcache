@@ -529,7 +529,7 @@ func TestCache_SetMulti_PartialCASFailure_BatchError(t *testing.T) {
 	require.ErrorAs(t, err, &batchErr)
 	assert.True(t, batchErr.HasFailures())
 	assert.Contains(t, batchErr.Failed, key2, "key2 should have failed CAS")
-	assert.ErrorIs(t, batchErr.Failed[key2], redcache.ErrLockLost)
+	require.ErrorIs(t, batchErr.Failed[key2], redcache.ErrLockLost)
 	res, getErr := client.Get(ctx, time.Second*10, key2, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called — forced value should exist")
 		return "", nil

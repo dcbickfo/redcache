@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/dcbickfo/redcache"
 )
@@ -46,7 +47,7 @@ func TestBatchKeyError_String_AccessorsAndFormat(t *testing.T) {
 	assert.False(t, bke.HasError("key3"))
 	assert.False(t, bke.HasError("unknown"))
 
-	assert.ErrorIs(t, bke.ErrorFor("key1"), keyErr)
+	require.ErrorIs(t, bke.ErrorFor("key1"), keyErr)
 	assert.NoError(t, bke.ErrorFor("key3"))
 	assert.NoError(t, bke.ErrorFor("unknown"))
 

@@ -39,7 +39,7 @@ func TestBatchError_HasFailures(t *testing.T) {
 func TestNewBatchError_NilWhenNoFailures(t *testing.T) {
 	t.Parallel()
 	be := newBatchError(map[string]error{}, []string{"key1"})
-	assert.Nil(t, be)
+	assert.NoError(t, be)
 }
 
 func TestNewBatchError_ReturnsErrorWhenFailures(t *testing.T) {
@@ -47,7 +47,7 @@ func TestNewBatchError_ReturnsErrorWhenFailures(t *testing.T) {
 	failed := map[string]error{"key1": errors.New("oops")}
 	succeeded := []string{"key2"}
 	err := newBatchError(failed, succeeded)
-	require.NotNil(t, err)
+	require.Error(t, err)
 	var be *batchError
 	require.ErrorAs(t, err, &be)
 	assert.Equal(t, failed, be.Failed)
@@ -66,7 +66,7 @@ func TestBatchError_ErrorForAndHasError(t *testing.T) {
 	assert.False(t, be.HasError("key2"))
 	assert.False(t, be.HasError("unknown"))
 
-	assert.ErrorIs(t, be.ErrorFor("key1"), keyErr)
+	require.ErrorIs(t, be.ErrorFor("key1"), keyErr)
 	assert.NoError(t, be.ErrorFor("key2"))
 	assert.NoError(t, be.ErrorFor("unknown"))
 }
@@ -101,7 +101,7 @@ func TestNewBatchKeyError_ReturnsErrorWhenFailures(t *testing.T) {
 	failed := map[string]error{"key1": errors.New("oops")}
 	succeeded := []string{"key2"}
 	err := newBatchKeyError(failed, succeeded)
-	require.NotNil(t, err)
+	require.Error(t, err)
 	var bke *BatchKeyError[string]
 	require.ErrorAs(t, err, &bke)
 	assert.Equal(t, failed, bke.Failed)

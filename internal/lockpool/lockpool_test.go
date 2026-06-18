@@ -24,7 +24,7 @@ func TestNew_PropagatesUUIDError(t *testing.T) {
 	defer uuid.SetRand(nil)
 
 	pool, err := lockpool.New("lock:")
-	assert.Error(t, err, "expected New to surface uuid generation error")
+	require.Error(t, err, "expected New to surface uuid generation error")
 	assert.Nil(t, pool, "expected nil pool on error")
 }
 

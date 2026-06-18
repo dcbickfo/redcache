@@ -311,11 +311,12 @@ func TestMetrics_LockWaitDuration(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
+	errs := make(chan error, 2)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		_, err := client.Get(ctx, 5*time.Second, key, holderCb)
-		require.NoError(t, err)
+		errs <- err
 	}()
 
 	// Holder is inside the callback, so it owns the lock.
@@ -324,7 +325,7 @@ func TestMetrics_LockWaitDuration(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		_, err := client.Get(ctx, 5*time.Second, key, waiterCb)
-		require.NoError(t, err)
+		errs <- err
 	}()
 
 	// Barrier: wait until the waiter is in the contended branch. Without it,
@@ -337,8 +338,12 @@ func TestMetrics_LockWaitDuration(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	close(holderProceed)
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 
-	require.Greater(t, metrics.waitDurations.Load(), int64(0), "expected LockWaitDuration to fire")
+	require.Positive(t, metrics.waitDurations.Load(), "expected LockWaitDuration to fire")
 	// Lower bound (50ms below the 100ms hold) catches near-zero regressions
 	// that a `> 0` assertion would miss.
 	require.GreaterOrEqual(t, metrics.totalWait.Load(), int64(50*time.Millisecond),
@@ -370,7 +375,7 @@ func TestMetrics_LoaderDuration(t *testing.T) {
 	require.NoError(t, err)
 
 	require.GreaterOrEqual(t, metrics.loaderDurations.Load(), int64(1), "expected LoaderDuration to fire")
-	require.Greater(t, metrics.totalLoader.Load(), int64(0), "LoaderDuration must reflect loader time")
+	require.Positive(t, metrics.totalLoader.Load(), "LoaderDuration must reflect loader time")
 	require.Equal(t, int64(0), metrics.loaderErrors.Load(), "successful loader must not emit LoaderErrors")
 }
 

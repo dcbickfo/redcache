@@ -841,7 +841,7 @@ func TestConcurrentRegisterRace(t *testing.T) {
 	// Cap above: a register-race regression would let every Get re-fire the callback unboundedly.
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Greater(t, callCount, 0, "callback should be called at least once")
+	assert.Positive(t, callCount, "callback should be called at least once")
 	assert.Less(t, callCount, 4000, "callback fired far more than expected — possible register-race regression")
 }
 
@@ -1733,7 +1733,7 @@ func TestRefreshAhead_Backpressure(t *testing.T) {
 	count := refreshCount.Load()
 	assert.Less(t, count, int64(numKeys),
 		"expected fewer than %d refreshes, got %d — backpressure should drop excess jobs", numKeys, count)
-	assert.Greater(t, count, int64(0), "at least one refresh should have executed")
+	assert.Positive(t, count, "at least one refresh should have executed")
 }
 
 func TestRefreshAhead_FractionValidation(t *testing.T) {

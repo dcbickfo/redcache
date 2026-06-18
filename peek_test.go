@@ -71,6 +71,7 @@ func TestPeek_LockValueReadsAsMiss(t *testing.T) {
 	inCb := make(chan struct{})
 	proceed := make(chan struct{})
 	done := make(chan struct{})
+	errCh := make(chan error, 1)
 	go func() {
 		defer close(done)
 		_, gerr := client.Get(ctx, time.Second*10, key, func(context.Context, string) (string, error) {
@@ -78,7 +79,7 @@ func TestPeek_LockValueReadsAsMiss(t *testing.T) {
 			<-proceed
 			return "real", nil
 		})
-		require.NoError(t, gerr)
+		errCh <- gerr
 	}()
 
 	<-inCb // loader is running; the key currently holds a lock value
@@ -89,4 +90,5 @@ func TestPeek_LockValueReadsAsMiss(t *testing.T) {
 
 	close(proceed)
 	<-done
+	require.NoError(t, <-errCh)
 }

@@ -110,7 +110,7 @@ func TestMap_Range(t *testing.T) {
 		return true
 	})
 
-	assert.Equalf(t, 2, len(found), "expected map to contain %d elements, got %d", 2, len(found))
+	assert.Lenf(t, found, 2, "expected map to contain %d elements, got %d", 2, len(found))
 	assert.Equalf(t, value1, found[key1], "expected map to contain key %s with value %d, got %d", key1, value1, found[key1])
 	assert.Equalf(t, value2, found[key2], "expected map to contain key %s with value %d, got %d", key2, value2, found[key2])
 }
