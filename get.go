@@ -87,7 +87,7 @@ func (rca *cacheAside) returnGetHit(
 	res cacheReadResult,
 ) (string, error) {
 	rca.emitCacheHits(1)
-	if rca.shouldRefresh(res.pttl, ttl, res.delta) {
+	if rca.refreshAfter > 0 && rca.shouldRefresh(res.pttl, ttl, res.delta) {
 		rca.triggerRefresh(ctx, ttl, key, res.raw, fn)
 	}
 	return res.val, nil
@@ -150,7 +150,11 @@ func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 		return cacheReadResult{}, fmt.Errorf("read key %q: %w", key, err)
 	}
 	plain, delta := unwrapEnvelope(val)
-	return cacheReadResult{raw: val, val: plain, pttl: resp.CachePTTL(), delta: delta}, nil
+	var pttl int64
+	if rca.refreshAfter > 0 {
+		pttl = resp.CachePTTL()
+	}
+	return cacheReadResult{raw: val, val: plain, pttl: pttl, delta: delta}, nil
 }
 
 func (rca *cacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key string, fn func(ctx context.Context, key string) (string, error)) (val string, err error) {

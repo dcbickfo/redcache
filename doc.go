@@ -56,8 +56,9 @@
 // # Values, codecs, and absence
 //
 // Values are stored through a [Codec]; keys through a [KeyCodec]. JSONCodec is
-// the typical choice; StringCodec and UnsafeBytesCodec are identity codecs (the
-// latter zero-copy, returning borrowed memory). Decode failures on read are
+// the typical choice; StringCodec and UnsafeBytesCodec are identity codecs. The
+// string path is safe to retain because strings are immutable; the bytes path is
+// zero-copy and returns borrowed memory. Decode failures on read are
 // wrapped with [ErrDecode]. Absence semantics are the caller's to own — there is
 // no ErrNotFound sentinel; cache a *T, sql.Null[T], or a domain sentinel inside
 // V to represent "not found" and avoid cache penetration.

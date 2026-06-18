@@ -287,12 +287,19 @@ A `Codec[V]` maps values to and from the stored envelope payload; a `KeyCodec[K]
 | Codec | For | Allocation behavior |
 |---|---|---|
 | `JSONCodec[V]` | any `V` (default) | Encode/Decode via `encoding/json`; returns fresh, caller-owned copies — safe to retain. |
-| `StringCodec` | `V = string` | Identity; returns a fresh copy — safe to retain. |
+| `StringCodec` | `V = string` | Identity for immutable strings; cache fast paths may skip byte copies — safe to retain. |
 | `UnsafeBytesCodec` | `V = []byte` | Zero-copy. The decoded slice **aliases borrowed library memory**; do not mutate or retain it past the call. |
 | `StringKeyCodec` | `K = string` | Identity key codec; enables the `K=string` fast path. |
 | `KeyCodecFunc[K]` | any `K` | Adapts `func(K) (string, error)` into a `KeyCodec[K]`. |
 
-The allocation tradeoff is explicit: `JSONCodec` and `StringCodec` copy, so the values they hand back are yours to keep. `UnsafeBytesCodec` skips the copy for throughput, but the `[]byte` it returns borrows the cache's internal buffer — it is only valid for the duration of the call and must not be mutated. Likewise, a slice handed to `Encode` is given to the library and must not be mutated afterward. Choose the copying codecs unless you have measured a reason not to.
+The allocation tradeoff is explicit: `JSONCodec` returns owned decoded values,
+and `StringCodec` returns immutable strings that are safe to retain while the
+cache may avoid extra byte copies on string-valued views. `UnsafeBytesCodec`
+skips the copy for throughput, but the `[]byte` it returns borrows the cache's
+internal buffer — it is only valid for the duration of the call and must not be
+mutated. Likewise, a slice handed to `Encode` is given to the library and must
+not be mutated afterward. Choose the copying codecs unless you have measured a
+reason not to.
 
 Decode failures on read are returned wrapped with `redcache.ErrDecode` (`errors.Is`-checkable). The library does not auto-evict on a decode failure; the caller decides whether to log, `Del`, or retry.
 

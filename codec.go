@@ -14,8 +14,9 @@ import "encoding/json"
 //
 // Identity codecs (UnsafeBytesCodec) alias this borrowed memory directly and so
 // trade safety for zero copies — the decoded []byte must not outlive the call or
-// be mutated. JSON/string codecs (JSONCodec, StringCodec) instead return fresh,
-// caller-owned copies and are safe to retain.
+// be mutated. JSONCodec returns owned decoded values. StringCodec returns
+// immutable strings that are safe to retain, and cache fast paths may avoid
+// extra byte copies for string-valued views.
 type Codec[V any] interface {
 	Encode(V) ([]byte, error)
 	Decode([]byte) (V, error)

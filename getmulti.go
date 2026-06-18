@@ -38,9 +38,12 @@ func (rca *cacheAside) getMulti(
 	defer chanPool.Put(chansP)
 	chans := *chansP
 
-	// triggerMultiRefresh copies into its own slice, so we can reuse the buffer.
-	needRefreshP := stringPool.GetCap(len(keys))
-	defer stringPool.Put(needRefreshP)
+	var needRefreshP *[]string
+	if rca.refreshAfter > 0 {
+		// triggerMultiRefresh copies into its own slice, so we can reuse the buffer.
+		needRefreshP = stringPool.GetCap(len(keys))
+		defer stringPool.Put(needRefreshP)
+	}
 
 	// Leader keys are rebuilt each retry: a leader created the lockEntry and
 	// drives Redis-side work; followers skip SET NX and wait on chans[i].
@@ -49,28 +52,11 @@ func (rca *cacheAside) getMulti(
 
 retry:
 	chans = chans[:len(pending)]
-	leaderKeys := (*leaderKeysP)[:0]
-	for i, key := range pending {
-		var isLeader bool
-		chans[i], isLeader = rca.register(key)
-		if isLeader {
-			leaderKeys = append(leaderKeys, key)
-		}
-	}
+	leaderKeys := rca.registerPending(pending, chans, (*leaderKeysP)[:0])
 	*leaderKeysP = leaderKeys
 
-	hitsBefore := len(res)
-	*needRefreshP = (*needRefreshP)[:0]
-	needRefreshExpected := make(map[string]string, len(pending))
-	needRefresh, err := rca.tryGetMulti(ctx, ttl, pending, res, *needRefreshP, needRefreshExpected)
-	if err != nil {
+	if err := rca.readGetMultiHits(ctx, ttl, pending, res, needRefreshP, fn); err != nil {
 		return nil, err
-	}
-	*needRefreshP = needRefresh
-	rca.emitCacheHits(len(res) - hitsBefore)
-
-	if len(needRefresh) > 0 {
-		rca.triggerMultiRefresh(ctx, ttl, needRefresh, needRefreshExpected, fn)
 	}
 
 	pending, chans = filterResolved(pending, chans, res)
@@ -85,9 +71,10 @@ retry:
 
 	if len(pending) > 0 {
 		var done bool
-		pending, chans, done, err = rca.waitForGetMulti(ctx, ttl, pending, chans, res, needRefreshP, fn)
-		if err != nil {
-			return nil, err
+		var waitErr error
+		pending, chans, done, waitErr = rca.waitForGetMulti(ctx, ttl, pending, chans, res, needRefreshP, fn)
+		if waitErr != nil {
+			return nil, waitErr
 		}
 		if done {
 			return res, nil
@@ -95,6 +82,53 @@ retry:
 		goto retry
 	}
 	return res, nil
+}
+
+func (rca *cacheAside) registerPending(pending []string, chans []<-chan struct{}, leaderKeys []string) []string {
+	for i, key := range pending {
+		var isLeader bool
+		chans[i], isLeader = rca.register(key)
+		if isLeader {
+			leaderKeys = append(leaderKeys, key)
+		}
+	}
+	return leaderKeys
+}
+
+func (rca *cacheAside) readGetMultiHits(
+	ctx context.Context,
+	ttl time.Duration,
+	pending []string,
+	res map[string]string,
+	needRefreshP *[]string,
+	fn func(ctx context.Context, keys []string) (map[string]string, error),
+) error {
+	hitsBefore := len(res)
+	needRefresh := resetNeedRefresh(needRefreshP)
+	needRefresh, needRefreshExpected, err := rca.tryGetMulti(ctx, ttl, pending, res, needRefresh)
+	if err != nil {
+		return err
+	}
+	storeNeedRefresh(needRefreshP, needRefresh)
+	rca.emitCacheHits(len(res) - hitsBefore)
+	if len(needRefresh) > 0 {
+		rca.triggerMultiRefresh(ctx, ttl, needRefresh, needRefreshExpected, fn)
+	}
+	return nil
+}
+
+func resetNeedRefresh(needRefreshP *[]string) []string {
+	if needRefreshP == nil {
+		return nil
+	}
+	*needRefreshP = (*needRefreshP)[:0]
+	return *needRefreshP
+}
+
+func storeNeedRefresh(needRefreshP *[]string, needRefresh []string) {
+	if needRefreshP != nil {
+		*needRefreshP = needRefresh
+	}
 }
 
 func (rca *cacheAside) waitForGetMulti(
@@ -131,13 +165,12 @@ func (rca *cacheAside) awaitGetMulti(
 ) (bool, error) {
 	return rca.awaitLockMultiOrPoll(ctx, chans, func() (bool, error) {
 		hitsBefore := len(res)
-		*needRefreshP = (*needRefreshP)[:0]
-		needRefreshExpected := make(map[string]string, len(pending))
-		needRefresh, err := rca.tryGetMulti(ctx, ttl, pending, res, *needRefreshP, needRefreshExpected)
+		needRefresh := resetNeedRefresh(needRefreshP)
+		needRefresh, needRefreshExpected, err := rca.tryGetMulti(ctx, ttl, pending, res, needRefresh)
 		if err != nil {
 			return false, err
 		}
-		*needRefreshP = needRefresh
+		storeNeedRefresh(needRefreshP, needRefresh)
 		hits := len(res) - hitsBefore
 		rca.emitCacheHits(hits)
 		if len(needRefresh) > 0 {
@@ -172,7 +205,11 @@ func (rca *cacheAside) runLeaderSets(
 
 // filterResolved drops keys present in resolved from pending+chans in place,
 // keeping the slices index-aligned.
-func filterResolved(pending []string, chans []<-chan struct{}, resolved map[string]string) ([]string, []<-chan struct{}) {
+func filterResolved(
+	pending []string,
+	chans []<-chan struct{},
+	resolved map[string]string,
+) ([]string, []<-chan struct{}) {
 	n := 0
 	for i, k := range pending {
 		if _, ok := resolved[k]; !ok {
@@ -187,37 +224,83 @@ func filterResolved(pending []string, chans []<-chan struct{}, resolved map[stri
 // tryGetMulti reads keys via DoMultiCache, writes non-lock values into res,
 // and appends refresh-ahead candidates onto needRefresh (returned so callers
 // can update their pool handle).
-func (rca *cacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys []string, res map[string]string, needRefresh []string, needRefreshExpected map[string]string) ([]string, error) {
+func (rca *cacheAside) tryGetMulti(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []string,
+	res map[string]string,
+	needRefresh []string,
+) ([]string, map[string]string, error) {
 	multiP := cacheableTTLPool.Get(len(keys))
 	defer cacheableTTLPool.Put(multiP)
 	multi := *multiP
+	rca.fillCacheableTTLs(multi, ttl, keys)
+	resps := rca.client.DoMultiCache(ctx, multi...)
+
+	var needRefreshExpected map[string]string
+	for i, resp := range resps {
+		var err error
+		needRefresh, needRefreshExpected, err = rca.collectGetMultiResponse(
+			ttl,
+			keys[i],
+			resp,
+			res,
+			needRefresh,
+			needRefreshExpected,
+			len(keys),
+		)
+		if err != nil {
+			return needRefresh, needRefreshExpected, err
+		}
+	}
+	return needRefresh, needRefreshExpected, nil
+}
+
+func (rca *cacheAside) fillCacheableTTLs(
+	dst []rueidis.CacheableTTL,
+	ttl time.Duration,
+	keys []string,
+) {
 	for i, key := range keys {
-		multi[i] = rueidis.CacheableTTL{
+		dst[i] = rueidis.CacheableTTL{
 			Cmd: rca.client.B().Get().Key(key).Cache(),
 			TTL: ttl,
 		}
 	}
-	resps := rca.client.DoMultiCache(ctx, multi...)
+}
 
-	for i, resp := range resps {
-		val, err := resp.ToString()
-		if rueidis.IsRedisNil(err) {
-			continue
-		}
-		if err != nil {
-			rca.emitRedisError("read")
-			return needRefresh, fmt.Errorf("key %q: %w", keys[i], err)
-		}
-		if !strings.HasPrefix(val, rca.lockPrefix) {
-			plain, delta := unwrapEnvelope(val)
-			res[keys[i]] = plain
-			if rca.shouldRefresh(resp.CachePTTL(), ttl, delta) {
-				needRefresh = append(needRefresh, keys[i])
-				needRefreshExpected[keys[i]] = val
-			}
-		}
+func (rca *cacheAside) collectGetMultiResponse(
+	ttl time.Duration,
+	key string,
+	resp rueidis.RedisResult,
+	res map[string]string,
+	needRefresh []string,
+	needRefreshExpected map[string]string,
+	keyCount int,
+) ([]string, map[string]string, error) {
+	val, err := resp.ToString()
+	if rueidis.IsRedisNil(err) {
+		return needRefresh, needRefreshExpected, nil
 	}
-	return needRefresh, nil
+	if err != nil {
+		rca.emitRedisError("read")
+		return needRefresh, needRefreshExpected, fmt.Errorf("key %q: %w", key, err)
+	}
+	if strings.HasPrefix(val, rca.lockPrefix) {
+		return needRefresh, needRefreshExpected, nil
+	}
+
+	plain, delta := unwrapEnvelope(val)
+	res[key] = plain
+	if rca.refreshAfter == 0 || !rca.shouldRefresh(resp.CachePTTL(), ttl, delta) {
+		return needRefresh, needRefreshExpected, nil
+	}
+	if needRefreshExpected == nil {
+		needRefreshExpected = make(map[string]string, keyCount)
+	}
+	needRefresh = append(needRefresh, key)
+	needRefreshExpected[key] = val
+	return needRefresh, needRefreshExpected, nil
 }
 
 // trySetMultiKeyFn locks each pending key, calls fn, writes the values, and

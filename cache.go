@@ -98,10 +98,11 @@ func New[K comparable, V any](c *Conn, keyCodec KeyCodec[K], valCodec Codec[V]) 
 		panic("redcache: keyCodec and valCodec must not be nil")
 	}
 	return &cache[K, V]{
-		core:        c.core,
-		keyCodec:    keyCodec,
-		valCodec:    valCodec,
-		keyIsString: isStringKeyCodec[K](keyCodec),
+		core:          c.core,
+		keyCodec:      keyCodec,
+		valCodec:      valCodec,
+		keyIsString:   isStringKeyCodec[K](keyCodec),
+		valueIsString: isStringValueCodec[V](valCodec),
 	}
 }
 
@@ -126,6 +127,9 @@ type cache[K comparable, V any] struct {
 	// keyIsString is set when keyCodec is StringKeyCodec; multi-key paths then
 	// alias []K↔[]string instead of building a reverse-lookup map.
 	keyIsString bool
+	// valueIsString is set when valCodec is StringCodec; value encode/decode
+	// can then return the immutable string payload directly without byte copies.
+	valueIsString bool
 }
 
 var _ Cache[string, []byte] = (*cache[string, []byte])(nil)
@@ -142,6 +146,31 @@ func validateTTL(ttl time.Duration) error {
 func isStringKeyCodec[K comparable](keyCodec KeyCodec[K]) bool {
 	_, ok := any(keyCodec).(StringKeyCodec)
 	return ok
+}
+
+func isStringValueCodec[V any](valCodec Codec[V]) bool {
+	_, codecOK := any(valCodec).(StringCodec)
+	var zero V
+	_, valueOK := any(zero).(string)
+	return codecOK && valueOK
+}
+
+func (c *cache[K, V]) encodeValue(v V) (string, error) {
+	if c.valueIsString {
+		return any(v).(string), nil
+	}
+	b, err := c.valCodec.Encode(v)
+	if err != nil {
+		return "", err
+	}
+	return bytesToString(b), nil
+}
+
+func (c *cache[K, V]) decodeValue(payload string) (V, error) {
+	if c.valueIsString {
+		return any(payload).(V), nil
+	}
+	return c.valCodec.Decode(stringToBytes(payload))
 }
 
 // Get returns the cached value for k, calling fn on a miss. Decode errors on
@@ -166,17 +195,17 @@ func (c *cache[K, V]) Get(
 		if ferr != nil {
 			return "", ferr
 		}
-		b, eerr := c.valCodec.Encode(v)
+		enc, eerr := c.encodeValue(v)
 		if eerr != nil {
 			return "", fmt.Errorf("redcache: encode value: %w", eerr)
 		}
-		return bytesToString(b), nil
+		return enc, nil
 	})
 	if err != nil {
 		return zero, err
 	}
 
-	v, derr := c.valCodec.Decode(stringToBytes(raw))
+	v, derr := c.decodeValue(raw)
 	if derr != nil {
 		return zero, fmt.Errorf("redcache: decode key %q: %w: %w", encKey, ErrDecode, derr)
 	}
@@ -205,7 +234,7 @@ func (c *cache[K, V]) Peek(ctx context.Context, ttl time.Duration, k K) (V, bool
 		return zero, false, nil
 	}
 
-	v, derr := c.valCodec.Decode(stringToBytes(raw))
+	v, derr := c.decodeValue(raw)
 	if derr != nil {
 		return zero, false, fmt.Errorf("redcache: decode key %q: %w: %w", encKey, ErrDecode, derr)
 	}
@@ -247,20 +276,25 @@ func (c *cache[K, V]) GetMulti(
 	if len(keys) == 0 {
 		return map[K]V{}, nil
 	}
+	dst := make(map[K]V, len(keys))
 	if c.keyIsString {
-		return c.getMultiString(ctx, ttl, keys, fn)
+		return c.getMultiStringInto(ctx, ttl, keys, nil, dst, fn)
 	}
-	return c.getMultiKeyed(ctx, ttl, keys, fn)
+	return c.getMultiKeyedInto(ctx, ttl, keys, dst, fn)
 }
 
 // K=string fast path: aliases keys to []string, skips the reverse-lookup map.
-func (c *cache[K, V]) getMultiString(
+func (c *cache[K, V]) getMultiStringInto(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []K,
+	encKeys []string,
+	dst map[K]V,
 	fn func(ctx context.Context, missing []K) (map[K]V, error),
 ) (map[K]V, error) {
-	encKeys := asStringSlice(keys)
+	if encKeys == nil {
+		encKeys = asStringSlice(keys)
+	}
 
 	raw, err := c.core.getMulti(ctx, ttl, encKeys, func(ctx context.Context, missingEnc []string) (map[string]string, error) {
 		result, ferr := fn(ctx, asKSlice[K](missingEnc))
@@ -273,21 +307,21 @@ func (c *cache[K, V]) getMultiString(
 		return nil, err
 	}
 
-	out := make(map[K]V, len(raw))
 	for s, payload := range raw {
-		v, derr := c.valCodec.Decode(stringToBytes(payload))
+		v, derr := c.decodeValue(payload)
 		if derr != nil {
 			return nil, fmt.Errorf("redcache: decode key %q: %w: %w", s, ErrDecode, derr)
 		}
-		out[asK[K](s)] = v
+		dst[asK[K](s)] = v
 	}
-	return out, nil
+	return dst, nil
 }
 
-func (c *cache[K, V]) getMultiKeyed(
+func (c *cache[K, V]) getMultiKeyedInto(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []K,
+	dst map[K]V,
 	fn func(ctx context.Context, missing []K) (map[K]V, error),
 ) (map[K]V, error) {
 	encKeys := make([]string, len(keys))
@@ -300,7 +334,17 @@ func (c *cache[K, V]) getMultiKeyed(
 		encKeys[i] = s
 		byEnc[s] = k
 	}
+	return c.getMultiEncodedInto(ctx, ttl, encKeys, byEnc, dst, fn)
+}
 
+func (c *cache[K, V]) getMultiEncodedInto(
+	ctx context.Context,
+	ttl time.Duration,
+	encKeys []string,
+	byEnc map[string]K,
+	dst map[K]V,
+	fn func(ctx context.Context, missing []K) (map[K]V, error),
+) (map[K]V, error) {
 	raw, err := c.core.getMulti(ctx, ttl, encKeys, func(ctx context.Context, missingEnc []string) (map[string]string, error) {
 		missingK := make([]K, len(missingEnc))
 		for i, s := range missingEnc {
@@ -316,19 +360,18 @@ func (c *cache[K, V]) getMultiKeyed(
 		return nil, err
 	}
 
-	out := make(map[K]V, len(raw))
 	for s, payload := range raw {
 		k, ok := byEnc[s]
 		if !ok {
 			continue
 		}
-		v, derr := c.valCodec.Decode(stringToBytes(payload))
+		v, derr := c.decodeValue(payload)
 		if derr != nil {
 			return nil, fmt.Errorf("redcache: decode key %q: %w: %w", s, ErrDecode, derr)
 		}
-		out[k] = v
+		dst[k] = v
 	}
-	return out, nil
+	return dst, nil
 }
 
 // DelMulti removes keys, triggering invalidation.
@@ -386,11 +429,11 @@ func (c *cache[K, V]) encodeMultiResult(result map[K]V) (map[string]string, erro
 			}
 			s = ks
 		}
-		b, eerr := c.valCodec.Encode(v)
+		enc, eerr := c.encodeValue(v)
 		if eerr != nil {
 			return nil, fmt.Errorf("redcache: encode value for key %q: %w", s, eerr)
 		}
-		out[s] = bytesToString(b)
+		out[s] = enc
 	}
 	return out, nil
 }
@@ -414,11 +457,11 @@ func (c *cache[K, V]) Set(
 		if ferr != nil {
 			return "", ferr
 		}
-		b, eerr := c.valCodec.Encode(v)
+		enc, eerr := c.encodeValue(v)
 		if eerr != nil {
 			return "", fmt.Errorf("redcache: encode value: %w", eerr)
 		}
-		return bytesToString(b), nil
+		return enc, nil
 	})
 }
 
@@ -431,11 +474,11 @@ func (c *cache[K, V]) ForceSet(ctx context.Context, ttl time.Duration, k K, v V)
 	if err != nil {
 		return fmt.Errorf("redcache: encode key: %w", err)
 	}
-	b, err := c.valCodec.Encode(v)
+	enc, err := c.encodeValue(v)
 	if err != nil {
 		return fmt.Errorf("redcache: encode value: %w", err)
 	}
-	return c.core.forceSet(ctx, ttl, encKey, bytesToString(b))
+	return c.core.forceSet(ctx, ttl, encKey, enc)
 }
 
 // SetMulti populates the cache via fn under write locks. Partial failures
@@ -552,12 +595,12 @@ func (c *cache[K, V]) forceSetMultiString(
 	failed := make(map[K]error)
 	for k, v := range values {
 		s := asString(k)
-		b, err := c.valCodec.Encode(v)
+		enc, err := c.encodeValue(v)
 		if err != nil {
 			failed[k] = fmt.Errorf("redcache: encode value: %w", err)
 			continue
 		}
-		encVals[s] = bytesToString(b)
+		encVals[s] = enc
 	}
 	if len(encVals) == 0 {
 		return newBatchKeyError(failed, nil)
@@ -584,12 +627,12 @@ func (c *cache[K, V]) forceSetMultiKeyed(
 			failed[k] = fmt.Errorf("redcache: encode key: %w", err)
 			continue
 		}
-		b, err := c.valCodec.Encode(v)
+		enc, err := c.encodeValue(v)
 		if err != nil {
 			failed[k] = fmt.Errorf("redcache: encode value: %w", err)
 			continue
 		}
-		encVals[s] = bytesToString(b)
+		encVals[s] = enc
 		byEnc[s] = k
 	}
 	if len(encVals) == 0 {
