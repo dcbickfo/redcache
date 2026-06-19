@@ -405,4 +405,15 @@ func TestTyped_ForceSetMulti_IntKeys_DuplicateEncodedKeyFailure(t *testing.T) {
 	if !bke.HasFailures() {
 		t.Fatalf("expected duplicate encoded key failure, got %+v", bke)
 	}
+	if !bke.HasError(1) || !bke.HasError(2) {
+		t.Fatalf("both colliding keys should fail; got %+v", bke.Failed)
+	}
+	if len(bke.Succeeded) != 0 {
+		t.Fatalf("duplicate collision should abort before any key succeeds; got %+v", bke.Succeeded)
+	}
+
+	_, err = conn.Client().Do(context.Background(), conn.Client().B().Get().Key(encoded).Build()).ToString()
+	if !rueidis.IsRedisNil(err) {
+		t.Fatalf("colliding Redis key was written; err=%v", err)
+	}
 }

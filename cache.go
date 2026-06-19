@@ -626,17 +626,25 @@ func (c *cache[K, V]) forceSetMultiKeyed(
 ) error {
 	encVals := make(map[string]string, len(values))
 	failed := make(map[K]error)
+	seen := make(map[string]K, len(values))
 	byEnc := make(map[string]K, len(values))
+	duplicate := false
 	for k, v := range values {
 		s, err := c.keyCodec.EncodeKey(k)
 		if err != nil {
 			failed[k] = fmt.Errorf("redcache: encode key: %w", err)
 			continue
 		}
-		if prev, ok := byEnc[s]; ok && prev != k {
-			failed[k] = duplicateEncodedKeyError(s, prev, k)
+		if prev, ok := seen[s]; ok && prev != k {
+			err := duplicateEncodedKeyError(s, prev, k)
+			failed[prev] = err
+			failed[k] = err
+			delete(encVals, s)
+			delete(byEnc, s)
+			duplicate = true
 			continue
 		}
+		seen[s] = k
 		enc, err := c.encodeValue(v)
 		if err != nil {
 			failed[k] = fmt.Errorf("redcache: encode value: %w", err)
@@ -644,6 +652,9 @@ func (c *cache[K, V]) forceSetMultiKeyed(
 		}
 		encVals[s] = enc
 		byEnc[s] = k
+	}
+	if duplicate {
+		return newBatchKeyError(failed, nil)
 	}
 	if len(encVals) == 0 {
 		return newBatchKeyError(failed, nil)
