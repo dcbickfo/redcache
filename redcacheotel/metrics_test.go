@@ -38,29 +38,99 @@ func collect(t *testing.T, record func(m *Metrics)) map[string]metricdata.Metric
 	return out
 }
 
-func TestCounterRecords(t *testing.T) {
-	got := collect(t, func(m *Metrics) {
-		m.CacheHits(3)
-		m.CacheHits(2)
-	})
+func TestCountersRecord(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		instrument string
+		record     func(*Metrics)
+		want       int64
+	}{
+		{
+			name:       "cache hits",
+			instrument: "cache.hits",
+			record: func(m *Metrics) {
+				m.CacheHits(3)
+				m.CacheHits(2)
+			},
+			want: 5,
+		},
+		{
+			name:       "cache misses",
+			instrument: "cache.misses",
+			record:     func(m *Metrics) { m.CacheMisses(4) },
+			want:       4,
+		},
+		{
+			name:       "lock contended",
+			instrument: "lock.contended",
+			record:     func(m *Metrics) { m.LockContended(3) },
+			want:       3,
+		},
+		{
+			name:       "loader errors",
+			instrument: "loader.errors",
+			record:     func(m *Metrics) { m.LoaderErrors(7) },
+			want:       7,
+		},
+		{
+			name:       "refresh triggered",
+			instrument: "refresh.triggered",
+			record:     func(m *Metrics) { m.RefreshTriggered(2) },
+			want:       2,
+		},
+		{
+			name:       "refresh skipped",
+			instrument: "refresh.skipped",
+			record:     func(m *Metrics) { m.RefreshSkipped(2) },
+			want:       2,
+		},
+		{
+			name:       "refresh dropped",
+			instrument: "refresh.dropped",
+			record:     func(m *Metrics) { m.RefreshDropped(2) },
+			want:       2,
+		},
+		{
+			name:       "refresh errors",
+			instrument: "refresh.errors",
+			record: func(m *Metrics) {
+				m.RefreshError("user:1")
+				m.RefreshError("user:2")
+			},
+			want: 2,
+		},
+		{
+			name:       "refresh panicked",
+			instrument: "refresh.panicked",
+			record: func(m *Metrics) {
+				m.RefreshPanicked("user:1")
+				m.RefreshPanicked("user:2")
+			},
+			want: 2,
+		},
+		{
+			name:       "invalidation errors",
+			instrument: "invalidation.errors",
+			record: func(m *Metrics) {
+				m.InvalidationError()
+				m.InvalidationError()
+			},
+			want: 2,
+		},
+	}
 
-	md, ok := got["cache.hits"]
-	if !ok {
-		t.Fatalf("cache.hits not recorded; got %v", keys(got))
-	}
-	sum, ok := md.Data.(metricdata.Sum[int64])
-	if !ok {
-		t.Fatalf("cache.hits is %T, want metricdata.Sum[int64]", md.Data)
-	}
-	if len(sum.DataPoints) != 1 {
-		t.Fatalf("cache.hits: got %d data points, want 1", len(sum.DataPoints))
-	}
-	if v := sum.DataPoints[0].Value; v != 5 {
-		t.Fatalf("cache.hits value = %d, want 5", v)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := collect(t, tt.record)
+			assertCounterValue(t, got, tt.instrument, tt.want)
+		})
 	}
 }
 
 func TestRedisErrorAttribute(t *testing.T) {
+	t.Parallel()
 	got := collect(t, func(m *Metrics) {
 		m.RedisError("read")
 		m.RedisError("read")
@@ -90,6 +160,7 @@ func TestRedisErrorAttribute(t *testing.T) {
 }
 
 func TestLockLostNoKeyLabel(t *testing.T) {
+	t.Parallel()
 	got := collect(t, func(m *Metrics) {
 		m.LockLost("user:1")
 		m.LockLost("user:2")
@@ -110,30 +181,58 @@ func TestLockLostNoKeyLabel(t *testing.T) {
 }
 
 func TestHistogramRecords(t *testing.T) {
+	t.Parallel()
 	got := collect(t, func(m *Metrics) {
+		m.LockWaitDuration(20 * time.Millisecond)
 		m.LoaderDuration(150 * time.Millisecond)
 	})
 
-	md, ok := got["loader.duration"]
+	assertHistogramValue(t, got, "lock.wait.duration", 0.02)
+	assertHistogramValue(t, got, "loader.duration", 0.15)
+}
+
+func assertCounterValue(t *testing.T, got map[string]metricdata.Metrics, name string, want int64) {
+	t.Helper()
+
+	md, ok := got[name]
 	if !ok {
-		t.Fatalf("loader.duration not recorded; got %v", keys(got))
+		t.Fatalf("%s not recorded; got %v", name, keys(got))
+	}
+	sum, ok := md.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("%s is %T, want metricdata.Sum[int64]", name, md.Data)
+	}
+	if len(sum.DataPoints) != 1 {
+		t.Fatalf("%s: got %d data points, want 1", name, len(sum.DataPoints))
+	}
+	if v := sum.DataPoints[0].Value; v != want {
+		t.Fatalf("%s value = %d, want %d", name, v, want)
+	}
+}
+
+func assertHistogramValue(t *testing.T, got map[string]metricdata.Metrics, name string, want float64) {
+	t.Helper()
+
+	md, ok := got[name]
+	if !ok {
+		t.Fatalf("%s not recorded; got %v", name, keys(got))
 	}
 	if md.Unit != "s" {
-		t.Fatalf("loader.duration unit = %q, want %q", md.Unit, "s")
+		t.Fatalf("%s unit = %q, want %q", name, md.Unit, "s")
 	}
 	h, ok := md.Data.(metricdata.Histogram[float64])
 	if !ok {
-		t.Fatalf("loader.duration is %T, want metricdata.Histogram[float64]", md.Data)
+		t.Fatalf("%s is %T, want metricdata.Histogram[float64]", name, md.Data)
 	}
 	if len(h.DataPoints) != 1 {
-		t.Fatalf("loader.duration: got %d data points, want 1", len(h.DataPoints))
+		t.Fatalf("%s: got %d data points, want 1", name, len(h.DataPoints))
 	}
 	dp := h.DataPoints[0]
 	if dp.Count != 1 {
-		t.Fatalf("loader.duration count = %d, want 1", dp.Count)
+		t.Fatalf("%s count = %d, want 1", name, dp.Count)
 	}
-	if dp.Sum < 0.149 || dp.Sum > 0.151 {
-		t.Fatalf("loader.duration sum = %v seconds, want ~0.15", dp.Sum)
+	if dp.Sum < want-0.001 || dp.Sum > want+0.001 {
+		t.Fatalf("%s sum = %v seconds, want ~%v", name, dp.Sum, want)
 	}
 }
 

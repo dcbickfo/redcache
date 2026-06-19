@@ -7,6 +7,7 @@
 <!-- How did you verify it? -->
 
 - [ ] `go test -race ./...` passes (with Redis running locally)
+- [ ] `make cover-check` passes
 - [ ] `golangci-lint run` is clean
 
 ## Checklist

@@ -2,6 +2,7 @@ package redcache
 
 import (
 	"testing"
+	"time"
 
 	"github.com/redis/rueidis"
 )
@@ -15,6 +16,10 @@ func TestNoopMetrics_AllMethodsSafe(t *testing.T) {
 	m.CacheHits(1)
 	m.CacheMisses(1)
 	m.LockContended(1)
+	m.LockWaitDuration(time.Millisecond)
+	m.LoaderDuration(time.Millisecond)
+	m.LoaderErrors(1)
+	m.RedisError("read")
 	m.LockLost("x")
 	m.RefreshTriggered(1)
 	m.RefreshSkipped(1)

@@ -34,10 +34,8 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache: true
           cache-dependency-path: go.sum
-      - name: Test with Go
-        run: go test -race -count=1 -coverprofile=coverage.out -json ./... > TestResults.json
-      - name: Coverage summary
-        run: go tool cover -func=coverage.out
+      - name: Run race tests
+        run: go test -race -count=1 -json ./... > TestResults.json
       - name: Upload Go test results
         if: always()
         uses: actions/upload-artifact@v7
@@ -45,14 +43,35 @@ jobs:
           name: Go-results-${{ matrix.go-version }}
           path: TestResults.json
           if-no-files-found: ignore
+
+  coverage:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        # Pinned to match the tag used in docker-compose.yml for local dev.
+        image: redis:7.2.4-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Check coverage
+        run: make cover-check GO=go
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out
       - name: Upload coverage report
         uses: actions/upload-artifact@v7
         with:
-          name: coverage-report-${{ matrix.go-version }}
+          name: coverage-report
           path: coverage.out
       - name: Upload coverage to Codecov
-        # Upload from a single matrix leg so coverage is not double-counted.
-        if: matrix.go-version == '1.25.x'
         uses: codecov/codecov-action@v7
         with:
           files: coverage.out

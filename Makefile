@@ -6,6 +6,8 @@ ASDF          ?= asdf
 GO            ?= $(ASDF) exec go
 GOLANGCI_LINT ?= $(ASDF) exec golangci-lint
 PKG           ?= ./...
+COVERAGE_PROFILE ?= coverage.out
+MIN_COVERAGE ?= 83.0
 
 .DEFAULT_GOAL := help
 
@@ -44,8 +46,20 @@ bench: ## Run benchmarks only (no tests)
 
 .PHONY: cover
 cover: ## Run tests with coverage and print the total
-	$(GO) test -coverprofile=coverage.out $(PKG)
-	$(GO) tool cover -func=coverage.out | tail -1
+	$(GO) test -coverprofile=$(COVERAGE_PROFILE) $(PKG)
+	$(GO) tool cover -func=$(COVERAGE_PROFILE) | tail -1
+
+.PHONY: cover-check
+cover-check: ## Run coverage and fail below MIN_COVERAGE
+	$(GO) test -coverprofile=$(COVERAGE_PROFILE) $(PKG)
+	@total="$$( $(GO) tool cover -func=$(COVERAGE_PROFILE) | awk '/^total:/ { sub(/%/, "", $$3); print $$3 }' )"; \
+	awk -v total="$$total" -v min="$(MIN_COVERAGE)" 'BEGIN { \
+		if (total+0 < min+0) { \
+			printf "coverage %.1f%% is below %.1f%%\n", total, min; \
+			exit 1; \
+		} \
+		printf "coverage %.1f%% >= %.1f%%\n", total, min; \
+	}'
 
 .PHONY: vet
 vet: ## Run go vet
@@ -73,9 +87,9 @@ redis-down: ## Stop Redis
 	docker compose down
 
 .PHONY: check
-check: build vet lint test ## Full gate: build, vet, lint, test
+check: build lint cover-check ## Full gate: build, lint, coverage-backed tests
 
 .PHONY: clean
 clean: ## Remove build and coverage artifacts
 	$(GO) clean
-	rm -f coverage.out
+	rm -f $(COVERAGE_PROFILE)

@@ -107,3 +107,44 @@ func TestNewBatchKeyError_ReturnsErrorWhenFailures(t *testing.T) {
 	assert.Equal(t, failed, bke.Failed)
 	assert.Equal(t, succeeded, bke.Succeeded)
 }
+
+func TestMergeForceSetResultString(t *testing.T) {
+	t.Parallel()
+	values := map[string]string{"a": "1", "b": "2"}
+
+	t.Run("all encoded values succeed when core succeeds", func(t *testing.T) {
+		t.Parallel()
+		failed := map[string]error{}
+		succeeded := mergeForceSetResultString[string](nil, values, failed)
+
+		assert.Empty(t, failed)
+		assert.ElementsMatch(t, []string{"a", "b"}, succeeded)
+	})
+
+	t.Run("non batch error fails every encoded value", func(t *testing.T) {
+		t.Parallel()
+		wantErr := errors.New("redis failed")
+		failed := map[string]error{}
+		succeeded := mergeForceSetResultString[string](wantErr, values, failed)
+
+		assert.Empty(t, succeeded)
+		require.ErrorIs(t, failed["a"], wantErr)
+		require.ErrorIs(t, failed["b"], wantErr)
+	})
+
+	t.Run("batch error preserves partial success", func(t *testing.T) {
+		t.Parallel()
+		wantErr := errors.New("lock lost")
+		failed := map[string]error{}
+		err := &batchError{
+			Failed:    map[string]error{"b": wantErr},
+			Succeeded: []string{"a"},
+		}
+
+		succeeded := mergeForceSetResultString[string](err, values, failed)
+
+		assert.ElementsMatch(t, []string{"a"}, succeeded)
+		require.ErrorIs(t, failed["b"], wantErr)
+		assert.NotContains(t, failed, "a")
+	})
+}

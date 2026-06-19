@@ -1523,11 +1523,11 @@ func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
 
-	open := func(t *testing.T) (redcache.Cache[string, string], *redcache.Conn) {
+	open := func(t *testing.T, lockTTL time.Duration) (redcache.Cache[string, string], *redcache.Conn) {
 		t.Helper()
 		conn, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithLockTTL(150*time.Millisecond),
+			redcache.WithLockTTL(lockTTL),
 			redcache.WithRefreshAfterFraction(0.5),
 			redcache.WithRefreshBeta(0),
 			redcache.WithRefreshWorkers(1),
@@ -1538,9 +1538,9 @@ func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
 		return redcache.NewString[string](conn, redcache.StringCodec{}), conn
 	}
 
-	client1, conn1 := open(t)
-	client2, conn2 := open(t)
-	client3, conn3 := open(t)
+	client1, conn1 := open(t, 150*time.Millisecond)
+	client2, conn2 := open(t, 2*time.Second)
+	client3, conn3 := open(t, 2*time.Second)
 	t.Cleanup(conn1.Close)
 	t.Cleanup(conn2.Close)
 	t.Cleanup(conn3.Close)
@@ -1838,6 +1838,27 @@ func TestOpen_Validation(t *testing.T) {
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "100ms")
+	})
+
+	t.Run("client builder receives tracking options", func(t *testing.T) {
+		t.Parallel()
+		wantErr := errors.New("builder failed")
+		called := false
+		_, err := redcache.Open(
+			rueidis.ClientOption{InitAddress: addr},
+			redcache.WithClientBuilder(func(option rueidis.ClientOption) (rueidis.Client, error) {
+				called = true
+				if option.PipelineMultiplex != -1 {
+					t.Fatalf("PipelineMultiplex = %d, want -1", option.PipelineMultiplex)
+				}
+				if option.OnInvalidations == nil {
+					t.Fatal("OnInvalidations was not configured")
+				}
+				return nil, wantErr
+			}),
+		)
+		require.ErrorIs(t, err, wantErr)
+		require.True(t, called, "custom client builder was not called")
 	})
 }
 

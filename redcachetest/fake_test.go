@@ -139,12 +139,13 @@ func TestDelMulti_Evicts(t *testing.T) {
 }
 
 func TestTouch_ExtendsExpiry(t *testing.T) {
-	f := redcachetest.New[string, int]()
+	clk := &redcachetest.Clock{}
+	f := redcachetest.NewWithClock[string, int](clk)
 	require.NoError(t, f.ForceSet(context.Background(), 20*time.Millisecond, "k", 8))
 
-	time.Sleep(10 * time.Millisecond)
+	clk.Advance(10 * time.Millisecond)
 	require.NoError(t, f.Touch(context.Background(), time.Minute, "k"))
-	time.Sleep(20 * time.Millisecond) // past the original deadline, within the new one.
+	clk.Advance(20 * time.Millisecond) // past the original deadline, within the new one.
 
 	var ran atomic.Bool
 	got, err := f.Get(context.Background(), time.Minute, "k", func(context.Context, string) (int, error) {
@@ -169,12 +170,13 @@ func TestTouch_NoOpOnMissingKey(t *testing.T) {
 }
 
 func TestTouchMulti_ExtendsPresentKeysOnly(t *testing.T) {
-	f := redcachetest.New[string, int]()
+	clk := &redcachetest.Clock{}
+	f := redcachetest.NewWithClock[string, int](clk)
 	require.NoError(t, f.ForceSet(context.Background(), 20*time.Millisecond, "live", 1))
 
-	time.Sleep(10 * time.Millisecond)
+	clk.Advance(10 * time.Millisecond)
 	require.NoError(t, f.TouchMulti(context.Background(), time.Minute, []string{"live", "absent"}))
-	time.Sleep(20 * time.Millisecond)
+	clk.Advance(20 * time.Millisecond)
 
 	// "live" survives.
 	var liveRan atomic.Bool

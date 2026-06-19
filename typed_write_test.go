@@ -3,6 +3,7 @@ package redcache_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -101,6 +102,42 @@ func (badEncodeCodec) Encode(b badEncode) ([]byte, error) {
 }
 func (badEncodeCodec) Decode(b []byte) (badEncode, error) { return badEncode{}, nil }
 
+type maybeString struct {
+	val string
+	err error
+}
+
+type maybeStringCodec struct{}
+
+func (maybeStringCodec) Encode(v maybeString) ([]byte, error) {
+	if v.err != nil {
+		return nil, v.err
+	}
+	return []byte(v.val), nil
+}
+
+func (maybeStringCodec) Decode(b []byte) (maybeString, error) {
+	return maybeString{val: string(b)}, nil
+}
+
+func newIntKeyCache[V any](t *testing.T, valCodec redcache.Codec[V]) redcache.Cache[int, V] {
+	t.Helper()
+	skipIfNoRedis(t)
+	prefix := uuid.NewString() + ":"
+	codec := redcache.KeyCodecFunc[int](func(i int) (string, error) {
+		return prefix + strconv.Itoa(i), nil
+	})
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+		redcache.WithLockTTL(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("open conn: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	return redcache.New[int, V](conn, codec, valCodec)
+}
+
 func TestTyped_SetMulti_PopulatesAll(t *testing.T) {
 	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	prefix := uuid.NewString() + ":"
@@ -128,6 +165,36 @@ func TestTyped_SetMulti_PopulatesAll(t *testing.T) {
 		t.Fatalf("get after setmulti: %v", err)
 	}
 	if len(got) != 2 || got[keys[0]].Name != keys[0] || got[keys[1]].Name != keys[1] {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestTyped_SetMulti_IntKeys_PopulatesAll(t *testing.T) {
+	users := newIntKeyCache[tUser](t, redcache.JSONCodec[tUser]{})
+	keys := []int{101, 202}
+
+	if err := users.SetMulti(context.Background(), time.Second, keys,
+		func(_ context.Context, keys []int) (map[int]tUser, error) {
+			out := make(map[int]tUser, len(keys))
+			for _, k := range keys {
+				out[k] = tUser{ID: k, Name: strconv.Itoa(k)}
+			}
+			return out, nil
+		},
+	); err != nil {
+		t.Fatalf("setmulti int keys: %v", err)
+	}
+
+	got, err := users.GetMulti(context.Background(), time.Second, keys,
+		func(context.Context, []int) (map[int]tUser, error) {
+			t.Fatal("loader should not run after SetMulti with int keys")
+			return nil, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("get after int-key setmulti: %v", err)
+	}
+	if got[101].Name != "101" || got[202].Name != "202" {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -167,6 +234,37 @@ func TestTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
 	}
 }
 
+func TestTyped_SetMulti_IntKeys_BatchKeyErrorPreservesTypedKey(t *testing.T) {
+	users := newIntKeyCache[tUser](t, redcache.JSONCodec[tUser]{})
+	keys := []int{1, 2}
+
+	err := users.SetMulti(context.Background(), time.Second, keys,
+		func(_ context.Context, gotKeys []int) (map[int]tUser, error) {
+			if serr := users.ForceSet(context.Background(), time.Second, 2, tUser{Name: "stolen"}); serr != nil {
+				t.Fatalf("steal force set: %v", serr)
+			}
+			out := make(map[int]tUser, len(gotKeys))
+			for _, k := range gotKeys {
+				out[k] = tUser{ID: k, Name: strconv.Itoa(k)}
+			}
+			return out, nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected partial failure")
+	}
+	var bke *redcache.BatchKeyError[int]
+	if !errors.As(err, &bke) {
+		t.Fatalf("expected *BatchKeyError[int], got %T: %v", err, err)
+	}
+	if !bke.HasError(2) {
+		t.Fatalf("expected int key 2 to fail; got %+v", bke.Failed)
+	}
+	if !errors.Is(bke.ErrorFor(2), redcache.ErrLockLost) {
+		t.Fatalf("key 2 error = %v, want ErrLockLost", bke.ErrorFor(2))
+	}
+}
+
 func TestTyped_ForceSetMulti_OverwritesAll(t *testing.T) {
 	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	prefix := uuid.NewString() + ":"
@@ -191,5 +289,89 @@ func TestTyped_ForceSetMulti_OverwritesAll(t *testing.T) {
 	}
 	if len(got) != 2 || got[prefix+"a"].ID != 1 || got[prefix+"b"].ID != 2 {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestTyped_ForceSetMulti_IntKeys_PartialEncodeFailure(t *testing.T) {
+	cache := newIntKeyCache[maybeString](t, maybeStringCodec{})
+	wantErr := errors.New("encode failed")
+
+	err := cache.ForceSetMulti(context.Background(), time.Second, map[int]maybeString{
+		1: {val: "one"},
+		2: {err: wantErr},
+	})
+	if err == nil {
+		t.Fatal("expected partial encode failure")
+	}
+	var bke *redcache.BatchKeyError[int]
+	if !errors.As(err, &bke) {
+		t.Fatalf("expected *BatchKeyError[int], got %T: %v", err, err)
+	}
+	if !errors.Is(bke.ErrorFor(2), wantErr) {
+		t.Fatalf("key 2 error = %v, want %v", bke.ErrorFor(2), wantErr)
+	}
+	if bke.HasError(1) {
+		t.Fatalf("key 1 should have succeeded; failures: %+v", bke.Failed)
+	}
+
+	got, err := cache.Get(context.Background(), time.Second, 1, func(context.Context, int) (maybeString, error) {
+		t.Fatal("loader should not run for successfully encoded key")
+		return maybeString{}, nil
+	})
+	if err != nil {
+		t.Fatalf("get successful key after partial ForceSetMulti: %v", err)
+	}
+	if got.val != "one" {
+		t.Fatalf("key 1 value = %q, want one", got.val)
+	}
+}
+
+func TestTyped_ForceSetMulti_IntKeys_PartialKeyEncodeFailure(t *testing.T) {
+	skipIfNoRedis(t)
+	wantErr := errors.New("key encode failed")
+	prefix := uuid.NewString() + ":"
+	codec := redcache.KeyCodecFunc[int](func(i int) (string, error) {
+		if i == 2 {
+			return "", wantErr
+		}
+		return prefix + strconv.Itoa(i), nil
+	})
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+		redcache.WithLockTTL(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("open conn: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	cache := redcache.New[int, string](conn, codec, redcache.StringCodec{})
+
+	err = cache.ForceSetMulti(context.Background(), time.Second, map[int]string{
+		1: "one",
+		2: "two",
+	})
+	if err == nil {
+		t.Fatal("expected partial key encode failure")
+	}
+	var bke *redcache.BatchKeyError[int]
+	if !errors.As(err, &bke) {
+		t.Fatalf("expected *BatchKeyError[int], got %T: %v", err, err)
+	}
+	if !errors.Is(bke.ErrorFor(2), wantErr) {
+		t.Fatalf("key 2 error = %v, want %v", bke.ErrorFor(2), wantErr)
+	}
+	if bke.HasError(1) {
+		t.Fatalf("key 1 should have succeeded; failures: %+v", bke.Failed)
+	}
+
+	got, err := cache.Get(context.Background(), time.Second, 1, func(context.Context, int) (string, error) {
+		t.Fatal("loader should not run for successfully encoded key")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("get successful key after partial ForceSetMulti: %v", err)
+	}
+	if got != "one" {
+		t.Fatalf("key 1 value = %q, want one", got)
 	}
 }

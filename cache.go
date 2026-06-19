@@ -761,7 +761,7 @@ func asString[K comparable](k K) string {
 
 func stringToBytes(s string) []byte {
 	if s == "" {
-		return nil
+		return []byte{}
 	}
 	return unsafe.Slice(unsafe.StringData(s), len(s))
 }

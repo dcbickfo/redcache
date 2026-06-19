@@ -108,6 +108,38 @@ func TestTyped_Get_DecodeErrorPreservesUnderlying(t *testing.T) {
 	}
 }
 
+func TestNewBytes_EmptyPayloadRoundTrip(t *testing.T) {
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+		redcache.WithLockTTL(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("open conn: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	cache := redcache.NewBytes(conn)
+
+	key := "bytes-empty:" + uuid.NewString()
+	if err := cache.ForceSet(context.Background(), time.Second, key, []byte{}); err != nil {
+		t.Fatalf("force set empty bytes: %v", err)
+	}
+
+	got, err := cache.Get(context.Background(), time.Second, key, func(context.Context, string) ([]byte, error) {
+		t.Fatal("loader should not run for cached empty byte payload")
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("get empty bytes: %v", err)
+	}
+	if got == nil {
+		t.Fatal("empty byte payload round-tripped as nil")
+	}
+	if len(got) != 0 {
+		t.Fatalf("empty byte payload length = %d, want 0", len(got))
+	}
+}
+
 func TestTyped_Del_RemovesEntry(t *testing.T) {
 	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
 	key := "del:" + uuid.NewString()

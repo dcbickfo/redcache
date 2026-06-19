@@ -526,6 +526,9 @@ docker compose up -d
 # Run tests (requires Redis on localhost:6379)
 make test-race
 
+# Check coverage against the current baseline
+make cover-check
+
 # Lint
 make lint
 

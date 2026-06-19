@@ -299,11 +299,11 @@ func TestCache_Set_RollbackSurvivesContextCancel(t *testing.T) {
 	})
 	require.ErrorIs(t, err, cbErr)
 
-	// Allow invalidation to propagate.
-	time.Sleep(100 * time.Millisecond)
+	requireEventuallyPeekString(t, client, bg, key, originalVal)
 
 	res, err := client.Get(bg, 10*time.Second, key, func(_ context.Context, _ string) (string, error) {
-		return "callback-fired-restore-failed", nil
+		t.Fatal("loader should not run after rollback restores original value")
+		return "", nil
 	})
 	require.NoError(t, err)
 	assert.Equal(t, originalVal, res, "rollback must succeed under cancelled ctx so key is restored, not held by lock")

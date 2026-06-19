@@ -490,13 +490,3 @@ func TestMetrics_RedisErrorOnSetReadFailure(t *testing.T) {
 	defer metrics.mu.Unlock()
 	require.Contains(t, metrics.redisErrOps, "read", "Set read failure must be tagged op=read")
 }
-
-// TestMetrics_NoopRedisError ensures the NoopMetrics RedisError/Loader no-ops
-// exist and are safe to call (compile + zero-cost path).
-func TestMetrics_NoopRedisError(t *testing.T) {
-	t.Parallel()
-	var noop redcache.NoopMetrics
-	noop.RedisError("read")
-	noop.LoaderDuration(time.Millisecond)
-	noop.LoaderErrors(3)
-}

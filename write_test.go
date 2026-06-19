@@ -2,7 +2,9 @@ package redcache_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +18,38 @@ import (
 
 	"github.com/dcbickfo/redcache"
 )
+
+func requireEventuallyPeekString(
+	t *testing.T,
+	client redcache.Cache[string, string],
+	ctx context.Context,
+	key string,
+	want string,
+) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		got, ok, err := client.Peek(ctx, time.Second*10, key)
+		return err == nil && ok && got == want
+	}, 2*time.Second, 10*time.Millisecond, "Peek(%q) did not observe %q", key, want)
+}
+
+func requireEventuallyPeekStrings(
+	t *testing.T,
+	client redcache.Cache[string, string],
+	ctx context.Context,
+	want map[string]string,
+) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		for key, wantValue := range want {
+			got, ok, err := client.Peek(ctx, time.Second*10, key)
+			if err != nil || !ok || got != wantValue {
+				return false
+			}
+		}
+		return true
+	}, 2*time.Second, 10*time.Millisecond, "Peek did not observe expected values: %v", want)
+}
 
 func TestCache_Set_Basic(t *testing.T) {
 	t.Parallel()
@@ -119,7 +153,8 @@ func TestCache_Set_Concurrent(t *testing.T) {
 	var successCount atomic.Int32
 
 	var wg sync.WaitGroup
-	for i := range 10 {
+	errs := make(chan error, 10)
+	for range 10 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -131,14 +166,17 @@ func TestCache_Set_Concurrent(t *testing.T) {
 				successCount.Add(1)
 				return
 			}
-			// Only ErrLockLost is acceptable on error.
-			assert.ErrorIs(t, err, redcache.ErrLockLost, "iteration %d", i)
+			errs <- err
 		}()
 	}
 	wg.Wait()
+	close(errs)
 
 	assert.GreaterOrEqual(t, callCount.Load(), int32(1), "at least one callback should fire")
 	assert.GreaterOrEqual(t, successCount.Load(), int32(1), "at least one Set must succeed (otherwise concurrent Sets are silently broken)")
+	for err := range errs {
+		require.ErrorIs(t, err, redcache.ErrLockLost)
+	}
 }
 
 func TestCache_SetMulti_Basic(t *testing.T) {
@@ -194,35 +232,47 @@ func TestCache_SetMulti_NoDeadlock(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
+	errs := make(chan error, 10)
 	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
 		for range 5 {
-			_ = client.SetMulti(ctx, time.Second*10, keys1, func(ctx context.Context, ks []string) (map[string]string, error) {
+			err := client.SetMulti(ctx, time.Second*10, keys1, func(ctx context.Context, ks []string) (map[string]string, error) {
 				res := make(map[string]string, len(ks))
 				for _, k := range ks {
 					res[k] = "val-1:" + uuid.New().String()
 				}
 				return res, nil
 			})
+			if err != nil {
+				errs <- err
+			}
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
 		for range 5 {
-			_ = client.SetMulti(ctx, time.Second*10, keys2, func(ctx context.Context, ks []string) (map[string]string, error) {
+			err := client.SetMulti(ctx, time.Second*10, keys2, func(ctx context.Context, ks []string) (map[string]string, error) {
 				res := make(map[string]string, len(ks))
 				for _, k := range ks {
 					res[k] = "val-2:" + uuid.New().String()
 				}
 				return res, nil
 			})
+			if err != nil {
+				errs <- err
+			}
 		}
 	}()
 
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.NoError(t, ctx.Err(), "SetMulti overlap test hit its timeout")
 }
 
 func TestCache_ForceSet_Basic(t *testing.T) {
@@ -282,7 +332,7 @@ func TestCache_ForceSet_StealsLock(t *testing.T) {
 		return "", nil
 	})
 	require.NoError(t, err)
-	assert.NotEmpty(t, res, "expected a value to be cached")
+	assert.Equal(t, forcedVal, res, "ForceSet's value must survive the stolen read lock")
 }
 
 func TestCache_ForceSetMulti_Basic(t *testing.T) {
@@ -444,12 +494,11 @@ func TestCache_Set_CallbackError_RestoresValue(t *testing.T) {
 	})
 	require.ErrorIs(t, err, cbErr)
 
-	// Allow invalidation to propagate.
-	time.Sleep(100 * time.Millisecond)
+	requireEventuallyPeekString(t, client, ctx, key, originalVal)
 
 	res, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
-		// Callback firing here means the rollback DELed instead of restoring.
-		return originalVal, nil
+		t.Fatal("rollback failed: callback fired, meaning the original value was DELed, not restored")
+		return "", nil
 	})
 	require.NoError(t, err)
 	assert.Equal(t, originalVal, res)
@@ -489,7 +538,7 @@ func TestCache_SetMulti_CallbackError_RestoresValues(t *testing.T) {
 
 	// Use a t.Fatal callback so a buggy DEL-and-recover rollback is detected
 	// rather than masked by a re-populate.
-	time.Sleep(100 * time.Millisecond)
+	requireEventuallyPeekStrings(t, client, ctx, originalVals)
 	res, err = client.GetMulti(ctx, time.Second*10, keys, func(_ context.Context, _ []string) (map[string]string, error) {
 		t.Fatal("rollback failed: callback fired, meaning the original value was DELed, not restored")
 		return nil, nil
@@ -556,8 +605,7 @@ func TestCache_ForceSet_OverwritesExistingValue(t *testing.T) {
 	err = client.ForceSet(ctx, time.Second*10, key, forcedVal)
 	require.NoError(t, err)
 
-	// Allow invalidation to propagate to the client-side cache.
-	time.Sleep(100 * time.Millisecond)
+	requireEventuallyPeekString(t, client, ctx, key, forcedVal)
 
 	res, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called")
@@ -619,29 +667,46 @@ func TestCache_ConcurrentSetAndGet(t *testing.T) {
 	key := "key:" + uuid.New().String()
 
 	var wg sync.WaitGroup
+	errs := make(chan error, 100)
 	for range 50 {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_ = client.Set(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
+			err := client.Set(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 				return "set:" + uuid.New().String(), nil
 			})
+			if err != nil {
+				errs <- err
+			}
 		}()
 		go func() {
 			defer wg.Done()
-			_, _ = client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
+			_, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 				return "get:" + uuid.New().String(), nil
 			})
+			if err != nil {
+				errs <- err
+			}
 		}()
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if !errors.Is(err, redcache.ErrLockLost) {
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, ctx.Err(), "concurrent Set/Get test hit its timeout")
 
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called — value should exist")
 		return "", nil
 	})
 	require.NoError(t, err)
-	assert.NotEmpty(t, res)
+	assert.True(t,
+		strings.HasPrefix(res, "set:") || strings.HasPrefix(res, "get:"),
+		"final value %q should come from one of the concurrent loaders", res,
+	)
 }
 
 func TestCache_SetMulti_EmptyKeys(t *testing.T) {

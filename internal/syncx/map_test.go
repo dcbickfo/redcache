@@ -151,7 +151,7 @@ func TestMap_LoadAndDelete_AbsentKey(t *testing.T) {
 	assert.Equal(t, 0, val, "expected zero value for absent key")
 }
 
-func TestMap_LoadOrStore_AbsentKey(t *testing.T) {
+func TestMap_LoadOrStore_StoredNil(t *testing.T) {
 	t.Parallel()
 	// V=any with a stored untyped nil exercises the val==nil branch in LoadOrStore.
 	var sm syncx.Map[string, any]
@@ -220,5 +220,17 @@ func TestShardedMap_LoadAndDelete(t *testing.T) {
 	assert.Equal(t, 7, actual)
 
 	_, loaded = sm.Load("key")
+	assert.False(t, loaded)
+}
+
+func TestShardedMap_Delete(t *testing.T) {
+	t.Parallel()
+	var sm syncx.ShardedMap[int]
+	sm.Store("key", 7)
+
+	sm.Delete("missing")
+	sm.Delete("key")
+
+	_, loaded := sm.Load("key")
 	assert.False(t, loaded)
 }

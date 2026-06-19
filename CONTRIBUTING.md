@@ -29,12 +29,17 @@ This starts the Redis defined in `docker-compose.yml` on port 6379. Stop it with
 
 ## Tests, lint, format, bench
 
-These are wrapped as `make` targets (`make test-race`, `make lint`, `make fmt`,
-`make bench`, or `make check` for the full gate). The raw commands:
+These are wrapped as `make` targets (`make test-race`, `make cover-check`,
+`make lint`, `make fmt`, `make bench`, or `make check` for the full gate). The
+raw commands:
 
 ```bash
 # Tests (race detector on; needs Redis running)
 go test -race ./...
+
+# Coverage gate
+go test -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out
 
 # Lint
 golangci-lint run
@@ -78,7 +83,7 @@ same checks — but they catch problems before you push.
 
 - Keep the change focused; one logical change per PR.
 - Add or update tests for behavior changes.
-- Make sure `go test -race ./...` and `golangci-lint run` are both green.
-  CI (`.github/workflows/CI.yml`) runs lint and the race test suite against Redis
-  on every PR, so a green local run should mean a green CI run.
+- Make sure `make test-race`, `make cover-check`, and `make lint` are green.
+  CI (`.github/workflows/CI.yml`) runs lint, coverage, and the race test suite
+  against Redis on every PR, so a green local run should mean a green CI run.
 - Update `README.md` / `CHANGELOG.md` if you change the public API.
