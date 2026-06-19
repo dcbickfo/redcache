@@ -8,40 +8,93 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  build:
+  test:
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ['1.25.x', '1.26.x']
+    runs-on: ubuntu-latest
     services:
       redis:
-        # Docker Hub image
-        image: redis
+        # Pinned to match the tag used in docker-compose.yml for local dev.
+        image: redis:7.2.4-alpine
         ports:
           - 6379:6379
-    runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version-file: 'go.mod'
-      - name: Install dependencies
-        run: go mod vendor
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v7
+          go-version: ${{ matrix.go-version }}
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Run race tests
+        run: |
+          set -o pipefail
+          go test -race -count=1 -json ./... | tee TestResults.json
+      - name: Upload Go test results
+        if: always()
+        uses: actions/upload-artifact@v7
         with:
-          version: v2.11.4
-          args: --timeout=5m
-      - name: Test with Go
-        run: go test -race -coverprofile=coverage.out -json ./... > TestResults.json
+          name: Go-results-${{ matrix.go-version }}
+          path: TestResults.json
+          if-no-files-found: ignore
+
+  coverage:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        # Pinned to match the tag used in docker-compose.yml for local dev.
+        image: redis:7.2.4-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Check coverage
+        run: make cover-check GO=go
       - name: Coverage summary
         run: go tool cover -func=coverage.out
-      - name: Upload Go test results
-        uses: actions/upload-artifact@v4
-        with:
-          name: Go-results
-          path: TestResults.json
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage.out
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+          # Public repos can upload tokenlessly. If Codecov requires a token,
+          # set CODECOV_TOKEN as a repository secret and it will be picked up here.
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  lint:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11.4
+          args: --timeout=5m

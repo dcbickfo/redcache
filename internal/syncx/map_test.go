@@ -110,7 +110,7 @@ func TestMap_Range(t *testing.T) {
 		return true
 	})
 
-	assert.Equalf(t, 2, len(found), "expected map to contain %d elements, got %d", 2, len(found))
+	assert.Lenf(t, found, 2, "expected map to contain %d elements, got %d", 2, len(found))
 	assert.Equalf(t, value1, found[key1], "expected map to contain key %s with value %d, got %d", key1, value1, found[key1])
 	assert.Equalf(t, value2, found[key2], "expected map to contain key %s with value %d, got %d", key2, value2, found[key2])
 }
@@ -143,10 +143,6 @@ func TestMap_Swap(t *testing.T) {
 	assert.Equalf(t, newValue, loadedValue, "expected key %s value to be %d, got %d", key, newValue, loadedValue)
 }
 
-// Cover the nil-value branches in LoadAndDelete, LoadOrStore, and Swap.
-// sync.Map returns (nil, false) for absent keys; the wrappers must convert that
-// to the typed zero value rather than panic on a nil type assertion.
-
 func TestMap_LoadAndDelete_AbsentKey(t *testing.T) {
 	t.Parallel()
 	var sm syncx.Map[string, int]
@@ -155,10 +151,9 @@ func TestMap_LoadAndDelete_AbsentKey(t *testing.T) {
 	assert.Equal(t, 0, val, "expected zero value for absent key")
 }
 
-func TestMap_LoadOrStore_AbsentKey(t *testing.T) {
+func TestMap_LoadOrStore_StoredNil(t *testing.T) {
 	t.Parallel()
-	// Use V=any and store an untyped nil so LoadOrStore reads it back as a true
-	// nil interface, exercising the val==nil branch.
+	// V=any with a stored untyped nil exercises the val==nil branch in LoadOrStore.
 	var sm syncx.Map[string, any]
 	sm.Store("k", nil)
 	val, loaded := sm.LoadOrStore("k", "fallback")
@@ -172,4 +167,70 @@ func TestMap_Swap_AbsentKey(t *testing.T) {
 	prev, loaded := sm.Swap("missing", 7)
 	assert.False(t, loaded, "expected loaded=false for absent key")
 	assert.Equal(t, 0, prev, "expected zero previous for absent key")
+}
+
+func TestShardedMap_ZeroValueOperations(t *testing.T) {
+	t.Parallel()
+	var sm syncx.ShardedMap[int]
+
+	actual, loaded := sm.LoadOrStore("key", 1)
+	assert.False(t, loaded)
+	assert.Equal(t, 1, actual)
+
+	actual, loaded = sm.LoadOrStore("key", 2)
+	assert.True(t, loaded)
+	assert.Equal(t, 1, actual)
+
+	actual, loaded = sm.Load("key")
+	assert.True(t, loaded)
+	assert.Equal(t, 1, actual)
+
+	deleted := sm.CompareAndDelete("key", 2)
+	assert.False(t, deleted)
+
+	deleted = sm.CompareAndDelete("key", 1)
+	assert.True(t, deleted)
+
+	_, loaded = sm.Load("key")
+	assert.False(t, loaded)
+}
+
+func TestShardedMap_RangeStopsEarly(t *testing.T) {
+	t.Parallel()
+	var sm syncx.ShardedMap[int]
+	sm.Store("a", 1)
+	sm.Store("b", 2)
+
+	seen := 0
+	sm.Range(func(_ string, _ int) bool {
+		seen++
+		return false
+	})
+
+	assert.Equal(t, 1, seen)
+}
+
+func TestShardedMap_LoadAndDelete(t *testing.T) {
+	t.Parallel()
+	var sm syncx.ShardedMap[int]
+	sm.Store("key", 7)
+
+	actual, loaded := sm.LoadAndDelete("key")
+	assert.True(t, loaded)
+	assert.Equal(t, 7, actual)
+
+	_, loaded = sm.Load("key")
+	assert.False(t, loaded)
+}
+
+func TestShardedMap_Delete(t *testing.T) {
+	t.Parallel()
+	var sm syncx.ShardedMap[int]
+	sm.Store("key", 7)
+
+	sm.Delete("missing")
+	sm.Delete("key")
+
+	_, loaded := sm.Load("key")
+	assert.False(t, loaded)
 }

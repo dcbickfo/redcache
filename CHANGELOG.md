@@ -5,7 +5,113 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.3.0] - Unreleased
+
+v0.3.0 is planned as the next minor release after v0.2.x. It collapses the
+public surface to a single generic `Cache[K, V]` interface. The on-disk value
+format is unchanged from v0.2.x, so this is a surface redesign and runtime
+hardening release. Stay v0.x; a v1 will be cut once the surface settles.
+
+### Breaking
+- **Single generic `Cache[K, V]` interface** replaces the four concrete types.
+  Removed `CacheAside`, `PrimeableCacheAside`, `Typed[K, V]`, and
+  `PrimeableTyped[K, V]`. Read methods (`Get`/`GetMulti`/`Peek`), write/prime
+  methods (`Set`/`SetMulti`/`ForceSet`/`ForceSetMulti`), invalidation
+  (`Del`/`DelMulti`), and TTL extension (`Touch`/`TouchMulti`) are all methods
+  on `Cache[K, V]`. The multi-key methods are uniformly slice-based: `GetMulti`,
+  `SetMulti`, `DelMulti`, and `TouchMulti` all take a `[]K` keys argument (not
+  variadic `...K`).
+- **`Cache[K, V]` is now a pure operational interface: `Close()` and `Client()`
+  moved to the new `Conn` owner** — lifecycle and raw-client access belong to
+  whoever holds the connection, not to injected views.
+- **New constructors; old ones removed.** Removed `NewRedCacheAside`,
+  `NewPrimeableCacheAside`, `NewTyped`, `NewStringTyped`, `NewPrimeableTyped`, and
+  `NewPrimeableStringTyped`. The constructor surface is now `Open` plus three
+  derive-funcs:
+  - `Open(clientOption, opts...) (*Conn, error)` — builds and owns the rueidis
+    client (and its invalidation stream); the `error` covers config validation
+    and client-build failure.
+  - `New[K, V](conn, keyCodec, valCodec) Cache[K, V]` — typed keys via a
+    `KeyCodec[K]` and typed values.
+  - `NewString[V](conn, valCodec) Cache[string, V]` — `StringKeyCodec` preset.
+  - `NewBytes(conn) Cache[string, []byte]` — zero-copy opaque payloads.
+  `New`/`NewString`/`NewBytes` do no I/O, so they return no error and panic on a nil
+  codec. One `Conn` can back many views over a single client/invalidation stream.
+  Lifecycle stays on the `Conn` (`(*Conn).Close()` / `(*Conn).Client()`); the
+  views are operations-only.
+- **`Cache[K, V]` gained `Peek(ctx, ttl, k) (V, bool, error)`** — a read-only,
+  client-side-cached lookup with no loader and no lock. Adding it to the interface
+  is a breaking change for external implementers.
+- **Go floor is now 1.25.** CI also exercises Go 1.26, but the module's minimum
+  supported toolchain is Go 1.25.
+- **`Metrics` interface gained `LoaderDuration(d)`, `LoaderErrors(n)`, and
+  `RedisError(op)`.** Implementers that embed `NoopMetrics` are unaffected; those
+  that implement `Metrics` directly must add the three methods.
+- **Functional options replace the `CacheAsideOption` struct.** Removed
+  `CacheAsideOption`. Configure with `WithLockTTL`, `WithLogger`, `WithMetrics`,
+  `WithLockPrefix`, `WithRefreshLockPrefix`, `WithRefreshAfterFraction`,
+  `WithRefreshBeta`, `WithRefreshTimeout`, `WithRefreshWorkers`,
+  `WithRefreshQueueSize`, and `WithClientBuilder`.
+- **Typed batch error only.** Removed `BatchError`, `NewBatchError`, and
+  `NewBatchKeyError` from the public surface. Multi-key write partial failures
+  surface as `*BatchKeyError[K]` via `errors.As` (with nil-safe `HasFailures`,
+  `ErrorFor`, `HasError` accessors).
+- **`BytesCodec` renamed to `UnsafeBytesCodec`** — the name now states the
+  zero-copy retention hazard: the decoded slice aliases borrowed library memory
+  and must not be mutated or retained past the call.
+- **Nil codecs panic at derivation**, not on the first call. `New`/`NewString`/
+  `NewBytes` do no I/O and panic immediately on a nil codec — a programmer error
+  caught at wiring time rather than on the hot path.
+
+### Added
+- **Observability signals on `Metrics`**: `LoaderDuration(d)` (foreground
+  origin-loader latency), `LoaderErrors(n)` (loader failures by key count), and
+  `RedisError(op)` (Redis-command failures, `op` ∈ `read`/`lock`/`set`/`del`/`touch`).
+- **`redcacheotel`** subpackage (`github.com/dcbickfo/redcache/redcacheotel`) — a
+  drop-in OpenTelemetry `Metrics` adapter (`redcacheotel.NewMetrics(meterProvider)`).
+  It lives in the main module, so OpenTelemetry is now a core dependency, currently
+  at v1.44.0. Importing redcache's core does not compile OpenTelemetry into your
+  binary — it is only built if you import `redcacheotel` — though it does appear
+  in the module graph.
+- **`redcachetest` injectable clock** — `redcachetest.NewWithClock[K, V](clk)` with
+  a `Clock` (`Advance`/`Now`) for deterministic TTL/expiry tests without `time.Sleep`.
+- `WithRefreshTimeout(d)` — bounds how long a refresh-ahead callback may run,
+  defaulting to the data `ttl` passed to `Get`/`GetMulti` rather than `LockTTL`.
+- `ErrInvalidTTL` — write methods (`Set`/`SetMulti`/`ForceSet`/`ForceSetMulti`)
+  now reject a non-positive `ttl` with this sentinel instead of leaking the raw
+  Redis `PX 0` error.
+- `redcachetest.Fake[K, V]` (constructed with `redcachetest.New[K, V]()`) — an
+  in-memory `Cache[K, V]` for adopter unit tests. Models the observable
+  single-process cache-aside contract (loader-once-per-miss, presence-based hits,
+  TTL expiry); does not model distributed single-flight, the lock layer,
+  invalidation pushes, the envelope, or refresh-ahead.
+- Standalone examples under `examples/` for string-cache migration, typed keys and
+  values, and custom metrics wiring.
+
+### Changed
+- Local in-flight coordination now uses a sharded map instead of `sync.Map`,
+  improving high-churn `Store`/`Delete` workloads created by cache stampedes and
+  write locks.
+- Hot paths for multi-key operations reuse more temporary state and avoid
+  unnecessary allocations while preserving the public API.
+- Repository quality gates now include the project `Makefile`, `.tool-versions`,
+  expanded golangci-lint coverage, CodeQL, govulncheck, OpenSSF Scorecard, and
+  CI coverage reporting.
+
+### Fixed
+- **Refresh-ahead callbacks were silently capped at `LockTTL`.** A refresh
+  function that legitimately ran longer than `LockTTL` (e.g. a 20s fn under a 10s
+  lock) was cancelled and its result lost. `WithRefreshTimeout` decouples the
+  refresh compute budget from `LockTTL`, and the back-write that records a
+  slow-but-successful refresh is decoupled from the timeout so the write is kept.
+- **Lock waiters no longer depend only on Redis invalidation pushes.** If a
+  client-side-cache invalidation is delayed or dropped, waiters now use jittered
+  polling as a fallback until the lock TTL instead of stalling for the full lock
+  window.
+- **Typed multi-key collisions fail before writes.** If two typed keys encode to
+  the same Redis key, `GetMulti`, `SetMulti`, and `ForceSetMulti` reject the
+  batch instead of allowing ambiguous partial results or writing whichever value
+  happened to win encoding order.
 
 ## [v0.2.0] - 2026-05-04
 
@@ -89,7 +195,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lua scripts for atomic lock verification on SET and DEL.
 - CI workflow with GitHub Actions.
 
-[Unreleased]: https://github.com/dcbickfo/redcache/compare/v0.2.0...HEAD
+[v0.3.0]: https://github.com/dcbickfo/redcache/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/dcbickfo/redcache/compare/v0.1.7...v0.2.0
 [v0.1.7]: https://github.com/dcbickfo/redcache/compare/v0.1.6...v0.1.7
 [v0.1.6]: https://github.com/dcbickfo/redcache/compare/v0.1.5...v0.1.6

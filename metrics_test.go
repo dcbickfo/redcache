@@ -2,6 +2,7 @@ package redcache
 
 import (
 	"testing"
+	"time"
 
 	"github.com/redis/rueidis"
 )
@@ -11,11 +12,14 @@ var _ Metrics = NoopMetrics{}
 
 func TestNoopMetrics_AllMethodsSafe(t *testing.T) {
 	t.Parallel()
-	// All methods must be safe to call and never panic.
 	m := NoopMetrics{}
 	m.CacheHits(1)
 	m.CacheMisses(1)
 	m.LockContended(1)
+	m.LockWaitDuration(time.Millisecond)
+	m.LoaderDuration(time.Millisecond)
+	m.LoaderErrors(1)
+	m.RedisError("read")
 	m.LockLost("x")
 	m.RefreshTriggered(1)
 	m.RefreshSkipped(1)
@@ -27,20 +31,19 @@ func TestNoopMetrics_AllMethodsSafe(t *testing.T) {
 
 func TestValidateAndApplyDefaults_DefaultsToNoopMetrics(t *testing.T) {
 	t.Parallel()
-	opt := CacheAsideOption{}
+	cfg := config{}
 	clientOpt := rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}
-	if err := validateAndApplyDefaults(clientOpt, &opt); err != nil {
-		t.Fatalf("validateAndApplyDefaults: %v", err)
+	if err := cfg.applyDefaults(clientOpt); err != nil {
+		t.Fatalf("applyDefaults: %v", err)
 	}
-	if opt.Metrics == nil {
-		t.Fatal("Metrics not defaulted")
+	if cfg.metrics == nil {
+		t.Fatal("metrics not defaulted")
 	}
-	if _, ok := opt.Metrics.(NoopMetrics); !ok {
-		t.Fatalf("default Metrics is %T, want NoopMetrics", opt.Metrics)
+	if _, ok := cfg.metrics.(NoopMetrics); !ok {
+		t.Fatalf("default metrics is %T, want NoopMetrics", cfg.metrics)
 	}
 }
 
-// countingMetrics records events for assertions in tests.
 type countingMetrics struct {
 	NoopMetrics
 	Hits, Misses, Contended, Lost int

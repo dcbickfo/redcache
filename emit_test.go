@@ -1,0 +1,492 @@
+package redcache_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/redis/rueidis"
+	"github.com/stretchr/testify/require"
+
+	"github.com/dcbickfo/redcache"
+)
+
+var errRefreshFailed = errors.New("simulated refresh failure")
+
+type capturingMetrics struct {
+	redcache.NoopMetrics
+	hits, misses, contended, lost            atomic.Int64
+	triggered, skipped, dropped, panic, errs atomic.Int64
+	waitDurations                            atomic.Int64 // count of LockWaitDuration calls
+	totalWait                                atomic.Int64 // sum of durations in nanoseconds
+	loaderDurations                          atomic.Int64 // count of LoaderDuration calls
+	totalLoader                              atomic.Int64 // sum of loader durations in nanoseconds
+	loaderErrors                             atomic.Int64 // sum of n across LoaderErrors calls
+	redisErrors                              atomic.Int64 // count of RedisError calls
+	mu                                       sync.Mutex
+	panicKeys                                []string
+	errKeys                                  []string
+	redisErrOps                              []string
+}
+
+func (m *capturingMetrics) CacheHits(n int64)     { m.hits.Add(n) }
+func (m *capturingMetrics) CacheMisses(n int64)   { m.misses.Add(n) }
+func (m *capturingMetrics) LockContended(n int64) { m.contended.Add(n) }
+func (m *capturingMetrics) LockWaitDuration(d time.Duration) {
+	m.waitDurations.Add(1)
+	m.totalWait.Add(int64(d))
+}
+func (m *capturingMetrics) LockLost(string)          { m.lost.Add(1) }
+func (m *capturingMetrics) RefreshTriggered(n int64) { m.triggered.Add(n) }
+func (m *capturingMetrics) RefreshSkipped(n int64)   { m.skipped.Add(n) }
+func (m *capturingMetrics) RefreshDropped(n int64)   { m.dropped.Add(n) }
+func (m *capturingMetrics) RefreshPanicked(key string) {
+	m.panic.Add(1)
+	m.mu.Lock()
+	m.panicKeys = append(m.panicKeys, key)
+	m.mu.Unlock()
+}
+func (m *capturingMetrics) RefreshError(key string) {
+	m.errs.Add(1)
+	m.mu.Lock()
+	m.errKeys = append(m.errKeys, key)
+	m.mu.Unlock()
+}
+func (m *capturingMetrics) LoaderDuration(d time.Duration) {
+	m.loaderDurations.Add(1)
+	m.totalLoader.Add(int64(d))
+}
+func (m *capturingMetrics) LoaderErrors(n int64) { m.loaderErrors.Add(n) }
+func (m *capturingMetrics) RedisError(op string) {
+	m.redisErrors.Add(1)
+	m.mu.Lock()
+	m.redisErrOps = append(m.redisErrOps, op)
+	m.mu.Unlock()
+}
+
+func TestMetrics_HitAndMiss(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	ctx := context.Background()
+	key := "metrics:" + uuid.New().String()
+
+	_, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, _ string) (string, error) {
+		return "v1", nil
+	})
+	require.NoError(t, err)
+
+	_, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, _ string) (string, error) {
+		return "v1", nil
+	})
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, metrics.misses.Load(), int64(1), "expected at least 1 miss")
+	require.GreaterOrEqual(t, metrics.hits.Load(), int64(1), "expected at least 1 hit")
+}
+
+func TestMetrics_RefreshTriggered(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second*2),
+		redcache.WithRefreshAfterFraction(0.01), // refresh almost immediately
+		redcache.WithRefreshBeta(0),             // disable XFetch for determinism
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	ctx := context.Background()
+	key := "refresh-metrics:" + uuid.New().String()
+
+	_, err = client.Get(ctx, time.Second, key, func(ctx context.Context, _ string) (string, error) {
+		return "initial", nil
+	})
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+
+	_, err = client.Get(ctx, time.Second, key, func(ctx context.Context, _ string) (string, error) {
+		return "refreshed", nil
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return metrics.triggered.Load() >= 1
+	}, 2*time.Second, 5*time.Millisecond, "expected RefreshTriggered to fire")
+}
+
+func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second*2),
+		redcache.WithRefreshAfterFraction(0.01),
+		redcache.WithRefreshBeta(0),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	ctx := context.Background()
+	key := "panic-metrics:" + uuid.New().String()
+	var calls atomic.Int32
+
+	cb := func(_ context.Context, _ string) (string, error) {
+		n := calls.Add(1)
+		if n == 1 {
+			return "initial", nil
+		}
+		panic("simulated panic")
+	}
+
+	_, err = client.Get(ctx, time.Second, key, cb)
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+
+	_, err = client.Get(ctx, time.Second, key, cb)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return metrics.panic.Load() >= 1
+	}, 2*time.Second, 5*time.Millisecond, "expected RefreshPanicked to fire")
+
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	require.Contains(t, metrics.panicKeys, key, "RefreshPanicked should be tagged with the offending key")
+}
+
+// TestMetrics_RefreshErrorOnCallbackError verifies a failing refresh-ahead callback
+// emits RefreshError tagged with the affected key.
+func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second*2),
+		redcache.WithRefreshAfterFraction(0.01),
+		redcache.WithRefreshBeta(0),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	ctx := context.Background()
+	key := "refresh-err-metrics:" + uuid.New().String()
+	var calls atomic.Int32
+
+	cb := func(_ context.Context, _ string) (string, error) {
+		n := calls.Add(1)
+		if n == 1 {
+			return "initial", nil
+		}
+		return "", errRefreshFailed
+	}
+
+	_, err = client.Get(ctx, time.Second, key, cb)
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+
+	_, err = client.Get(ctx, time.Second, key, cb)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return metrics.errs.Load() >= 1
+	}, 2*time.Second, 5*time.Millisecond, "expected RefreshError to fire")
+
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	require.Contains(t, metrics.errKeys, key, "RefreshError should be tagged with the offending key")
+}
+
+// TestMetrics_RefreshDroppedUnderBackpressure verifies RefreshDropped fires when
+// the refresh queue saturates.
+func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second*3),
+		redcache.WithRefreshAfterFraction(0.01), // refresh almost immediately
+		redcache.WithRefreshBeta(0),
+		redcache.WithRefreshWorkers(1),
+		redcache.WithRefreshQueueSize(1),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	ctx := context.Background()
+
+	const numKeys = 20
+	keys := make([]string, numKeys)
+	for i := range numKeys {
+		keys[i] = fmt.Sprintf("key:%d:%s", i, uuid.New().String())
+	}
+
+	ttl := time.Second
+	populateCb := func(_ context.Context, _ string) (string, error) {
+		return "initial", nil
+	}
+	for _, key := range keys {
+		_, err := client.Get(ctx, ttl, key, populateCb)
+		require.NoError(t, err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	refreshCb := func(_ context.Context, _ string) (string, error) {
+		time.Sleep(500 * time.Millisecond) // keep the single worker busy
+		return "refreshed", nil
+	}
+
+	var wg sync.WaitGroup
+	for _, key := range keys {
+		k := key
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = client.Get(ctx, ttl, k, refreshCb)
+		}()
+	}
+	wg.Wait()
+
+	require.Eventually(t, func() bool {
+		return metrics.dropped.Load() > 0
+	}, 2*time.Second, 5*time.Millisecond, "expected RefreshDropped to fire under queue saturation")
+}
+
+func TestMetrics_LockWaitDuration(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(2*time.Second),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	ctx := context.Background()
+	key := "lockwait:" + uuid.New().String()
+
+	// Two concurrent Gets — the second observes the lock and waits.
+	holderInCb := make(chan struct{})
+	holderProceed := make(chan struct{})
+	holderCb := func(_ context.Context, _ string) (string, error) {
+		close(holderInCb)
+		<-holderProceed
+		return "v", nil
+	}
+	waiterCb := func(_ context.Context, _ string) (string, error) {
+		return "v", nil
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := client.Get(ctx, 5*time.Second, key, holderCb)
+		errs <- err
+	}()
+
+	// Holder is inside the callback, so it owns the lock.
+	<-holderInCb
+
+	go func() {
+		defer wg.Done()
+		_, err := client.Get(ctx, 5*time.Second, key, waiterCb)
+		errs <- err
+	}()
+
+	// Barrier: wait until the waiter is in the contended branch. Without it,
+	// the holder may release the lock before the waiter starts waiting,
+	// hiding regressions in how the wait is timed.
+	require.Eventually(t, func() bool {
+		return metrics.contended.Load() >= 1
+	}, time.Second, time.Millisecond, "waiter never entered contended branch")
+
+	time.Sleep(100 * time.Millisecond)
+	close(holderProceed)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	require.Positive(t, metrics.waitDurations.Load(), "expected LockWaitDuration to fire")
+	// Lower bound (50ms below the 100ms hold) catches near-zero regressions
+	// that a `> 0` assertion would miss.
+	require.GreaterOrEqual(t, metrics.totalWait.Load(), int64(50*time.Millisecond),
+		"LockWaitDuration must reflect actual wait time, not near-zero")
+}
+
+// TestMetrics_LoaderDuration verifies a foreground Get-miss loader emits
+// LoaderDuration with a non-zero accumulated time.
+func TestMetrics_LoaderDuration(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	ctx := context.Background()
+	key := "loader-dur:" + uuid.New().String()
+
+	_, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, _ string) (string, error) {
+		time.Sleep(10 * time.Millisecond) // measurable loader latency
+		return "v1", nil
+	})
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, metrics.loaderDurations.Load(), int64(1), "expected LoaderDuration to fire")
+	require.Positive(t, metrics.totalLoader.Load(), "LoaderDuration must reflect loader time")
+	require.Equal(t, int64(0), metrics.loaderErrors.Load(), "successful loader must not emit LoaderErrors")
+}
+
+// TestMetrics_LoaderErrors verifies a failing foreground loader emits both
+// LoaderDuration and LoaderErrors(1).
+func TestMetrics_LoaderErrors(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	ctx := context.Background()
+	key := "loader-err:" + uuid.New().String()
+
+	loaderErr := errors.New("loader boom")
+	_, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, _ string) (string, error) {
+		return "", loaderErr
+	})
+	require.ErrorIs(t, err, loaderErr)
+
+	require.GreaterOrEqual(t, metrics.loaderDurations.Load(), int64(1), "failing loader still emits LoaderDuration")
+	require.GreaterOrEqual(t, metrics.loaderErrors.Load(), int64(1), "expected LoaderErrors to fire on loader error")
+}
+
+// TestMetrics_RedisError verifies a forced Redis command failure (closed client)
+// emits RedisError tagged with the failing op.
+func TestMetrics_RedisError(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	// Close the underlying client so the next command fails with a real Redis
+	// transport error (not redis-nil, not lock-lost).
+	conn.Close()
+
+	ctx := context.Background()
+	key := "redis-err:" + uuid.New().String()
+	err = client.ForceSet(ctx, time.Second, key, "v")
+	require.Error(t, err, "ForceSet must fail against a closed client")
+
+	require.GreaterOrEqual(t, metrics.redisErrors.Load(), int64(1), "expected RedisError to fire")
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	require.Contains(t, metrics.redisErrOps, "set", "ForceSet failure must be tagged op=set")
+}
+
+func TestMetrics_RedisErrorOnGetMultiReadFailure(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	conn.Close()
+
+	_, err = client.GetMulti(context.Background(), time.Second, []string{"k"}, func(context.Context, []string) (map[string]string, error) {
+		t.Fatal("loader must not run when the read fails")
+		return nil, nil
+	})
+	require.Error(t, err)
+
+	require.GreaterOrEqual(t, metrics.redisErrors.Load(), int64(1), "expected RedisError to fire")
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	require.Contains(t, metrics.redisErrOps, "read", "GetMulti read failure must be tagged op=read")
+}
+
+func TestMetrics_RedisErrorOnSetReadFailure(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	conn.Close()
+
+	err = client.Set(context.Background(), time.Second, "k", func(context.Context, string) (string, error) {
+		t.Fatal("loader must not run when the read fails")
+		return "", nil
+	})
+	require.Error(t, err)
+
+	require.GreaterOrEqual(t, metrics.redisErrors.Load(), int64(1), "expected RedisError to fire")
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	require.Contains(t, metrics.redisErrOps, "read", "Set read failure must be tagged op=read")
+}

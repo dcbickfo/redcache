@@ -39,6 +39,18 @@ linters:
     - gocognit      # Computes cognitive complexities.
     - godot         # Check if comments end in a period.
     - whitespace    # Detection of leading and trailing whitespace.
+    - errorlint     # Catches error wrapping / inspection mistakes.
+    - nilerr        # Finds nil returned after checking err.
+    - nilnesserr    # Finds inconsistent nil/error return pairs.
+    - nolintlint    # Keeps nolint directives valid and justified.
+    - copyloopvar   # Removes obsolete Go 1.21 loop variable copies.
+    - makezero      # Flags make(len>0) slices that are appended to by mistake.
+    - testifylint   # Catches brittle testify assertions and goroutine require misuse.
+    - durationcheck # Catches invalid duration arithmetic.
+    - errchkjson    # Finds unsupported or unchecked JSON encode/decode usage.
+    - errname       # Enforces conventional error identifier names.
+    - usestdlibvars # Prefers standard library constants over literals.
+    - bodyclose     # Ensures HTTP response bodies are closed.
 
   settings:
     gocyclo:

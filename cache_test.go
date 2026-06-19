@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"sync"
@@ -18,30 +19,41 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dcbickfo/redcache"
-	"github.com/dcbickfo/redcache/internal/mapsx"
 )
 
 var addr = []string{"127.0.0.1:6379"}
 
-func makeClient(t *testing.T, addr []string) *redcache.CacheAside {
-	client, err := redcache.NewRedCacheAside(
+// skipIfNoRedis skips integration tests that need a live Redis when run under
+// -short, so `go test -short ./...` exercises only the no-Redis unit subset.
+func skipIfNoRedis(tb testing.TB) {
+	tb.Helper()
+	if testing.Short() {
+		tb.Skip("requires Redis")
+	}
+}
+
+// makeClient opens a Conn and derives a string view over it. The Conn is closed
+// via t.Cleanup, so callers need no teardown of their own. The Conn is returned
+// too for tests that inspect Redis directly (conn.Client()).
+func makeClient(t *testing.T, addr []string) (redcache.Cache[string, string], *redcache.Conn) {
+	t.Helper()
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: addr,
 		},
-		redcache.CacheAsideOption{
-			LockTTL: time.Second * 1,
-		},
+		redcache.WithLockTTL(time.Second),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return client
+	t.Cleanup(conn.Close)
+	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
 }
 
-func TestCacheAside_Get(t *testing.T) {
+func TestCache_Get(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, _ := makeClient(t, addr)
 	ctx := context.Background()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
@@ -69,10 +81,9 @@ func TestCacheAside_Get(t *testing.T) {
 
 }
 
-func TestCacheAside_GetMulti(t *testing.T) {
+func TestCache_GetMulti(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, _ := makeClient(t, addr)
 	ctx := context.Background()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
@@ -109,10 +120,9 @@ func TestCacheAside_GetMulti(t *testing.T) {
 	require.False(t, called)
 }
 
-func TestCacheAside_GetMulti_Partial(t *testing.T) {
+func TestCache_GetMulti_Partial(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, _ := makeClient(t, addr)
 	ctx := context.Background()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
@@ -172,10 +182,41 @@ func TestCacheAside_GetMulti_Partial(t *testing.T) {
 	require.False(t, called)
 }
 
-func TestCacheAside_GetMulti_PartLock(t *testing.T) {
+func TestCache_GetMulti_IgnoresLoaderExtraKeys(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	skipIfNoRedis(t)
+
+	metrics := &capturingMetrics{}
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(time.Second),
+		redcache.WithMetrics(metrics),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	ctx := context.Background()
+	key := "key:" + uuid.New().String()
+	extra := "extra:" + uuid.New().String()
+
+	res, err := client.GetMulti(ctx, 10*time.Second, []string{key}, func(_ context.Context, _ []string) (map[string]string, error) {
+		return map[string]string{
+			key:   "wanted",
+			extra: "ignored",
+		}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{key: "wanted"}, res)
+	assert.Zero(t, metrics.lost.Load(), "extra loader keys must not be attempted as lock-owned writes")
+
+	err = conn.Client().Do(ctx, conn.Client().B().Get().Key(extra).Build()).Error()
+	require.True(t, rueidis.IsRedisNil(err), "extra loader keys must not be written")
+}
+
+func TestCache_GetMulti_PartLock(t *testing.T) {
+	t.Parallel()
+	client, conn := makeClient(t, addr)
 	ctx := context.Background()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
@@ -196,7 +237,7 @@ func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 		return res, nil
 	}
 
-	innerClient := client.Client()
+	innerClient := conn.Client()
 	lockVal := "__redcache:lock:" + uuid.New().String()
 	err := innerClient.Do(ctx, innerClient.B().Set().Key(keys[0]).Value(lockVal).Nx().Get().Px(time.Millisecond*100).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
@@ -217,16 +258,15 @@ func TestCacheAside_GetMulti_PartLock(t *testing.T) {
 	require.False(t, called)
 }
 
-func TestCacheAside_Del(t *testing.T) {
+func TestCache_Del(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, conn := makeClient(t, addr)
 	ctx := context.Background()
 
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
-	innerClient := client.Client()
+	innerClient := conn.Client()
 	err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(val).Nx().Get().Px(time.Second*30).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
@@ -243,10 +283,8 @@ func TestCacheAside_Del(t *testing.T) {
 func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 	t.Parallel()
 
-	client := makeClient(t, addr)
-	defer client.Client().Close()
-	client2 := makeClient(t, addr)
-	defer client2.Client().Close()
+	client, _ := makeClient(t, addr)
+	client2, _ := makeClient(t, addr)
 
 	ctx := context.Background()
 	keyAndVals := make(map[string]string)
@@ -339,14 +377,10 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) {
 	t.Parallel()
 
-	client1 := makeClient(t, addr)
-	defer client1.Client().Close()
-	client2 := makeClient(t, addr)
-	defer client2.Client().Close()
-	client3 := makeClient(t, addr)
-	defer client3.Client().Close()
-	client4 := makeClient(t, addr)
-	defer client4.Client().Close()
+	client1, _ := makeClient(t, addr)
+	client2, _ := makeClient(t, addr)
+	client3, _ := makeClient(t, addr)
+	client4, _ := makeClient(t, addr)
 
 	ctx := context.Background()
 	keyAndVals := make(map[string]string)
@@ -475,8 +509,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 	t.Parallel()
 
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, _ := makeClient(t, addr)
 
 	ctx := context.Background()
 	keyAndVals := make(map[string]string)
@@ -602,10 +635,9 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 	wg.Wait()
 }
 
-func TestCacheAside_DelMulti(t *testing.T) {
+func TestCache_DelMulti(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, conn := makeClient(t, addr)
 	ctx := context.Background()
 
 	keyAndVals := make(map[string]string)
@@ -613,7 +645,7 @@ func TestCacheAside_DelMulti(t *testing.T) {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
 	}
 
-	innerClient := client.Client()
+	innerClient := conn.Client()
 	for key, val := range keyAndVals {
 		err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(val).Nx().Get().Px(time.Second*30).Build()).Error()
 		require.True(t, rueidis.IsRedisNil(err))
@@ -624,7 +656,7 @@ func TestCacheAside_DelMulti(t *testing.T) {
 		require.NoErrorf(t, err, "expected no error, got %v", err)
 	}
 
-	err := client.DelMulti(ctx, mapsx.Keys(keyAndVals)...)
+	err := client.DelMulti(ctx, slices.Collect(maps.Keys(keyAndVals)))
 	require.NoError(t, err)
 
 	for key := range keyAndVals {
@@ -633,71 +665,62 @@ func TestCacheAside_DelMulti(t *testing.T) {
 	}
 }
 
-func TestCacheAside_Touch_ExtendsTTL(t *testing.T) {
+func TestCache_Touch_ExtendsTTL(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, conn := makeClient(t, addr)
 	ctx := context.Background()
 
 	key := "touch:" + uuid.New().String()
 
-	// Populate cache with a short TTL.
 	_, err := client.Get(ctx, 500*time.Millisecond, key, func(_ context.Context, _ string) (string, error) {
 		return "v", nil
 	})
 	require.NoError(t, err)
 
-	// Touch to a much longer TTL.
 	require.NoError(t, client.Touch(ctx, 5*time.Second, key))
 
-	pttl, err := client.Client().Do(ctx, client.Client().B().Pttl().Key(key).Build()).AsInt64()
+	pttl, err := conn.Client().Do(ctx, conn.Client().B().Pttl().Key(key).Build()).AsInt64()
 	require.NoError(t, err)
 	assert.Greater(t, pttl, int64(2000), "TTL should have been extended well past the original 500ms")
 }
 
-func TestCacheAside_Touch_NoOpOnMissing(t *testing.T) {
+func TestCache_Touch_NoOpOnMissing(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, conn := makeClient(t, addr)
 	ctx := context.Background()
 
 	key := "touch-missing:" + uuid.New().String()
 	require.NoError(t, client.Touch(ctx, 5*time.Second, key), "Touch on missing key must succeed silently")
 
-	err := client.Client().Do(ctx, client.Client().B().Get().Key(key).Build()).Error()
+	err := conn.Client().Do(ctx, conn.Client().B().Get().Key(key).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err), "Touch must not create the key")
 }
 
-func TestCacheAside_Touch_NoOpOnLockValue(t *testing.T) {
+func TestCache_Touch_NoOpOnLockValue(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, conn := makeClient(t, addr)
 	ctx := context.Background()
 
 	key := "touch-lock:" + uuid.New().String()
 	lockVal := "__redcache:lock:abc"
-	require.NoError(t, client.Client().Do(ctx,
-		client.Client().B().Set().Key(key).Value(lockVal).Px(time.Second).Build()).Error())
+	require.NoError(t, conn.Client().Do(ctx,
+		conn.Client().B().Set().Key(key).Value(lockVal).Px(time.Second).Build()).Error())
 
 	require.NoError(t, client.Touch(ctx, 10*time.Second, key))
 
-	pttl, err := client.Client().Do(ctx, client.Client().B().Pttl().Key(key).Build()).AsInt64()
+	pttl, err := conn.Client().Do(ctx, conn.Client().B().Pttl().Key(key).Build()).AsInt64()
 	require.NoError(t, err)
-	// Initial PX was 1000ms; Touch was called with 10s. If Touch incorrectly
-	// applied PEXPIRE to the lock value, PTTL would jump to ~10000ms. Bound
-	// to the original 1000ms so a partial regression (e.g. extending to 2s)
-	// is also caught.
+	// Bound by the original 1000ms PX so partial regressions (e.g. extension to 2s) are also caught.
 	assert.LessOrEqual(t, pttl, int64(1000), "lock TTL must NOT have been extended by Touch")
 
-	got, err := client.Client().Do(ctx, client.Client().B().Get().Key(key).Build()).ToString()
+	got, err := conn.Client().Do(ctx, conn.Client().B().Get().Key(key).Build()).ToString()
 	require.NoError(t, err)
 	assert.Equal(t, lockVal, got, "lock value must be preserved")
 }
 
-func TestCacheAside_TouchMulti_ExtendsTTLs(t *testing.T) {
+func TestCache_TouchMulti_ExtendsTTLs(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, conn := makeClient(t, addr)
 	ctx := context.Background()
 
 	keys := []string{
@@ -712,38 +735,35 @@ func TestCacheAside_TouchMulti_ExtendsTTLs(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, client.TouchMulti(ctx, 5*time.Second, keys...))
+	require.NoError(t, client.TouchMulti(ctx, 5*time.Second, keys))
 
 	for _, k := range keys {
-		pttl, err := client.Client().Do(ctx, client.Client().B().Pttl().Key(k).Build()).AsInt64()
+		pttl, err := conn.Client().Do(ctx, conn.Client().B().Pttl().Key(k).Build()).AsInt64()
 		require.NoError(t, err)
 		assert.Greater(t, pttl, int64(2000), "key %q TTL should have been extended", k)
 	}
 }
 
-func TestCacheAside_TouchMulti_EmptyKeysIsNoOp(t *testing.T) {
+func TestCache_TouchMulti_EmptyKeysIsNoOp(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
-	require.NoError(t, client.TouchMulti(context.Background(), 5*time.Second))
+	client, _ := makeClient(t, addr)
+	require.NoError(t, client.TouchMulti(context.Background(), 5*time.Second, nil))
 }
 
-func TestCacheAside_GetParentContextCancellation(t *testing.T) {
+func TestCache_GetParentContextCancellation(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, conn := makeClient(t, addr)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
-	// Set a lock on the key so Get will wait
-	innerClient := client.Client()
+	// Lock the key so Get will wait.
+	innerClient := conn.Client()
 	lockVal := "__redcache:lock:" + uuid.New().String()
 	err := innerClient.Do(context.Background(), innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
-	// Cancel the parent context after a short delay
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		cancel()
@@ -753,27 +773,25 @@ func TestCacheAside_GetParentContextCancellation(t *testing.T) {
 		return val, nil
 	}
 
-	// Should get parent context cancelled error, not a timeout
 	_, err = client.Get(ctx, time.Second*10, key, cb)
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-// TestConcurrentRegisterRace tests the register() method under high contention
-// to ensure the CompareAndDelete race condition fix works correctly
+// TestConcurrentRegisterRace stresses register() to guard the CompareAndDelete race.
 func TestConcurrentRegisterRace(t *testing.T) {
 	t.Parallel()
-	// Use minimum allowed lock TTL to force lock expirations during concurrent access
-	client, err := redcache.NewRedCacheAside(
+	skipIfNoRedis(t)
+	// Minimum lock TTL forces expirations under contention.
+	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: addr,
 		},
-		redcache.CacheAsideOption{
-			LockTTL: 100 * time.Millisecond,
-		},
+		redcache.WithLockTTL(100*time.Millisecond),
 	)
 	require.NoError(t, err)
-	defer client.Client().Close()
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 
 	ctx := context.Background()
 	key := "key:" + uuid.New().String()
@@ -785,12 +803,11 @@ func TestConcurrentRegisterRace(t *testing.T) {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
-		// Very short sleep to keep test fast while still triggering some lock expirations
+		// Brief sleep triggers lock expirations without slowing the test.
 		time.Sleep(5 * time.Millisecond)
 		return val, nil
 	}
 
-	// Run concurrent goroutines to stress test the register race condition fix
 	wg := sync.WaitGroup{}
 	for i := 0; i < 100; i++ {
 		wg.Add(4)
@@ -821,21 +838,18 @@ func TestConcurrentRegisterRace(t *testing.T) {
 	}
 	wg.Wait()
 
-	// The callback should fire at least once; under a register-race regression,
-	// every Get could re-fire the callback unboundedly, so cap above as well.
-	// 400 goroutines × ~10 retries upper-bound (lock TTL 100ms, callback 5ms) ≈ 4000.
+	// Cap above: a register-race regression would let every Get re-fire the callback unboundedly.
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Greater(t, callCount, 0, "callback should be called at least once")
+	assert.Positive(t, callCount, "callback should be called at least once")
 	assert.Less(t, callCount, 4000, "callback fired far more than expected — possible register-race regression")
 }
 
-// TestConcurrentGetSameKeySingleClient tests that multiple goroutines getting
-// the same key from a single client instance only triggers one callback when locks don't expire
+// TestConcurrentGetSameKeySingleClient verifies a single client dedupes concurrent
+// same-key Gets down to one callback.
 func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, _ := makeClient(t, addr)
 
 	ctx := context.Background()
 	key := "key:" + uuid.New().String()
@@ -851,7 +865,6 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 		return val, nil
 	}
 
-	// Run multiple iterations with concurrent goroutines, matching existing test pattern
 	wg := sync.WaitGroup{}
 	for i := 0; i < 100; i++ {
 		wg.Add(4)
@@ -883,47 +896,36 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 
 	wg.Wait()
 
-	// Callback should only be called once due to distributed locking
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, 1, callCount, "callback should only be called once")
 }
 
-// TestCacheAside_Get_LeaderNXFailure_WaitsForInvalidation verifies the
-// leader/follower discipline when an in-process leader's SET NX is rejected by
-// Redis (another process holds the lock). The leader must wait for the actual
-// holder's invalidation rather than cancelling its own lockEntry, which would
-// wake local followers and let them busy-loop racing the same Redis NX. The
-// test simulates "another process" by writing a synthetic lock value directly
-// to Redis, then replacing it with a real envelope-wrapped value and verifying
-// every concurrent Get returns it without ever invoking fn.
-func TestCacheAside_Get_LeaderNXFailure_WaitsForInvalidation(t *testing.T) {
+// TestCache_Get_LeaderNXFailure_WaitsForInvalidation verifies the
+// leader/follower discipline when an in-process leader's SET NX is rejected.
+// The leader must wait for the actual holder's invalidation rather than
+// cancelling its own lockEntry and waking followers into a busy-loop NX race.
+func TestCache_Get_LeaderNXFailure_WaitsForInvalidation(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, conn := makeClient(t, addr)
 
 	ctx := context.Background()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
-	// Plant a synthetic Redis lock from "another process" so any SET NX from
-	// our process will be rejected.
-	inner := client.Client()
+	// Plant a synthetic Redis lock from "another process" so SET NX is rejected.
+	inner := conn.Client()
 	syntheticLock := "__redcache:lock:other-process-" + uuid.New().String()
 	require.NoError(t, inner.Do(ctx, inner.B().Set().Key(key).Value(syntheticLock).Px(time.Second*5).Build()).Error())
 
-	// fn must NEVER fire: the synthetic lock will be replaced with a real
-	// value below, which arrives via invalidation and resolves all waiters.
+	// fn must NEVER fire: the synthetic lock will be replaced via invalidation.
 	cb := func(ctx context.Context, key string) (string, error) {
 		t.Errorf("fn unexpectedly invoked for key %q", key)
 		return "", errors.New("fn should not run")
 	}
 
-	// Start N concurrent Gets. With the leader/follower discipline correct,
-	// at most one becomes leader, attempts SET NX, fails, and waits. The rest
-	// are followers and wait directly. Without the discipline, the leader
-	// would cancel on NX failure, wake followers, who would each become new
-	// leaders racing Redis NX in a tight loop until lockTTL fires.
+	// At most one Get becomes leader, attempts SET NX, fails, and waits; the
+	// rest are followers and wait directly.
 	const n = 50
 	results := make([]string, n)
 	errs := make([]error, n)
@@ -936,15 +938,12 @@ func TestCacheAside_Get_LeaderNXFailure_WaitsForInvalidation(t *testing.T) {
 		}()
 	}
 
-	// Give all Gets time to enter the await path before we publish the real
-	// value. Short sleep is acceptable — the test fails closed if Gets
-	// somehow resolve before invalidation arrives (fn would fire and the
-	// t.Errorf above would catch it).
+	// Give all Gets time to enter the await path. The test fails closed if
+	// they resolve early — fn would fire and t.Errorf above catches it.
 	time.Sleep(100 * time.Millisecond)
 
-	// Replace the synthetic lock with a real envelope-wrapped value, simulating
-	// "the other process finished its work". This triggers Redis invalidation
-	// for the key, which wakes the leader and all followers.
+	// Replace the synthetic lock with a real envelope-wrapped value; the
+	// resulting invalidation wakes the leader and all followers.
 	wrapped := "__redcache:v1:0:" + val
 	require.NoError(t, inner.Do(ctx, inner.B().Set().Key(key).Value(wrapped).Px(time.Second*10).Build()).Error())
 
@@ -955,12 +954,10 @@ func TestCacheAside_Get_LeaderNXFailure_WaitsForInvalidation(t *testing.T) {
 	}
 }
 
-// TestConcurrentInvalidation tests that cache invalidation works correctly
-// when multiple goroutines are accessing the same keys
+// TestConcurrentInvalidation verifies invalidation under concurrent reads.
 func TestConcurrentInvalidation(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, _ := makeClient(t, addr)
 
 	ctx := context.Background()
 	key := "key:" + uuid.New().String()
@@ -974,7 +971,6 @@ func TestConcurrentInvalidation(t *testing.T) {
 		return "value", nil
 	}
 
-	// Populate cache
 	_, err := client.Get(ctx, time.Second*10, key, cb)
 	require.NoError(t, err)
 
@@ -982,11 +978,9 @@ func TestConcurrentInvalidation(t *testing.T) {
 	initialCount := callCount
 	mu.Unlock()
 
-	// Delete the key
 	err = client.Del(ctx, key)
 	require.NoError(t, err)
 
-	// Run multiple iterations with concurrent reads after deletion, matching existing test pattern
 	wg := sync.WaitGroup{}
 	for i := 0; i < 100; i++ {
 		wg.Add(4)
@@ -1013,28 +1007,25 @@ func TestConcurrentInvalidation(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Callback should have been invoked at least once more due to invalidation
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Greater(t, callCount, initialCount, "callbacks should be invoked after invalidation")
 }
 
-func TestCacheAside_Get_CallbackError(t *testing.T) {
+func TestCache_Get_CallbackError(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, _ := makeClient(t, addr)
 	ctx := context.Background()
 
 	key := "key:" + uuid.New().String()
 	cbErr := fmt.Errorf("callback failed")
 
-	// First Get: callback returns error.
 	_, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		return "", cbErr
 	})
 	require.ErrorIs(t, err, cbErr)
 
-	// Second Get: lock should have been cleaned up, so a fresh callback succeeds.
+	// Lock should have been cleaned up, so a retry's callback can run.
 	val := "good-val:" + uuid.New().String()
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		return val, nil
@@ -1043,10 +1034,9 @@ func TestCacheAside_Get_CallbackError(t *testing.T) {
 	assert.Equal(t, val, res)
 }
 
-func TestCacheAside_GetMulti_CallbackError(t *testing.T) {
+func TestCache_GetMulti_CallbackError(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, _ := makeClient(t, addr)
 	ctx := context.Background()
 
 	keys := []string{
@@ -1055,13 +1045,12 @@ func TestCacheAside_GetMulti_CallbackError(t *testing.T) {
 	}
 	cbErr := fmt.Errorf("multi callback failed")
 
-	// Callback returns error — locks should be cleaned up.
 	_, err := client.GetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {
 		return nil, cbErr
 	})
 	require.ErrorIs(t, err, cbErr)
 
-	// Retry should succeed — locks were released.
+	// Retry should succeed once locks are released.
 	vals := map[string]string{
 		keys[0]: "val:0:" + uuid.New().String(),
 		keys[1]: "val:1:" + uuid.New().String(),
@@ -1079,16 +1068,14 @@ func TestCacheAside_GetMulti_CallbackError(t *testing.T) {
 	}
 }
 
-func TestCacheAside_Close(t *testing.T) {
+func TestCache_Close(t *testing.T) {
 	t.Parallel()
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, conn := makeClient(t, addr)
 	ctx := context.Background()
 
 	key := "key:" + uuid.New().String()
 
-	// Place a long-lived lock.
-	innerClient := client.Client()
+	innerClient := conn.Client()
 	lockVal := "__redcache:lock:" + uuid.New().String()
 	err := innerClient.Do(ctx, innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
@@ -1105,47 +1092,101 @@ func TestCacheAside_Close(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	client.Close()
+	conn.Close()
 
 	select {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Get did not return after Close")
 	case err := <-errCh:
-		// Close wakes up the waiter; since the lock persists it will eventually timeout.
+		// Close cancels the pending lock entry and tears down the client, so the
+		// waiter wakes and returns promptly instead of hanging on the persistent
+		// lock until its 30s TTL. The exact error is teardown-ordering dependent:
+		// the deadline (2s) may fire first, or the now-closing client surfaces on
+		// retry — either proves Close unblocked the waiter.
 		require.Error(t, err)
-		require.ErrorIs(t, err, context.DeadlineExceeded)
 	}
 }
 
-func makeRefreshClient(t *testing.T, addr []string, fraction float64) *redcache.CacheAside {
+func TestCache_CloseCancelsRefreshCallback(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(150*time.Millisecond),
+		redcache.WithRefreshAfterFraction(0.5),
+		redcache.WithRefreshBeta(0),
+		redcache.WithRefreshWorkers(1),
+		redcache.WithRefreshQueueSize(4),
+		redcache.WithRefreshTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
+
+	ctx := context.Background()
+	key := "close-refresh:" + uuid.New().String()
+	ttl := time.Second
+
+	_, err = client.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
+		return "initial", nil
+	})
+	require.NoError(t, err)
+
+	time.Sleep(600 * time.Millisecond)
+
+	refreshStarted := make(chan struct{})
+	_, err = client.Get(ctx, ttl, key, func(ctx context.Context, _ string) (string, error) {
+		close(refreshStarted)
+		<-ctx.Done()
+		return "", ctx.Err()
+	})
+	require.NoError(t, err)
+
+	select {
+	case <-refreshStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh callback did not start")
+	}
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		conn.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		require.Less(t, time.Since(start), 500*time.Millisecond)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Close did not cancel the refresh callback promptly")
+	}
+}
+
+func makeRefreshClient(t *testing.T, addr []string, fraction float64) (redcache.Cache[string, string], *redcache.Conn) {
 	t.Helper()
-	client, err := redcache.NewRedCacheAside(
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: addr,
 		},
-		redcache.CacheAsideOption{
-			LockTTL:              time.Second * 2,
-			RefreshAfterFraction: fraction,
-			// Keep refresh deterministic at the floor: tests assert exact
-			// refresh-vs-no-refresh outcomes. XFetch sampling has its own
-			// probabilistic tests (TestShouldRefresh_XFetch).
-			RefreshBeta: 0,
-		},
+		redcache.WithLockTTL(time.Second*2),
+		redcache.WithRefreshAfterFraction(fraction),
+		// Disable XFetch sampling so tests assert exact refresh-vs-no-refresh
+		// outcomes; sampling is exercised by TestShouldRefresh_XFetch.
+		redcache.WithRefreshBeta(0),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		client.Close()
-		client.Client().Close()
-	})
-	return client
+	t.Cleanup(conn.Close)
+	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
 }
 
 func TestRefreshAhead_TriggersBackgroundRefresh(t *testing.T) {
 	t.Parallel()
-	// fraction=0.5 means refresh when >50% of TTL elapsed (i.e. <50% remaining).
-	client := makeRefreshClient(t, addr, 0.5)
+	// fraction=0.5 -> refresh once <50% TTL remaining.
+	client, _ := makeRefreshClient(t, addr, 0.5)
 	ctx := context.Background()
 
 	key := "key:" + uuid.New().String()
@@ -1162,20 +1203,17 @@ func TestRefreshAhead_TriggersBackgroundRefresh(t *testing.T) {
 
 	ttl := 2 * time.Second
 
-	// First call: populates cache — fn called once.
 	res, err := client.Get(ctx, ttl, key, cb)
 	require.NoError(t, err)
 	assert.Equal(t, "val-1", res)
 
-	// Wait until >50% of TTL has elapsed so remaining < threshold.
+	// Cross the refresh threshold.
 	time.Sleep(1200 * time.Millisecond)
 
-	// This Get should return the stale value and trigger a background refresh.
 	res, err = client.Get(ctx, ttl, key, cb)
 	require.NoError(t, err)
-	assert.Equal(t, "val-1", res) // stale value returned immediately
+	assert.Equal(t, "val-1", res)
 
-	// Poll until the refresh completes and the next Get sees the refreshed value.
 	require.Eventually(t, func() bool {
 		v, e := client.Get(ctx, ttl, key, cb)
 		return e == nil && v == "val-2"
@@ -1188,7 +1226,7 @@ func TestRefreshAhead_TriggersBackgroundRefresh(t *testing.T) {
 
 func TestRefreshAhead_Dedup(t *testing.T) {
 	t.Parallel()
-	client := makeRefreshClient(t, addr, 0.5)
+	client, _ := makeRefreshClient(t, addr, 0.5)
 	ctx := context.Background()
 
 	key := "key:" + uuid.New().String()
@@ -1196,10 +1234,8 @@ func TestRefreshAhead_Dedup(t *testing.T) {
 	var mu sync.Mutex
 	firstCall := true
 
-	// Block the refresh callback until all concurrent Gets have observed
-	// stale and made their dedup decisions. Without this barrier, the first
-	// refresh could finish before any other Get arrives, hiding a partial
-	// dedup leak (the test would still see refreshCount == 1).
+	// Block the refresh callback so every concurrent Get is forced through
+	// the dedup decision before any refresh can complete.
 	refreshUnblock := make(chan struct{})
 
 	cb := func(_ context.Context, _ string) (string, error) {
@@ -1217,17 +1253,11 @@ func TestRefreshAhead_Dedup(t *testing.T) {
 
 	ttl := 2 * time.Second
 
-	// Populate cache.
 	_, err := client.Get(ctx, ttl, key, cb)
 	require.NoError(t, err)
 
-	// Wait until threshold is crossed.
 	time.Sleep(1200 * time.Millisecond)
 
-	// Fire many concurrent Gets — each returns stale immediately and queues
-	// (or dedups) a refresh. The refresh worker is blocked on refreshUnblock,
-	// so every concurrent Get is forced through the dedup decision before
-	// any refresh can complete.
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
@@ -1235,15 +1265,14 @@ func TestRefreshAhead_Dedup(t *testing.T) {
 			defer wg.Done()
 			res, err := client.Get(ctx, ttl, key, cb)
 			assert.NoError(t, err)
-			assert.Equal(t, "initial", res) // stale returned
+			assert.Equal(t, "initial", res)
 		}()
 	}
 	wg.Wait()
 
-	// All 20 Gets have made their enqueue/dedup decision; release the worker.
+	// All 20 Gets have made their dedup decision; release the worker.
 	close(refreshUnblock)
 
-	// Poll until the refresh callback finishes.
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -1257,9 +1286,7 @@ func TestRefreshAhead_Dedup(t *testing.T) {
 
 func TestRefreshAhead_Disabled(t *testing.T) {
 	t.Parallel()
-	// Default (fraction=0) — no refresh-ahead.
-	client := makeClient(t, addr)
-	defer client.Client().Close()
+	client, _ := makeClient(t, addr)
 	ctx := context.Background()
 
 	key := "key:" + uuid.New().String()
@@ -1276,7 +1303,6 @@ func TestRefreshAhead_Disabled(t *testing.T) {
 	_, err := client.Get(ctx, 2*time.Second, key, cb)
 	require.NoError(t, err)
 
-	// Wait until TTL is nearly expired.
 	time.Sleep(1500 * time.Millisecond)
 
 	_, err = client.Get(ctx, 2*time.Second, key, cb)
@@ -1291,7 +1317,7 @@ func TestRefreshAhead_Disabled(t *testing.T) {
 
 func TestRefreshAhead_ErrorLogged(t *testing.T) {
 	t.Parallel()
-	client := makeRefreshClient(t, addr, 0.5)
+	client, _ := makeRefreshClient(t, addr, 0.5)
 	ctx := context.Background()
 
 	key := "key:" + uuid.New().String()
@@ -1310,23 +1336,20 @@ func TestRefreshAhead_ErrorLogged(t *testing.T) {
 
 	ttl := 2 * time.Second
 
-	// Populate cache.
 	res, err := client.Get(ctx, ttl, key, cb)
 	require.NoError(t, err)
 	assert.Equal(t, "initial", res)
 
-	// Wait until threshold is crossed.
 	time.Sleep(1200 * time.Millisecond)
 
-	// Get triggers background refresh which will fail — stale value returned.
+	// Background refresh fails; stale value is still returned.
 	res, err = client.Get(ctx, ttl, key, cb)
 	require.NoError(t, err)
 	assert.Equal(t, "initial", res)
 
-	// Wait for refresh goroutine to complete (error is logged, not returned).
+	// Refresh goroutine logs the error rather than returning it.
 	time.Sleep(500 * time.Millisecond)
 
-	// Stale value should still be present — no panic.
 	res, err = client.Get(ctx, ttl, key, cb)
 	require.NoError(t, err)
 	assert.Equal(t, "initial", res)
@@ -1334,7 +1357,7 @@ func TestRefreshAhead_ErrorLogged(t *testing.T) {
 
 func TestRefreshAhead_PanicRecovered(t *testing.T) {
 	t.Parallel()
-	client := makeRefreshClient(t, addr, 0.5)
+	client, _ := makeRefreshClient(t, addr, 0.5)
 	ctx := context.Background()
 
 	key := "key:" + uuid.New().String()
@@ -1357,21 +1380,19 @@ func TestRefreshAhead_PanicRecovered(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "initial", res)
 
-	// First refresh: callback panics. Worker must recover and stay alive.
+	// First refresh panics; worker must recover and stay alive.
 	time.Sleep(1200 * time.Millisecond)
 	res, err = client.Get(ctx, ttl, key, cb)
 	require.NoError(t, err)
 	assert.Equal(t, "initial", res)
 
-	// Poll until the panicking refresh has been attempted.
 	require.Eventually(t, func() bool {
 		return calls.Load() >= 2
 	}, 2*time.Second, 10*time.Millisecond, "refresh callback should have been invoked")
 
-	// Wait past dedup TTL so a new refresh can be triggered.
+	// Wait past dedup TTL so the next refresh is not deduped.
 	time.Sleep(2500 * time.Millisecond)
 
-	// Re-populate so we can trigger another refresh.
 	key2 := "key:" + uuid.New().String()
 	res, err = client.Get(ctx, ttl, key2, cb)
 	require.NoError(t, err)
@@ -1382,7 +1403,7 @@ func TestRefreshAhead_PanicRecovered(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "refreshed", res)
 
-	// If the worker had died, the refresh wouldn't process and calls.Load() would stall.
+	// A dead worker would stall calls.Load() here.
 	require.Eventually(t, func() bool {
 		return calls.Load() >= 4
 	}, 2*time.Second, 10*time.Millisecond, "worker should still be alive to process refreshes")
@@ -1390,7 +1411,7 @@ func TestRefreshAhead_PanicRecovered(t *testing.T) {
 
 func TestRefreshAhead_DoesNotStompLockValue(t *testing.T) {
 	t.Parallel()
-	client := makeRefreshClient(t, addr, 0.5)
+	client, conn := makeRefreshClient(t, addr, 0.5)
 	ctx := context.Background()
 
 	key := "key:" + uuid.New().String()
@@ -1424,28 +1445,190 @@ func TestRefreshAhead_DoesNotStompLockValue(t *testing.T) {
 		t.Fatal("refresh callback did not start")
 	}
 
-	// Simulate a concurrent Get-on-miss winning the distributed lock by
-	// swapping the stale real value for a lock-prefixed value while the
-	// refresh callback is mid-flight.
+	// Swap the stale value for a lock-prefixed value mid-refresh, simulating
+	// a concurrent Get-on-miss winning the distributed lock.
 	lockVal := "__redcache:lock:race-winner"
-	require.NoError(t, client.Client().Do(ctx,
-		client.Client().B().Set().Key(key).Value(lockVal).Px(ttl).Build()).Error())
+	require.NoError(t, conn.Client().Do(ctx,
+		conn.Client().B().Set().Key(key).Value(lockVal).Px(ttl).Build()).Error())
 
 	close(callbackProceed)
 
-	// Drain the refresh worker so its post-callback Lua-CAS has either run or
-	// definitively skipped. Avoids a wall-clock race that would let the
-	// assertion fire before the worker SETs the refreshed value on a slow CI.
-	client.Close()
+	// Independent client for the post-Close read: Close tears down client's own
+	// connection, so we verify the stored value through a separate one.
+	verify, vErr := rueidis.NewClient(rueidis.ClientOption{InitAddress: addr})
+	require.NoError(t, vErr)
+	defer verify.Close()
 
-	got, gErr := client.Client().Do(ctx, client.Client().B().Get().Key(key).Build()).ToString()
+	// Drain the refresh worker so its post-callback Lua-CAS has either run or
+	// definitively skipped before we assert. Avoids a wall-clock race on slow CI.
+	conn.Close()
+
+	got, gErr := verify.Do(ctx, verify.B().Get().Key(key).Build()).ToString()
 	require.NoError(t, gErr)
 	assert.Equal(t, lockVal, got, "refresh-ahead must skip the SET when a lock value is present")
 }
 
+func TestRefreshAhead_DoesNotStompNewerRealValue(t *testing.T) {
+	t.Parallel()
+	client, conn := makeRefreshClient(t, addr, 0.5)
+	ctx := context.Background()
+
+	key := "key:" + uuid.New().String()
+	callbackStarted := make(chan struct{})
+	callbackProceed := make(chan struct{})
+	var calls atomic.Int32
+
+	cb := func(_ context.Context, _ string) (string, error) {
+		n := calls.Add(1)
+		if n == 1 {
+			return "initial", nil
+		}
+		close(callbackStarted)
+		<-callbackProceed
+		return "refreshed", nil
+	}
+
+	ttl := 2 * time.Second
+
+	_, err := client.Get(ctx, ttl, key, cb)
+	require.NoError(t, err)
+
+	time.Sleep(1200 * time.Millisecond)
+
+	_, err = client.Get(ctx, ttl, key, cb)
+	require.NoError(t, err)
+
+	select {
+	case <-callbackStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh callback did not start")
+	}
+
+	require.NoError(t, client.ForceSet(ctx, ttl, key, "newer"))
+
+	close(callbackProceed)
+
+	verify, vErr := rueidis.NewClient(rueidis.ClientOption{InitAddress: addr})
+	require.NoError(t, vErr)
+	defer verify.Close()
+
+	conn.Close()
+
+	got, gErr := verify.Do(ctx, verify.B().Get().Key(key).Build()).ToString()
+	require.NoError(t, gErr)
+	assert.Equal(t, "__redcache:v1:0:newer", got, "refresh-ahead must not overwrite a newer real value")
+}
+
+func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+
+	open := func(t *testing.T, lockTTL time.Duration) (redcache.Cache[string, string], *redcache.Conn) {
+		t.Helper()
+		conn, err := redcache.Open(
+			rueidis.ClientOption{InitAddress: addr},
+			redcache.WithLockTTL(lockTTL),
+			redcache.WithRefreshAfterFraction(0.5),
+			redcache.WithRefreshBeta(0),
+			redcache.WithRefreshWorkers(1),
+			redcache.WithRefreshQueueSize(4),
+			redcache.WithRefreshTimeout(2*time.Second),
+		)
+		require.NoError(t, err)
+		return redcache.NewString[string](conn, redcache.StringCodec{}), conn
+	}
+
+	client1, conn1 := open(t, 150*time.Millisecond)
+	client2, conn2 := open(t, 2*time.Second)
+	client3, conn3 := open(t, 2*time.Second)
+	t.Cleanup(conn1.Close)
+	t.Cleanup(conn2.Close)
+	t.Cleanup(conn3.Close)
+
+	ctx := context.Background()
+	key := "refresh-lock:" + uuid.New().String()
+	ttl := time.Second
+
+	_, err := client1.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
+		return "initial", nil
+	})
+	require.NoError(t, err)
+
+	triggerRefresh := func(
+		t *testing.T,
+		client redcache.Cache[string, string],
+		started <-chan struct{},
+		fn func(context.Context, string) (string, error),
+		failureMsg string,
+	) {
+		t.Helper()
+		var lastErr error
+		require.Eventually(t, func() bool {
+			_, lastErr = client.Get(ctx, ttl, key, fn)
+			if lastErr != nil {
+				return true
+			}
+			select {
+			case <-started:
+				return true
+			default:
+				return false
+			}
+		}, 3*time.Second, 20*time.Millisecond, failureMsg)
+		require.NoError(t, lastErr)
+		select {
+		case <-started:
+		default:
+			t.Fatal(failureMsg)
+		}
+	}
+
+	firstStarted := make(chan struct{})
+	startFirst := sync.OnceFunc(func() { close(firstStarted) })
+	firstProceed := make(chan struct{})
+	releaseFirst := sync.OnceFunc(func() { close(firstProceed) })
+	defer releaseFirst()
+	firstErr := errors.New("first refresh failed")
+	triggerRefresh(t, client1, firstStarted, func(context.Context, string) (string, error) {
+		startFirst()
+		<-firstProceed
+		return "", firstErr
+	}, "first refresh did not start")
+
+	secondStarted := make(chan struct{})
+	startSecond := sync.OnceFunc(func() { close(secondStarted) })
+	secondProceed := make(chan struct{})
+	releaseSecond := sync.OnceFunc(func() { close(secondProceed) })
+	defer releaseSecond()
+	triggerRefresh(t, client2, secondStarted, func(context.Context, string) (string, error) {
+		startSecond()
+		<-secondProceed
+		return "second", nil
+	}, "second refresh did not start")
+
+	releaseFirst()
+	time.Sleep(50 * time.Millisecond)
+
+	thirdStarted := make(chan struct{})
+	_, err = client3.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
+		close(thirdStarted)
+		return "third", nil
+	})
+	require.NoError(t, err)
+
+	select {
+	case <-thirdStarted:
+		releaseSecond()
+		t.Fatal("third refresh started while the second refresh lock should still be owned")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	releaseSecond()
+}
+
 func TestRefreshAhead_GetMulti(t *testing.T) {
 	t.Parallel()
-	client := makeRefreshClient(t, addr, 0.5)
+	client, _ := makeRefreshClient(t, addr, 0.5)
 	ctx := context.Background()
 
 	keys := []string{
@@ -1469,24 +1652,20 @@ func TestRefreshAhead_GetMulti(t *testing.T) {
 
 	ttl := 2 * time.Second
 
-	// Populate cache.
 	res, err := client.GetMulti(ctx, ttl, keys, cb)
 	require.NoError(t, err)
 	for _, k := range keys {
 		assert.Equal(t, "val-1", res[k])
 	}
 
-	// Wait until threshold is crossed.
 	time.Sleep(1200 * time.Millisecond)
 
-	// GetMulti returns stale values and triggers background refresh.
 	res, err = client.GetMulti(ctx, ttl, keys, cb)
 	require.NoError(t, err)
 	for _, k := range keys {
-		assert.Equal(t, "val-1", res[k]) // stale
+		assert.Equal(t, "val-1", res[k])
 	}
 
-	// Poll until the refresh completes and the next GetMulti sees refreshed values.
 	require.Eventually(t, func() bool {
 		v, e := client.GetMulti(ctx, ttl, keys, cb)
 		if e != nil {
@@ -1507,26 +1686,22 @@ func TestRefreshAhead_GetMulti(t *testing.T) {
 
 func TestRefreshAhead_Backpressure(t *testing.T) {
 	t.Parallel()
-	// Tiny pool: 1 worker, queue size 1.
-	// The worker sleeps during refresh, so the queue fills fast.
-	client, err := redcache.NewRedCacheAside(
+	skipIfNoRedis(t)
+	// Tiny pool (1 worker, queue size 1) plus a sleeping callback so the queue fills fast.
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{
-			LockTTL:              time.Second * 3,
-			RefreshAfterFraction: 0.5,
-			RefreshBeta:          0,
-			RefreshWorkers:       1,
-			RefreshQueueSize:     1,
-		},
+		redcache.WithLockTTL(time.Second*3),
+		redcache.WithRefreshAfterFraction(0.5),
+		redcache.WithRefreshBeta(0),
+		redcache.WithRefreshWorkers(1),
+		redcache.WithRefreshQueueSize(1),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		client.Close()
-		client.Client().Close()
-	})
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 
-	// Create many distinct keys so each triggers a separate refresh.
+	// Distinct keys so each triggers its own refresh.
 	const numKeys = 20
 	keys := make([]string, numKeys)
 	for i := range numKeys {
@@ -1546,18 +1721,15 @@ func TestRefreshAhead_Backpressure(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Wait until >50% of TTL has elapsed so refresh triggers.
 	time.Sleep(1700 * time.Millisecond)
 
 	refreshCb := func(_ context.Context, _ string) (string, error) {
 		refreshCount.Add(1)
-		time.Sleep(500 * time.Millisecond) // slow — keeps the single worker busy
+		time.Sleep(500 * time.Millisecond) // keeps the single worker busy
 		return "refreshed", nil
 	}
 
-	// Fire concurrent Gets on all 20 keys. With 1 worker and queue size 1,
-	// at most ~2 refresh jobs can be accepted (1 executing + 1 queued).
-	// The rest are silently dropped.
+	// 1 worker + queue size 1 accepts ~2 jobs; the rest are dropped.
 	var wg sync.WaitGroup
 	for _, key := range keys {
 		k := key
@@ -1566,98 +1738,98 @@ func TestRefreshAhead_Backpressure(t *testing.T) {
 			defer wg.Done()
 			res, err := client.Get(ctx, ttl, k, refreshCb)
 			assert.NoError(t, err)
-			assert.Equal(t, "initial", res) // stale value always returned
+			assert.Equal(t, "initial", res)
 		}()
 	}
 	wg.Wait()
 
-	// Wait for all enqueued refreshes to finish.
 	time.Sleep(1500 * time.Millisecond)
 
-	// With 1 worker processing a 500ms job and queue size 1, far fewer than
-	// 20 refreshes should have executed.
 	count := refreshCount.Load()
 	assert.Less(t, count, int64(numKeys),
 		"expected fewer than %d refreshes, got %d — backpressure should drop excess jobs", numKeys, count)
-	assert.Greater(t, count, int64(0), "at least one refresh should have executed")
+	assert.Positive(t, count, "at least one refresh should have executed")
 }
 
 func TestRefreshAhead_FractionValidation(t *testing.T) {
 	t.Parallel()
 	t.Run("negative fraction", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: -0.1},
+			redcache.WithRefreshAfterFraction(-0.1),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "RefreshAfterFraction")
 	})
 	t.Run("fraction equals 1", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: 1.0},
+			redcache.WithRefreshAfterFraction(1.0),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "RefreshAfterFraction")
 	})
 	t.Run("fraction greater than 1", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: 1.5},
+			redcache.WithRefreshAfterFraction(1.5),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "RefreshAfterFraction")
 	})
 	t.Run("valid fraction", func(t *testing.T) {
 		t.Parallel()
-		client, err := redcache.NewRedCacheAside(
+		skipIfNoRedis(t)
+		conn, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: 0.8},
+			redcache.WithRefreshAfterFraction(0.8),
 		)
 		require.NoError(t, err)
-		client.Close()
-		client.Client().Close()
+		t.Cleanup(conn.Close)
 	})
 	t.Run("negative RefreshWorkers", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: 0.8, RefreshWorkers: -1},
+			redcache.WithRefreshAfterFraction(0.8),
+			redcache.WithRefreshWorkers(-1),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "RefreshWorkers")
 	})
 	t.Run("negative RefreshQueueSize", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: 0.8, RefreshQueueSize: -1},
+			redcache.WithRefreshAfterFraction(0.8),
+			redcache.WithRefreshQueueSize(-1),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "RefreshQueueSize")
 	})
 	t.Run("custom workers and queue", func(t *testing.T) {
 		t.Parallel()
-		client, err := redcache.NewRedCacheAside(
+		skipIfNoRedis(t)
+		conn, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{RefreshAfterFraction: 0.8, RefreshWorkers: 2, RefreshQueueSize: 16},
+			redcache.WithRefreshAfterFraction(0.8),
+			redcache.WithRefreshWorkers(2),
+			redcache.WithRefreshQueueSize(16),
 		)
 		require.NoError(t, err)
-		client.Close()
-		client.Client().Close()
+		t.Cleanup(conn.Close)
 	})
 }
 
-func TestNewRedCacheAside_Validation(t *testing.T) {
+func TestOpen_Validation(t *testing.T) {
 	t.Parallel()
 	t.Run("empty InitAddress", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.Open(
 			rueidis.ClientOption{},
-			redcache.CacheAsideOption{},
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "InitAddress")
@@ -1665,9 +1837,9 @@ func TestNewRedCacheAside_Validation(t *testing.T) {
 
 	t.Run("negative LockTTL", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{LockTTL: -1 * time.Second},
+			redcache.WithLockTTL(-1*time.Second),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "negative")
@@ -1675,25 +1847,48 @@ func TestNewRedCacheAside_Validation(t *testing.T) {
 
 	t.Run("too small LockTTL", func(t *testing.T) {
 		t.Parallel()
-		_, err := redcache.NewRedCacheAside(
+		_, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
-			redcache.CacheAsideOption{LockTTL: 10 * time.Millisecond},
+			redcache.WithLockTTL(10*time.Millisecond),
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "100ms")
 	})
+
+	t.Run("client builder receives tracking options", func(t *testing.T) {
+		t.Parallel()
+		wantErr := errors.New("builder failed")
+		called := false
+		_, err := redcache.Open(
+			rueidis.ClientOption{InitAddress: addr},
+			redcache.WithClientBuilder(func(option rueidis.ClientOption) (rueidis.Client, error) {
+				called = true
+				if option.PipelineMultiplex != -1 {
+					t.Fatalf("PipelineMultiplex = %d, want -1", option.PipelineMultiplex)
+				}
+				if option.OnInvalidations == nil {
+					t.Fatal("OnInvalidations was not configured")
+				}
+				return nil, wantErr
+			}),
+		)
+		require.ErrorIs(t, err, wantErr)
+		require.True(t, called, "custom client builder was not called")
+	})
 }
 
-// TestCacheAside_Get_ErrLockLostRetry verifies that when a ForceSet steals the lock
-// during a Get callback, Get retries and eventually sees the ForceSet value.
-func TestCacheAside_Get_ErrLockLostRetry(t *testing.T) {
+// TestCache_Get_ErrLockLostRetry verifies a ForceSet during a Get callback
+// causes Get's CAS-set to fail and a subsequent read returns the forced value.
+func TestCache_Get_ErrLockLostRetry(t *testing.T) {
 	t.Parallel()
-	client, err := redcache.NewPrimeableCacheAside(
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.CacheAsideOption{LockTTL: time.Second * 2},
+		redcache.WithLockTTL(time.Second*2),
 	)
 	require.NoError(t, err)
-	defer client.Client().Close()
+	t.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 
 	key := "key:" + uuid.New().String()
@@ -1702,7 +1897,7 @@ func TestCacheAside_Get_ErrLockLostRetry(t *testing.T) {
 	getStarted := make(chan struct{})
 
 	go func() {
-		// Get acquires lock, then we steal it with ForceSet during callback.
+		// Get acquires the lock; ForceSet steals it during the callback.
 		_, _ = client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 			close(getStarted)
 			time.Sleep(300 * time.Millisecond)
@@ -1713,15 +1908,11 @@ func TestCacheAside_Get_ErrLockLostRetry(t *testing.T) {
 	<-getStarted
 	time.Sleep(50 * time.Millisecond)
 
-	// ForceSet steals the lock — Get's setWithLock will see CAS mismatch (ErrLockLost).
 	err = client.ForceSet(ctx, time.Second*10, key, forcedVal)
 	require.NoError(t, err)
 
-	// Wait for Get to complete its retry.
 	time.Sleep(500 * time.Millisecond)
 
-	// Get's CAS-set must have failed (ErrLockLost) without overwriting the
-	// forced value, so a follow-up read returns the value that ForceSet wrote.
 	res, err := client.Get(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 		t.Fatal("callback should not be called — value should exist")
 		return "", nil

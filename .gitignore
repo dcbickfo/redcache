@@ -26,3 +26,7 @@ go.work.sum
 
 # Local benchmark baselines (kept locally for release-time regression checks)
 bench/
+
+# Local-only planning artifacts
+docs/design-docs/
+docs/exec-plans/

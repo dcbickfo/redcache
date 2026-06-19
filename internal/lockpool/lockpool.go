@@ -10,8 +10,7 @@ import (
 )
 
 // Pool generates unique lock values by combining a fixed instance UUID with an
-// atomic counter. This avoids calling uuid.NewV7() per lock, which is expensive
-// under high concurrency.
+// atomic counter, avoiding a per-lock uuid.NewV7() call.
 type Pool struct {
 	prefix     string
 	instanceID string

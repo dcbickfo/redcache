@@ -3,6 +3,7 @@ package redcache_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,25 +13,44 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-func makeBenchClient(b *testing.B) *redcache.CacheAside {
+// makeBenchClient opens a Conn (closed via b.Cleanup) and returns a string view
+// plus the Conn for benches that need the raw client.
+func makeBenchClient(b *testing.B) (redcache.Cache[string, string], *redcache.Conn) {
 	b.Helper()
-	client, err := redcache.NewRedCacheAside(
+	skipIfNoRedis(b)
+	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: []string{"127.0.0.1:6379"},
 		},
-		redcache.CacheAsideOption{
-			LockTTL: 5 * time.Second,
-		},
+		redcache.WithLockTTL(5*time.Second),
 	)
 	if err != nil {
 		b.Fatal(err)
 	}
-	return client
+	b.Cleanup(conn.Close)
+	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
 }
 
-// Hoisted callbacks reused across benchmarks. Defining them as package-level
-// vars keeps the per-iteration loop free of closure-allocation noise that
-// would otherwise dominate hot-path measurements.
+func runBenchParallel(b *testing.B, body func(*testing.PB) error) {
+	b.Helper()
+
+	var (
+		once     sync.Once
+		firstErr error
+	)
+	b.RunParallel(func(pb *testing.PB) {
+		if err := body(pb); err != nil {
+			once.Do(func() {
+				firstErr = err
+			})
+		}
+	})
+	if firstErr != nil {
+		b.Fatal(firstErr)
+	}
+}
+
+// Hoisted to package scope so per-iteration loops don't allocate closures.
 var (
 	benchValue        = "bench-value"
 	benchPrimeFn      = func(ctx context.Context, key string) (string, error) { return benchValue, nil }
@@ -47,10 +67,10 @@ var (
 	}
 )
 
-// BenchmarkCacheAside_Get measures hot-path performance for a single cached key.
-func BenchmarkCacheAside_Get(b *testing.B) {
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+// BenchmarkCache_Get measures hot-path performance for a single cached key.
+func BenchmarkCache_Get(b *testing.B) {
+	b.ReportAllocs()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 	key := "bench:get:" + uuid.New().String()
 
@@ -66,10 +86,10 @@ func BenchmarkCacheAside_Get(b *testing.B) {
 	}
 }
 
-// BenchmarkCacheAside_Get_Parallel measures hot-path performance under contention.
-func BenchmarkCacheAside_Get_Parallel(b *testing.B) {
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+// BenchmarkCache_Get_Parallel measures hot-path performance under contention.
+func BenchmarkCache_Get_Parallel(b *testing.B) {
+	b.ReportAllocs()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 	key := "bench:get:parallel:" + uuid.New().String()
 
@@ -78,19 +98,20 @@ func BenchmarkCacheAside_Get_Parallel(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
+	runBenchParallel(b, func(pb *testing.PB) error {
 		for pb.Next() {
 			if _, err := client.Get(ctx, time.Minute, key, benchUnreachableFn); err != nil {
-				b.Fatal(err)
+				return err
 			}
 		}
+		return nil
 	})
 }
 
-// BenchmarkCacheAside_GetMulti measures hot-path performance for multiple cached keys.
-func BenchmarkCacheAside_GetMulti(b *testing.B) {
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+// BenchmarkCache_GetMulti measures hot-path performance for multiple cached keys.
+func BenchmarkCache_GetMulti(b *testing.B) {
+	b.ReportAllocs()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 
 	keys := make([]string, 10)
@@ -110,10 +131,10 @@ func BenchmarkCacheAside_GetMulti(b *testing.B) {
 	}
 }
 
-// BenchmarkCacheAside_GetMulti_Parallel measures hot-path multi-key performance under contention.
-func BenchmarkCacheAside_GetMulti_Parallel(b *testing.B) {
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+// BenchmarkCache_GetMulti_Parallel measures hot-path multi-key performance under contention.
+func BenchmarkCache_GetMulti_Parallel(b *testing.B) {
+	b.ReportAllocs()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 
 	keys := make([]string, 10)
@@ -126,19 +147,20 @@ func BenchmarkCacheAside_GetMulti_Parallel(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
+	runBenchParallel(b, func(pb *testing.PB) error {
 		for pb.Next() {
 			if _, err := client.GetMulti(ctx, time.Minute, keys, benchUnreachableMultiFn); err != nil {
-				b.Fatal(err)
+				return err
 			}
 		}
+		return nil
 	})
 }
 
-// BenchmarkCacheAside_Del measures the single-key delete path.
-func BenchmarkCacheAside_Del(b *testing.B) {
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+// BenchmarkCache_Del measures the single-key delete path.
+func BenchmarkCache_Del(b *testing.B) {
+	b.ReportAllocs()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 	key := "bench:del:" + uuid.New().String()
 
@@ -150,10 +172,10 @@ func BenchmarkCacheAside_Del(b *testing.B) {
 	}
 }
 
-// BenchmarkCacheAside_DelMulti measures the multi-key delete path with N=10 keys.
-func BenchmarkCacheAside_DelMulti(b *testing.B) {
-	client := makeBenchClient(b)
-	defer client.Client().Close()
+// BenchmarkCache_DelMulti measures the multi-key delete path with N=10 keys.
+func BenchmarkCache_DelMulti(b *testing.B) {
+	b.ReportAllocs()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 
 	keys := make([]string, 10)
@@ -163,32 +185,16 @@ func BenchmarkCacheAside_DelMulti(b *testing.B) {
 
 	b.ResetTimer()
 	for range b.N {
-		if err := client.DelMulti(ctx, keys...); err != nil {
+		if err := client.DelMulti(ctx, keys); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
-func makePrimeableBenchClient(b *testing.B) *redcache.PrimeableCacheAside {
-	b.Helper()
-	client, err := redcache.NewPrimeableCacheAside(
-		rueidis.ClientOption{
-			InitAddress: []string{"127.0.0.1:6379"},
-		},
-		redcache.CacheAsideOption{
-			LockTTL: 5 * time.Second,
-		},
-	)
-	if err != nil {
-		b.Fatal(err)
-	}
-	return client
-}
-
-// BenchmarkPrimeable_Set measures the single-key Set hot path.
-func BenchmarkPrimeable_Set(b *testing.B) {
-	client := makePrimeableBenchClient(b)
-	defer client.Client().Close()
+// BenchmarkSet measures the single-key Set hot path.
+func BenchmarkSet(b *testing.B) {
+	b.ReportAllocs()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 	key := "bench:set:" + uuid.New().String()
 
@@ -200,10 +206,10 @@ func BenchmarkPrimeable_Set(b *testing.B) {
 	}
 }
 
-// BenchmarkPrimeable_SetMulti measures multi-key Set with N=10 keys.
-func BenchmarkPrimeable_SetMulti(b *testing.B) {
-	client := makePrimeableBenchClient(b)
-	defer client.Client().Close()
+// BenchmarkSetMulti measures multi-key Set with N=10 keys.
+func BenchmarkSetMulti(b *testing.B) {
+	b.ReportAllocs()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 
 	keys := make([]string, 10)
@@ -219,10 +225,10 @@ func BenchmarkPrimeable_SetMulti(b *testing.B) {
 	}
 }
 
-// BenchmarkPrimeable_ForceSet measures the unconditional ForceSet path.
-func BenchmarkPrimeable_ForceSet(b *testing.B) {
-	client := makePrimeableBenchClient(b)
-	defer client.Client().Close()
+// BenchmarkForceSet measures the unconditional ForceSet path.
+func BenchmarkForceSet(b *testing.B) {
+	b.ReportAllocs()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 	key := "bench:forceset:" + uuid.New().String()
 
@@ -234,10 +240,10 @@ func BenchmarkPrimeable_ForceSet(b *testing.B) {
 	}
 }
 
-// BenchmarkPrimeable_ForceSetMulti measures unconditional multi-key writes.
-func BenchmarkPrimeable_ForceSetMulti(b *testing.B) {
-	client := makePrimeableBenchClient(b)
-	defer client.Client().Close()
+// BenchmarkForceSetMulti measures unconditional multi-key writes.
+func BenchmarkForceSetMulti(b *testing.B) {
+	b.ReportAllocs()
+	client, _ := makeBenchClient(b)
 	ctx := context.Background()
 
 	values := make(map[string]string, 10)
@@ -254,30 +260,26 @@ func BenchmarkPrimeable_ForceSetMulti(b *testing.B) {
 	}
 }
 
-// BenchmarkCacheAside_Get_Refresh measures the refresh-ahead-triggering path.
-// The cache is primed with a short TTL so the per-iteration Get crosses the
-// refresh threshold and enqueues a background job.
-func BenchmarkCacheAside_Get_Refresh(b *testing.B) {
-	client, err := redcache.NewRedCacheAside(
+// BenchmarkCache_Get_Refresh measures the refresh-ahead-triggering path.
+func BenchmarkCache_Get_Refresh(b *testing.B) {
+	b.ReportAllocs()
+	skipIfNoRedis(b)
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.CacheAsideOption{
-			LockTTL:              5 * time.Second,
-			RefreshAfterFraction: 0.001, // any TTL elapsed → trigger refresh
-			RefreshWorkers:       8,
-			RefreshQueueSize:     1024,
-		},
+		redcache.WithLockTTL(5*time.Second),
+		redcache.WithRefreshAfterFraction(0.001), // any TTL elapsed → trigger refresh
+		redcache.WithRefreshWorkers(8),
+		redcache.WithRefreshQueueSize(1024),
 	)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer client.Client().Close()
+	b.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 	key := "bench:get:refresh:" + uuid.New().String()
 	const val = "bench-value"
 
-	// Hoist the callback out of the loop so we measure the refresh-ahead path
-	// itself, not the per-iteration closure allocation a captured-variable
-	// callback would produce.
 	cb := func(ctx context.Context, key string) (string, error) { return val, nil }
 
 	if _, err := client.Get(ctx, time.Minute, key, cb); err != nil {
@@ -292,23 +294,22 @@ func BenchmarkCacheAside_Get_Refresh(b *testing.B) {
 	}
 }
 
-// BenchmarkCacheAside_GetMulti_Refresh measures the refresh-ahead-triggering
-// multi-key path. RefreshAfterFraction is set so every iteration crosses the
-// threshold and enqueues a background refresh job for each key.
-func BenchmarkCacheAside_GetMulti_Refresh(b *testing.B) {
-	client, err := redcache.NewRedCacheAside(
+// BenchmarkCache_GetMulti_Refresh measures the multi-key refresh-ahead path.
+func BenchmarkCache_GetMulti_Refresh(b *testing.B) {
+	b.ReportAllocs()
+	skipIfNoRedis(b)
+	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-		redcache.CacheAsideOption{
-			LockTTL:              5 * time.Second,
-			RefreshAfterFraction: 0.001, // any TTL elapsed → trigger refresh
-			RefreshWorkers:       8,
-			RefreshQueueSize:     1024,
-		},
+		redcache.WithLockTTL(5*time.Second),
+		redcache.WithRefreshAfterFraction(0.001), // any TTL elapsed → trigger refresh
+		redcache.WithRefreshWorkers(8),
+		redcache.WithRefreshQueueSize(1024),
 	)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer client.Client().Close()
+	b.Cleanup(conn.Close)
+	client := redcache.NewString[string](conn, redcache.StringCodec{})
 	ctx := context.Background()
 
 	keys := make([]string, 10)
