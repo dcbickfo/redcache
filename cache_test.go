@@ -1554,42 +1554,57 @@ func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	time.Sleep(600 * time.Millisecond)
+	triggerRefresh := func(
+		t *testing.T,
+		client redcache.Cache[string, string],
+		started <-chan struct{},
+		fn func(context.Context, string) (string, error),
+		failureMsg string,
+	) {
+		t.Helper()
+		var lastErr error
+		require.Eventually(t, func() bool {
+			_, lastErr = client.Get(ctx, ttl, key, fn)
+			if lastErr != nil {
+				return true
+			}
+			select {
+			case <-started:
+				return true
+			default:
+				return false
+			}
+		}, 3*time.Second, 20*time.Millisecond, failureMsg)
+		require.NoError(t, lastErr)
+		select {
+		case <-started:
+		default:
+			t.Fatal(failureMsg)
+		}
+	}
 
 	firstStarted := make(chan struct{})
+	startFirst := sync.OnceFunc(func() { close(firstStarted) })
 	firstProceed := make(chan struct{})
 	releaseFirst := sync.OnceFunc(func() { close(firstProceed) })
 	defer releaseFirst()
 	firstErr := errors.New("first refresh failed")
-	_, err = client1.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
-		close(firstStarted)
+	triggerRefresh(t, client1, firstStarted, func(context.Context, string) (string, error) {
+		startFirst()
 		<-firstProceed
 		return "", firstErr
-	})
-	require.NoError(t, err)
-	select {
-	case <-firstStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("first refresh did not start")
-	}
-
-	time.Sleep(250 * time.Millisecond)
+	}, "first refresh did not start")
 
 	secondStarted := make(chan struct{})
+	startSecond := sync.OnceFunc(func() { close(secondStarted) })
 	secondProceed := make(chan struct{})
 	releaseSecond := sync.OnceFunc(func() { close(secondProceed) })
 	defer releaseSecond()
-	_, err = client2.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
-		close(secondStarted)
+	triggerRefresh(t, client2, secondStarted, func(context.Context, string) (string, error) {
+		startSecond()
 		<-secondProceed
 		return "second", nil
-	})
-	require.NoError(t, err)
-	select {
-	case <-secondStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("second refresh did not start")
-	}
+	}, "second refresh did not start")
 
 	releaseFirst()
 	time.Sleep(50 * time.Millisecond)

@@ -324,15 +324,9 @@ func (c *cache[K, V]) getMultiKeyedInto(
 	dst map[K]V,
 	fn func(ctx context.Context, missing []K) (map[K]V, error),
 ) (map[K]V, error) {
-	encKeys := make([]string, len(keys))
-	byEnc := make(map[string]K, len(keys))
-	for i, k := range keys {
-		s, err := c.keyCodec.EncodeKey(k)
-		if err != nil {
-			return nil, fmt.Errorf("redcache: encode key: %w", err)
-		}
-		encKeys[i] = s
-		byEnc[s] = k
+	encKeys, byEnc, err := c.encodeKeysWithLookup(keys)
+	if err != nil {
+		return nil, err
 	}
 	return c.getMultiEncodedInto(ctx, ttl, encKeys, byEnc, dst, fn)
 }
@@ -405,19 +399,33 @@ func (c *cache[K, V]) encodeKeys(keys []K) ([]string, error) {
 	if c.keyIsString {
 		return asStringSlice(keys), nil
 	}
+	encKeys, _, err := c.encodeKeysWithLookup(keys)
+	return encKeys, err
+}
+
+func (c *cache[K, V]) encodeKeysWithLookup(keys []K) ([]string, map[string]K, error) {
 	encKeys := make([]string, len(keys))
+	byEnc := make(map[string]K, len(keys))
 	for i, k := range keys {
 		s, err := c.keyCodec.EncodeKey(k)
 		if err != nil {
-			return nil, fmt.Errorf("redcache: encode key: %w", err)
+			return nil, nil, fmt.Errorf("redcache: encode key: %w", err)
+		}
+		if prev, ok := byEnc[s]; ok && prev != k {
+			return nil, nil, duplicateEncodedKeyError(s, prev, k)
 		}
 		encKeys[i] = s
+		byEnc[s] = k
 	}
-	return encKeys, nil
+	return encKeys, byEnc, nil
 }
 
 func (c *cache[K, V]) encodeMultiResult(result map[K]V) (map[string]string, error) {
 	out := make(map[string]string, len(result))
+	var byEnc map[string]K
+	if !c.keyIsString {
+		byEnc = make(map[string]K, len(result))
+	}
 	for k, v := range result {
 		var s string
 		if c.keyIsString {
@@ -428,6 +436,10 @@ func (c *cache[K, V]) encodeMultiResult(result map[K]V) (map[string]string, erro
 				return nil, fmt.Errorf("redcache: encode key: %w", kerr)
 			}
 			s = ks
+			if prev, ok := byEnc[s]; ok && prev != k {
+				return nil, duplicateEncodedKeyError(s, prev, k)
+			}
+			byEnc[s] = k
 		}
 		enc, eerr := c.encodeValue(v)
 		if eerr != nil {
@@ -533,18 +545,12 @@ func (c *cache[K, V]) setMultiKeyed(
 	keys []K,
 	fn func(ctx context.Context, keys []K) (map[K]V, error),
 ) error {
-	encKeys := make([]string, len(keys))
-	byEnc := make(map[string]K, len(keys))
-	for i, k := range keys {
-		s, err := c.keyCodec.EncodeKey(k)
-		if err != nil {
-			return fmt.Errorf("redcache: encode key: %w", err)
-		}
-		encKeys[i] = s
-		byEnc[s] = k
+	encKeys, byEnc, err := c.encodeKeysWithLookup(keys)
+	if err != nil {
+		return err
 	}
 
-	err := c.core.setMulti(ctx, ttl, encKeys, func(ctx context.Context, encArg []string) (map[string]string, error) {
+	err = c.core.setMulti(ctx, ttl, encKeys, func(ctx context.Context, encArg []string) (map[string]string, error) {
 		argK := make([]K, len(encArg))
 		for i, s := range encArg {
 			argK[i] = byEnc[s]
@@ -627,6 +633,10 @@ func (c *cache[K, V]) forceSetMultiKeyed(
 			failed[k] = fmt.Errorf("redcache: encode key: %w", err)
 			continue
 		}
+		if prev, ok := byEnc[s]; ok && prev != k {
+			failed[k] = duplicateEncodedKeyError(s, prev, k)
+			continue
+		}
 		enc, err := c.encodeValue(v)
 		if err != nil {
 			failed[k] = fmt.Errorf("redcache: encode value: %w", err)
@@ -675,6 +685,10 @@ func mergeForceSetResult[K comparable](err error, byEnc map[string]K, failed map
 		}
 	}
 	return succeeded
+}
+
+func duplicateEncodedKeyError[K comparable](encoded string, first K, second K) error {
+	return fmt.Errorf("redcache: encode key: duplicate encoded key %q for keys %v and %v", encoded, first, second)
 }
 
 // convertBatchErrorToTyped maps a *batchError's string keys back to typed K

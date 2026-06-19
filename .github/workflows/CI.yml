@@ -35,7 +35,9 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
       - name: Run race tests
-        run: go test -race -count=1 -json ./... > TestResults.json
+        run: |
+          set -o pipefail
+          go test -race -count=1 -json ./... | tee TestResults.json
       - name: Upload Go test results
         if: always()
         uses: actions/upload-artifact@v7

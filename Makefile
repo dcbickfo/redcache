@@ -38,7 +38,7 @@ test-short: ## Run tests with -short
 
 .PHONY: test-race
 test-race: ## Run tests with the race detector
-	$(GO) test -race $(PKG)
+	$(GO) test -race -count=1 $(PKG)
 
 .PHONY: bench
 bench: ## Run benchmarks only (no tests)

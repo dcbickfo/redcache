@@ -375,3 +375,34 @@ func TestTyped_ForceSetMulti_IntKeys_PartialKeyEncodeFailure(t *testing.T) {
 		t.Fatalf("key 1 value = %q, want one", got)
 	}
 }
+
+func TestTyped_ForceSetMulti_IntKeys_DuplicateEncodedKeyFailure(t *testing.T) {
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(
+		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+		redcache.WithLockTTL(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("open conn: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	encoded := "typed-collision:" + uuid.NewString()
+	cache := redcache.New[int, string](conn, redcache.KeyCodecFunc[int](func(int) (string, error) {
+		return encoded, nil
+	}), redcache.StringCodec{})
+
+	err = cache.ForceSetMulti(context.Background(), time.Second, map[int]string{
+		1: "one",
+		2: "two",
+	})
+	if err == nil {
+		t.Fatal("expected duplicate encoded key failure")
+	}
+	var bke *redcache.BatchKeyError[int]
+	if !errors.As(err, &bke) {
+		t.Fatalf("expected *BatchKeyError[int], got %T: %v", err, err)
+	}
+	if !bke.HasFailures() {
+		t.Fatalf("expected duplicate encoded key failure, got %+v", bke)
+	}
+}

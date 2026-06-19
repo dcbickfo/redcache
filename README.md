@@ -273,7 +273,9 @@ u, err := cache.Get(ctx, time.Minute, UserID(123),
 )
 ```
 
-The key codec must be deterministic, concurrent-safe, and produce a non-empty key.
+The key codec must be deterministic, concurrent-safe, produce a non-empty key,
+and encode distinct logical keys to distinct Redis keys. Multi-key operations
+reject typed-key collisions before touching Redis.
 
 ## Raw bytes
 

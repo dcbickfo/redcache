@@ -23,7 +23,8 @@ type Codec[V any] interface {
 }
 
 // KeyCodec encodes a typed key K into the Redis key string. Must be
-// deterministic, concurrent-safe, and produce a non-empty key.
+// deterministic, concurrent-safe, produce a non-empty key, and encode distinct
+// logical keys to distinct Redis keys.
 type KeyCodec[K any] interface {
 	EncodeKey(K) (string, error)
 }

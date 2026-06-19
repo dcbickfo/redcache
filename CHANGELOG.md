@@ -48,8 +48,8 @@ settles.
 - **Functional options replace the `CacheAsideOption` struct.** Removed
   `CacheAsideOption`. Configure with `WithLockTTL`, `WithLogger`, `WithMetrics`,
   `WithLockPrefix`, `WithRefreshLockPrefix`, `WithRefreshAfterFraction`,
-  `WithRefreshBeta`, `WithRefreshWorkers`, `WithRefreshQueueSize`, and
-  `WithClientBuilder`.
+  `WithRefreshBeta`, `WithRefreshTimeout`, `WithRefreshWorkers`,
+  `WithRefreshQueueSize`, and `WithClientBuilder`.
 - **Typed batch error only.** Removed `BatchError`, `NewBatchError`, and
   `NewBatchKeyError` from the public surface. Multi-key write partial failures
   surface as `*BatchKeyError[K]` via `errors.As` (with nil-safe `HasFailures`,
@@ -67,9 +67,9 @@ settles.
   `RedisError(op)` (Redis-command failures, `op` ∈ `read`/`lock`/`set`/`del`/`touch`).
 - **`redcacheotel`** subpackage (`github.com/dcbickfo/redcache/redcacheotel`) — a
   drop-in OpenTelemetry `Metrics` adapter (`redcacheotel.NewMetrics(meterProvider)`).
-  It lives in the main module, so OpenTelemetry is now a core dependency, pinned at
-  v1.41.0 to preserve the Go 1.24 floor (v1.42+ require Go 1.25). Importing redcache's
-  core does not compile OpenTelemetry into your binary — it is only built if you import
+  It lives in the main module, so OpenTelemetry is now a core dependency, currently
+  at v1.44.0 alongside the Go 1.25 floor. Importing redcache's core does not
+  compile OpenTelemetry into your binary — it is only built if you import
   `redcacheotel` — though it does appear in the module graph.
 - **`redcachetest` injectable clock** — `redcachetest.NewWithClock[K, V](clk)` with
   a `Clock` (`Advance`/`Now`) for deterministic TTL/expiry tests without `time.Sleep`.
