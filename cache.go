@@ -61,10 +61,9 @@ type Cache[K comparable, V any] interface {
 
 // Conn owns one rueidis client, its invalidation stream, and a lock namespace.
 // Derive typed cache views over it with New, NewString, or NewBytes — they all
-// share the single client and invalidation subscription. The Conn and every
-// view it spawns share one client; closing any of them closes it. Open the Conn
-// once, derive all the views you need, and close the Conn when done with all of
-// them.
+// share the single client and invalidation subscription. Lifecycle stays on the
+// Conn: open it once, derive all the views you need, and close the Conn when
+// done with all of them.
 type Conn struct {
 	core *cacheAside
 }
