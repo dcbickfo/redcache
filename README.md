@@ -53,11 +53,13 @@ go run ./examples/metrics
 
 Set `REDIS_ADDR` to point them at a non-default Redis address.
 
-## Migrating from v0.2.x
+## Migrating from v0.2.x to v0.3.x
 
-redcache is still pre-1.0, and the next minor release intentionally breaks the
-old string-only API. Existing integrations on `*CacheAside` or
-`*PrimeableCacheAside` do **not** need to adopt typed domain keys immediately.
+v0.3.0 is the next minor release after v0.2.x. redcache is still pre-1.0, and
+this minor intentionally breaks the old string-only API. These notes focus on
+the interface changes needed for migration. Existing integrations on
+`*CacheAside` or `*PrimeableCacheAside` do **not** need to adopt typed domain
+keys immediately.
 The direct replacement is usually one `Conn` plus a `Cache[string, string]`
 view:
 
