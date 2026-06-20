@@ -16,7 +16,7 @@ A cache-aside implementation for Redis, built on the [rueidis](https://github.co
 
 ## Requirements
 
-- Go 1.23+
+- Go 1.24+
 - Redis 7+
 
 ## Installation
@@ -149,6 +149,7 @@ func (r Repository) GetByIDs(ctx context.Context, keys []string) (map[string]str
 | `RefreshLockPrefix` | `string` | `"__redcache:refresh:"` | Prefix for distributed refresh-ahead locks. |
 | `RefreshAfterFraction` | `float64` | `0` (disabled) | Fraction of TTL after which a refresh-ahead is triggered. Must be in `[0, 1)`. |
 | `RefreshBeta` | `float64` | `0` (XFetch off) | Scales the XFetch probabilistic-refresh window. `0` keeps refresh deterministic at the floor; `1.0` is the canonical XFetch beta from Vattani et al. Higher values trigger refresh earlier within the floor, weighted by how long the value took to compute. |
+| `RefreshTimeout` | `time.Duration` | `0` (uses the value's ttl) | Compute budget for a refresh-ahead callback, decoupled from `LockTTL`. Without it a callback slower than `LockTTL` is cancelled and reported as an error. Must not be negative. |
 | `RefreshWorkers` | `int` | `4` (when refresh enabled) | Background workers processing refresh jobs. |
 | `RefreshQueueSize` | `int` | `64` (when refresh enabled) | Capacity of the refresh job queue. Jobs are silently dropped when full; the stale value continues to serve. |
 
@@ -166,6 +167,10 @@ client, err := redcache.NewRedCacheAside(
         RefreshQueueSize:     64,
     },
 )
+// Close() drains the refresh workers on shutdown. It does not close the rueidis
+// client, so close that separately.
+defer client.Close()
+defer client.Client().Close()
 ```
 
 ### XFetch probabilistic refresh
@@ -191,7 +196,7 @@ For workloads that already use `RefreshAfterFraction` + `RefreshBeta`, XFetch ha
 
 Implement `Metrics` (or embed `NoopMetrics` and override the methods you care about) to wire counters into Prometheus, OpenTelemetry, or any other backend. Methods are called on the hot path and must be concurrent-safe.
 
-High-volume events (`CacheHits`, `CacheMisses`, `LockContended`, `RefreshTriggered`, `RefreshSkipped`, `RefreshDropped`) are aggregated per operation and emitted once with a count rather than once per key. Diagnostic events (`LockLost`, `RefreshError`, `RefreshPanicked`) carry the affected key.
+High-volume events (`CacheHits`, `CacheMisses`, `LockContended`, `RefreshTriggered`, `RefreshSkipped`, `RefreshDropped`) are aggregated per operation and emitted once with a count rather than once per key. `LockWaitDuration` fires once per resolved lock wait. Diagnostic events (`LockLost`, `RefreshError`, `RefreshPanicked`) carry the affected key; `InvalidationError` fires when an invalidation message can't be parsed (no key).
 
 ```go
 type myMetrics struct {

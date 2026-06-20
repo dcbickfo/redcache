@@ -1639,6 +1639,15 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "RefreshQueueSize")
 	})
+	t.Run("negative RefreshTimeout", func(t *testing.T) {
+		t.Parallel()
+		_, err := redcache.NewRedCacheAside(
+			rueidis.ClientOption{InitAddress: addr},
+			redcache.CacheAsideOption{RefreshAfterFraction: 0.8, RefreshTimeout: -time.Second},
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "RefreshTimeout")
+	})
 	t.Run("custom workers and queue", func(t *testing.T) {
 		t.Parallel()
 		client, err := redcache.NewRedCacheAside(

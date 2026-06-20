@@ -6,10 +6,24 @@ import (
 	"math/rand/v2"
 	"runtime/debug"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/rueidis"
+
+	"github.com/dcbickfo/redcache/internal/cmdx"
+	"github.com/dcbickfo/redcache/internal/mapsx"
 )
+
+// refreshBudget returns how long a refresh-ahead callback may run. RefreshTimeout
+// overrides the per-call ttl when set; otherwise the value's own ttl is the
+// compute budget.
+func (rca *CacheAside) refreshBudget(ttl time.Duration) time.Duration {
+	if rca.refreshTimeout > 0 {
+		return rca.refreshTimeout
+	}
+	return ttl
+}
 
 // refreshJob is a unit of work for the refresh worker pool. Holding fields
 // directly (rather than a closure) avoids an allocation per trigger on the
@@ -170,15 +184,19 @@ func (rca *CacheAside) doSingleRefresh(
 	key string,
 	fn func(ctx context.Context, key string) (string, error),
 ) {
-	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rca.lockTTL)
+	budget := rca.refreshBudget(ttl)
+	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
 
 	// Distributed dedup: SET NX on a separate refresh lock key. IsRedisNil
 	// signals "another node is refreshing" (healthy contention); other errors
 	// are real Redis problems and must be reported separately so operators can
-	// distinguish a healthy dedup signal from a broken Redis.
+	// distinguish a healthy dedup signal from a broken Redis. The lock value is a
+	// unique token (not a fixed "1") so release can CAS-check ownership, and its
+	// TTL is the compute budget so it covers a long refresh without expiring.
 	refreshKey := rca.refreshKeyFor(key)
-	err := rca.client.Do(refreshCtx, rca.client.B().Set().Key(refreshKey).Value("1").Nx().Px(rca.lockTTL).Build()).Error()
+	token := rca.lockPool.Generate()
+	err := rca.client.Do(refreshCtx, rca.client.B().Set().Key(refreshKey).Value(token).Nx().Px(budget).Build()).Error()
 	if err != nil {
 		if rueidis.IsRedisNil(err) {
 			rca.emitRefreshSkipped(1)
@@ -191,7 +209,9 @@ func (rca *CacheAside) doSingleRefresh(
 	defer func() {
 		cleanupCtx, cleanupCancel := rca.cleanupCtx(ctx)
 		defer cleanupCancel()
-		if delErr := rca.client.Do(cleanupCtx, rca.client.B().Del().Key(refreshKey).Build()).Error(); delErr != nil {
+		// CAS release: delete only if we still hold our own token, so a refresh
+		// that overran its TTL can't delete a successor's lock.
+		if delErr := delKeyLua.Exec(cleanupCtx, rca.client, []string{refreshKey}, []string{token}).Error(); delErr != nil {
 			rca.logger.Error("refresh-ahead lock release failed", "key", key, "refreshKey", refreshKey, "error", delErr)
 		}
 	}()
@@ -205,8 +225,13 @@ func (rca *CacheAside) doSingleRefresh(
 	}
 	wrapped := wrapEnvelope(val, time.Since(start))
 
+	// Write under a fresh cleanup context, not refreshCtx: a callback that
+	// consumed most of its budget would otherwise hit an expired context here and
+	// lose its successfully-computed value.
+	writeCtx, writeCancel := rca.cleanupCtx(ctx)
+	defer writeCancel()
 	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
-	if err := refreshAheadSetScript.Exec(refreshCtx, rca.client, []string{key}, []string{wrapped, ttlMs, rca.lockPrefix}).Error(); err != nil {
+	if err := refreshAheadSetScript.Exec(writeCtx, rca.client, []string{key}, []string{wrapped, ttlMs, rca.lockPrefix}).Error(); err != nil {
 		rca.logger.Error("refresh-ahead set failed", "key", key, "error", err)
 		rca.emitRefreshError(key)
 	}
@@ -256,14 +281,16 @@ func (rca *CacheAside) doMultiRefresh(
 	keys []string,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
 ) {
-	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rca.lockTTL)
+	budget := rca.refreshBudget(ttl)
+	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
 
-	lockedKeys := rca.acquireRefreshLocks(refreshCtx, keys)
-	if len(lockedKeys) == 0 {
+	lockedTokens := rca.acquireRefreshLocks(refreshCtx, keys, budget)
+	if len(lockedTokens) == 0 {
 		return
 	}
-	defer rca.deleteRefreshLocks(ctx, lockedKeys)
+	defer rca.deleteRefreshLocks(ctx, lockedTokens)
+	lockedKeys := mapsx.Keys(lockedTokens)
 
 	start := time.Now()
 	vals, err := fn(refreshCtx, lockedKeys)
@@ -275,22 +302,30 @@ func (rca *CacheAside) doMultiRefresh(
 		return
 	}
 
-	rca.setRefreshedValues(refreshCtx, ttl, vals, perValueDelta(time.Since(start), len(vals)))
+	// Write under a fresh cleanup context (see doSingleRefresh) so a slow-but-
+	// successful callback still persists its values.
+	writeCtx, writeCancel := rca.cleanupCtx(ctx)
+	defer writeCancel()
+	rca.setRefreshedValues(writeCtx, ttl, vals, perValueDelta(time.Since(start), len(vals)))
 }
 
-// acquireRefreshLocks batch-acquires distributed SET NX locks for refresh keys.
-// Distinguishes IsRedisNil (healthy dedup → RefreshSkipped) from real Redis
-// errors (→ RefreshError + log).
-func (rca *CacheAside) acquireRefreshLocks(ctx context.Context, keys []string) []string {
+// acquireRefreshLocks batch-acquires distributed SET NX locks for refresh keys,
+// returning a map of data key to the unique token held for that key (used by
+// deleteRefreshLocks to CAS-release). Each lock's TTL is the compute budget so a
+// long refresh does not lose its dedup lock mid-flight. Distinguishes IsRedisNil
+// (healthy dedup → RefreshSkipped) from real Redis errors (→ RefreshError + log).
+func (rca *CacheAside) acquireRefreshLocks(ctx context.Context, keys []string, budget time.Duration) map[string]string {
 	cmdsP := commandsPool.Get(len(keys))
 	defer commandsPool.Put(cmdsP)
 	cmds := *cmdsP
+	tokens := make([]string, len(keys))
 	for i, key := range keys {
-		cmds[i] = rca.client.B().Set().Key(rca.refreshKeyFor(key)).Value("1").Nx().Px(rca.lockTTL).Build()
+		tokens[i] = rca.lockPool.Generate()
+		cmds[i] = rca.client.B().Set().Key(rca.refreshKeyFor(key)).Value(tokens[i]).Nx().Px(budget).Build()
 	}
 	resps := rca.client.DoMulti(ctx, cmds...)
 
-	var locked []string
+	locked := make(map[string]string, len(keys))
 	var skipped int
 	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
@@ -302,30 +337,55 @@ func (rca *CacheAside) acquireRefreshLocks(ctx context.Context, keys []string) [
 			}
 			continue
 		}
-		locked = append(locked, keys[i])
+		locked[keys[i]] = tokens[i]
 	}
 	rca.emitRefreshSkipped(skipped)
 	return locked
 }
 
-// deleteRefreshLocks removes distributed refresh lock keys (best effort).
-// Failures are logged so operators can investigate; a stuck refresh lock
-// disables refresh-ahead for that key for one lockTTL window.
-func (rca *CacheAside) deleteRefreshLocks(ctx context.Context, keys []string) {
+// deleteRefreshLocks CAS-releases distributed refresh locks (best effort),
+// deleting each key only if it still holds our token so an overran refresh can't
+// delete a successor's lock. Lua scripts run per cluster slot (refresh keys are
+// hash-tagged to their data key's slot), fanning out across slots in parallel —
+// mirroring unlockMulti. Failures are logged; a stuck lock disables refresh for
+// that key until its TTL expires.
+func (rca *CacheAside) deleteRefreshLocks(ctx context.Context, tokens map[string]string) {
+	if len(tokens) == 0 {
+		return
+	}
 	cleanupCtx, cleanupCancel := rca.cleanupCtx(ctx)
 	defer cleanupCancel()
-	delCmdsP := commandsPool.Get(len(keys))
-	defer commandsPool.Put(delCmdsP)
-	delCmds := *delCmdsP
-	for i, key := range keys {
-		delCmds[i] = rca.client.B().Del().Key(rca.refreshKeyFor(key)).Build()
+	type keyedExec struct {
+		key  string
+		exec rueidis.LuaExec
 	}
-	resps := rca.client.DoMulti(cleanupCtx, delCmds...)
-	for i, resp := range resps {
-		if err := resp.Error(); err != nil {
-			rca.logger.Error("refresh-ahead lock release failed", "key", keys[i], "error", err)
-		}
+	bySlot := make(map[uint16][]keyedExec)
+	for key, token := range tokens {
+		refreshKey := rca.refreshKeyFor(key)
+		slot := cmdx.Slot(refreshKey)
+		bySlot[slot] = append(bySlot[slot], keyedExec{
+			key:  key,
+			exec: rueidis.LuaExec{Keys: []string{refreshKey}, Args: []string{token}},
+		})
 	}
+	var wg sync.WaitGroup
+	for _, stmts := range bySlot {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			execs := make([]rueidis.LuaExec, len(stmts))
+			for i, s := range stmts {
+				execs[i] = s.exec
+			}
+			resps := delKeyLua.ExecMulti(cleanupCtx, rca.client, execs...)
+			for i, resp := range resps {
+				if err := resp.Error(); err != nil {
+					rca.logger.Error("refresh-ahead lock release failed", "key", stmts[i].key, "error", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // setRefreshedValues writes refreshed values via a CAS-style Lua script that

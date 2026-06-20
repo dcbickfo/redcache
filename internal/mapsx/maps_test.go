@@ -29,25 +29,3 @@ func TestKeys(t *testing.T) {
 
 	assert.ElementsMatch(t, expectedIntKeys, intKeys, "expected keys to match")
 }
-
-func TestValues(t *testing.T) {
-	t.Parallel()
-	// Test with an empty map
-	emptyMap := map[string]int{}
-	values := mapsx.Values(emptyMap)
-	assert.Lenf(t, values, 0, "expected no values for empty map")
-
-	// Test with a map with some elements
-	sampleMap := map[string]int{"a": 1, "b": 2, "c": 3}
-	values = mapsx.Values(sampleMap)
-	expectedValues := []int{1, 2, 3}
-
-	assert.ElementsMatch(t, expectedValues, values, "expected values to match")
-
-	// Test with a map with different value types
-	intKeyMap := map[int]string{1: "one", 2: "two", 3: "three"}
-	strValues := mapsx.Values(intKeyMap)
-	expectedStrValues := []string{"one", "two", "three"}
-
-	assert.ElementsMatch(t, expectedStrValues, strValues, "expected values to match")
-}

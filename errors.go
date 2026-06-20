@@ -11,6 +11,11 @@ import (
 // This can occur if the lock TTL expires during callback execution or if Redis invalidates the lock.
 var ErrLockLost = errors.New("lock was lost or expired before value could be set")
 
+// errCallbackNoValue marks a key that a multi-key callback locked but never
+// returned a value for. SetMulti surfaces it via BatchError so the caller learns
+// the key was not cached (it is rolled back to its prior value).
+var errCallbackNoValue = errors.New("callback returned no value for key")
+
 // BatchError represents partial failures in a multi-key operation.
 // Some keys may have succeeded while others failed.
 //

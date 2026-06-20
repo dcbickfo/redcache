@@ -127,6 +127,12 @@ var (
 	// a real (non-lock) value. Skips if the key is missing (let normal Get-on-miss
 	// handle population) or holds a lock value (a Get/Set is already in progress
 	// and will write its own current value). Returns 1 on write, 0 if skipped.
+	//
+	// The write is NOT a value-CAS: it has no ownership token to compare against,
+	// so a lock-free ForceSet that lands between this script's GET and SET can be
+	// overwritten by the (slightly staler) recomputed value. Refresh-ahead is
+	// best-effort — the staleness is bounded by ttl and self-heals on the next
+	// refresh; callers needing strict last-writer-wins should use Set/ForceSet.
 	refreshAheadSetScript = rueidis.NewLuaScript(`
 		local cur = redis.call("GET", KEYS[1])
 		if cur == false then

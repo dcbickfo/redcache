@@ -55,6 +55,9 @@ func (pca *PrimeableCacheAside) Set(
 	key string,
 	fn func(ctx context.Context, key string) (string, error),
 ) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	lockVal := pca.lockPool.Generate()
 
 	for {
@@ -145,6 +148,12 @@ func (pca *PrimeableCacheAside) acquireSingleWriteLock(
 //
 // The callback receives currently-held lock keys in undefined order (map
 // iteration). Callers needing a stable order should sort the slice before use.
+// fn must return a value for every key it is given; a key the callback omits is
+// rolled back to its prior value (not cached) and reported as failed in the
+// returned *BatchError.
+//
+// ttl must be positive (at least 1ms); a non-positive ttl returns an error
+// before any lock is taken.
 //
 // On partial CAS failure, returns a *BatchError listing succeeded and failed keys.
 // On full success, returns nil.
@@ -156,6 +165,9 @@ func (pca *PrimeableCacheAside) SetMulti(
 ) error {
 	if len(keys) == 0 {
 		return nil
+	}
+	if err := validateTTL(ttl); err != nil {
+		return err
 	}
 
 	// Wait for any existing read locks on these keys.
@@ -192,10 +204,25 @@ func (pca *PrimeableCacheAside) SetMulti(
 		return nil
 	}
 
-	// Roll back any keys that weren't successfully written. Restore (rather
-	// than unlock) so a CAS transport/parse error preserves the prior real
-	// value captured during acquire. For lock-lost keys the restore Lua's
-	// CAS-check fails harmlessly (stealer's value stays).
+	failed = pca.rollbackUnsetKeys(ctx, lockValues, savedValues, vals, succeeded, failed)
+	return NewBatchError(failed, succeeded)
+}
+
+// rollbackUnsetKeys reverts every locked key that was not successfully written
+// and returns the per-key failure map. "Not written" covers two cases: a CAS
+// failure (already in failed) and a key the callback omitted (absent from vals)
+// — the latter is surfaced as errCallbackNoValue so it doesn't vanish from the
+// BatchError. Restore (rather than unlock) preserves the prior real value
+// captured during acquire; for lock-lost keys the restore Lua's CAS-check fails
+// harmlessly (the stealer's value stays).
+func (pca *PrimeableCacheAside) rollbackUnsetKeys(
+	ctx context.Context,
+	lockValues map[string]string,
+	savedValues map[string]savedValue,
+	vals map[string]string,
+	succeeded []string,
+	failed map[string]error,
+) map[string]error {
 	succeededSet := make(map[string]struct{}, len(succeeded))
 	for _, s := range succeeded {
 		succeededSet[s] = struct{}{}
@@ -209,8 +236,15 @@ func (pca *PrimeableCacheAside) SetMulti(
 	if len(toRestore) > 0 {
 		pca.restoreMultiValues(ctx, toRestore, savedValues)
 	}
-
-	return NewBatchError(failed, succeeded)
+	for key := range lockValues {
+		if _, ok := vals[key]; !ok {
+			if failed == nil {
+				failed = make(map[string]error)
+			}
+			failed[key] = errCallbackNoValue
+		}
+	}
+	return failed
 }
 
 // ForceSet unconditionally writes a value to Redis, bypassing all locks.
@@ -224,6 +258,9 @@ func (pca *PrimeableCacheAside) SetMulti(
 // sampling treats it as "no compute-time information" — which falls back to
 // the simple floor check, preserving prior behaviour for unconditional writes.
 func (pca *PrimeableCacheAside) ForceSet(ctx context.Context, ttl time.Duration, key, value string) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	return pca.client.Do(ctx, pca.client.B().Set().Key(key).Value(wrapEnvelope(value, 0)).Px(ttl).Build()).Error()
 }
 
@@ -240,6 +277,9 @@ func (pca *PrimeableCacheAside) ForceSetMulti(ctx context.Context, ttl time.Dura
 	if len(values) == 0 {
 		return nil
 	}
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	cmdsP := commandsPool.GetCap(len(values))
 	defer commandsPool.Put(cmdsP)
 	keyOrder := make([]string, 0, len(values))
@@ -249,15 +289,19 @@ func (pca *PrimeableCacheAside) ForceSetMulti(ctx context.Context, ttl time.Dura
 	}
 	resps := pca.client.DoMulti(ctx, *cmdsP...)
 	var firstErr error
+	var firstErrKey string
 	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
 			pca.logger.Error("ForceSetMulti key failed", "key", keyOrder[i], "error", err)
 			if firstErr == nil {
-				firstErr = err
+				firstErr, firstErrKey = err, keyOrder[i]
 			}
 		}
 	}
-	return firstErr
+	if firstErr != nil {
+		return fmt.Errorf("force set key %q: %w", firstErrKey, firstErr)
+	}
+	return nil
 }
 
 // waitForReadLocks registers all keys, batch-reads them, and waits for any that

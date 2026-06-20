@@ -34,8 +34,9 @@
 // executes the callback function for a given key at a time. Other goroutines will wait
 // for the lock to be released and then return the cached value.
 //
-// Locks are implemented using Redis SET NX with a configurable TTL. Lock values use
-// UUIDv7 for uniqueness and are prefixed (default: "__redcache:lock:") to avoid
+// Locks are implemented using Redis SET NX with a configurable TTL. Lock values
+// combine a per-instance UUIDv7 with an atomic counter (avoiding a UUID
+// allocation per lock) and are prefixed (default: "__redcache:lock:") to avoid
 // collisions with application data.
 //
 // # Context and Timeouts
@@ -63,6 +64,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -156,6 +158,7 @@ type CacheAside struct {
 	lockPrefix     string
 	refreshAfter   float64                     // 0 = disabled
 	refreshBeta    float64                     // XFetch beta; 0 = simple floor only
+	refreshTimeout time.Duration               // refresh callback budget; 0 = use per-call ttl
 	refreshing     syncx.Map[string, struct{}] // dedup in-flight refreshes (local)
 	refreshPrefix  string                      // prefix for distributed refresh lock keys
 	refreshQueue   chan refreshJob             // worker pool job queue (nil when disabled)
@@ -219,6 +222,14 @@ type CacheAsideOption struct {
 	// refresh it relative to a serial path — the tradeoff for not having to
 	// instrument each per-key compute time.
 	RefreshBeta float64
+	// RefreshTimeout bounds how long a refresh-ahead callback may run before it
+	// is cancelled, decoupling refresh compute budget from LockTTL. Without it a
+	// callback slower than LockTTL is cancelled mid-flight and reported as an
+	// error, silently disabling refresh-ahead for the slow-to-recompute values
+	// it exists to help. Defaults to the per-call ttl of the value being
+	// refreshed when 0. Must not be negative. Only meaningful when
+	// RefreshAfterFraction > 0.
+	RefreshTimeout time.Duration
 	// RefreshWorkers is the number of background workers that process refresh-ahead
 	// jobs. Defaults to 4 when RefreshAfterFraction > 0. Must be > 0 when refresh
 	// is enabled.
@@ -272,6 +283,9 @@ func validateRefreshDefaults(caOption *CacheAsideOption) error {
 	if caOption.RefreshBeta < 0 {
 		return errors.New("RefreshBeta must not be negative")
 	}
+	if caOption.RefreshTimeout < 0 {
+		return errors.New("RefreshTimeout must not be negative")
+	}
 	if caOption.RefreshAfterFraction == 0 {
 		return nil
 	}
@@ -286,6 +300,18 @@ func validateRefreshDefaults(caOption *CacheAsideOption) error {
 	}
 	if caOption.RefreshQueueSize == 0 {
 		caOption.RefreshQueueSize = 64
+	}
+	return nil
+}
+
+// validateTTL rejects a non-positive per-call ttl before any Redis work or user
+// callback runs. Redis SET PX / PEXPIRE require a positive millisecond value, so
+// a ttl that rounds to <= 0ms would otherwise surface as an opaque Redis
+// "invalid expire time" error on a miss (Get/GetMulti/Set/SetMulti) or silently
+// delete the key via PEXPIRE 0 (Touch/TouchMulti).
+func validateTTL(ttl time.Duration) error {
+	if ttl.Milliseconds() <= 0 {
+		return fmt.Errorf("redcache: ttl must be at least 1ms, got %s", ttl)
 	}
 	return nil
 }
@@ -311,6 +337,7 @@ func NewRedCacheAside(clientOption rueidis.ClientOption, caOption CacheAsideOpti
 		lockPrefix:     caOption.LockPrefix,
 		refreshAfter:   caOption.RefreshAfterFraction,
 		refreshBeta:    caOption.RefreshBeta,
+		refreshTimeout: caOption.RefreshTimeout,
 		refreshPrefix:  caOption.RefreshLockPrefix,
 	}
 	// Force a single connection per node so client-side cache reads and the
@@ -552,6 +579,9 @@ func (rca *CacheAside) Get(
 	key string,
 	fn func(ctx context.Context, key string) (val string, err error),
 ) (string, error) {
+	if err := validateTTL(ttl); err != nil {
+		return "", err
+	}
 retry:
 	wait, leader := rca.register(key)
 	res, err := rca.tryGet(ctx, ttl, key)
@@ -649,6 +679,9 @@ func (rca *CacheAside) DelMulti(ctx context.Context, keys ...string) error {
 // Use Touch to implement sliding-TTL semantics (sessions, tokens) without
 // re-running the origin function.
 func (rca *CacheAside) Touch(ctx context.Context, ttl time.Duration, key string) error {
+	if err := validateTTL(ttl); err != nil {
+		return err
+	}
 	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
 	if err := touchScript.Exec(ctx, rca.client, []string{key}, []string{ttlMs, rca.lockPrefix}).Error(); err != nil {
 		return fmt.Errorf("touch key %q: %w", key, err)
@@ -663,6 +696,9 @@ func (rca *CacheAside) Touch(ctx context.Context, ttl time.Duration, key string)
 func (rca *CacheAside) TouchMulti(ctx context.Context, ttl time.Duration, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
+	}
+	if err := validateTTL(ttl); err != nil {
+		return err
 	}
 	stmtsBySlot := rca.groupTouchExecs(ttl, keys)
 	if firstErrKey, firstErr := rca.runTouchSlots(ctx, stmtsBySlot); firstErr != nil {
@@ -847,14 +883,25 @@ func (rca *CacheAside) unlock(ctx context.Context, key string, lock string) erro
 
 // GetMulti returns cached values for the given keys, populating any misses by calling fn.
 // SET operations are grouped by Redis cluster slot for efficient batching.
+//
+// fn is invoked with the subset of keys that missed and must return a value for
+// every key it is given (use an empty string for a known-absent entity). If fn
+// omits a requested key, GetMulti returns an error naming the missing keys
+// rather than retrying indefinitely.
+//
+// ttl must be positive (at least 1ms); a non-positive ttl returns an error
+// before fn runs.
 func (rca *CacheAside) GetMulti(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []string,
-	fn func(ctx context.Context, key []string) (val map[string]string, err error),
+	fn func(ctx context.Context, keys []string) (val map[string]string, err error),
 ) (map[string]string, error) {
 	if len(keys) == 0 {
 		return map[string]string{}, nil
+	}
+	if err := validateTTL(ttl); err != nil {
+		return nil, err
 	}
 	res := make(map[string]string, len(keys))
 
@@ -944,7 +991,7 @@ func (rca *CacheAside) runLeaderSets(
 	ctx context.Context,
 	ttl time.Duration,
 	leaderKeys []string,
-	fn func(ctx context.Context, key []string) (val map[string]string, err error),
+	fn func(ctx context.Context, keys []string) (val map[string]string, err error),
 	res map[string]string,
 ) error {
 	n := 0
@@ -995,6 +1042,11 @@ func (rca *CacheAside) tryGetMulti(ctx context.Context, ttl time.Duration, keys 
 		}
 	}
 	resps := rca.client.DoMultiCache(ctx, multi...)
+	// Defensive: a truncated pipeline response would otherwise misalign resps[i]
+	// with keys[i] and silently drop keys. Mirrors waitForReadLocks' guard.
+	if len(resps) != len(keys) {
+		return needRefresh, fmt.Errorf("tryGetMulti: got %d responses for %d keys", len(resps), len(keys))
+	}
 
 	for i, resp := range resps {
 		val, err := resp.ToString()
@@ -1021,7 +1073,7 @@ func (rca *CacheAside) trySetMultiKeyFn(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []string,
-	fn func(ctx context.Context, key []string) (val map[string]string, err error),
+	fn func(ctx context.Context, keys []string) (val map[string]string, err error),
 	res map[string]string,
 ) error {
 	lockVals, err := rca.tryLockMulti(ctx, keys)
@@ -1051,6 +1103,14 @@ func (rca *CacheAside) trySetMultiKeyFn(
 	vals, err := fn(ctx, mapsx.Keys(lockVals))
 	if err != nil {
 		return err
+	}
+	// Enforce the callback contract: fn must return a value for every key it was
+	// given. A locked key the callback omits never lands in res, which would make
+	// GetMulti re-lock the key and re-invoke fn each retry until the caller's
+	// context deadline expires. Fail fast with a key-specific error instead; the
+	// deferred unlock releases the locks we acquired.
+	if missing := keysMissingFrom(lockVals, vals); len(missing) > 0 {
+		return fmt.Errorf("callback returned no value for keys %q", missing)
 	}
 	// XFetch metadata: amortise total fn time across the values it produced.
 	// Skewed estimate (computing 100 keys in parallel reports the same per-key
@@ -1084,6 +1144,19 @@ func perValueDelta(total time.Duration, n int) time.Duration {
 		return 0
 	}
 	return total / time.Duration(n)
+}
+
+// keysMissingFrom returns the keys present in locked but absent from result,
+// sorted so the resulting error message is stable.
+func keysMissingFrom(locked map[string]string, result map[string]string) []string {
+	var missing []string
+	for k := range locked {
+		if _, ok := result[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	slices.Sort(missing)
+	return missing
 }
 
 func (rca *CacheAside) tryLockMulti(ctx context.Context, keys []string) (map[string]string, error) {

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `GetMulti` no longer spins (re-locking and re-invoking the callback) until the
+  context deadline when the callback omits a requested key. It now fails fast
+  with an error naming the missing keys. Callbacks must return a value for every
+  key they are given (use an empty string for a known-absent entity).
+- `SetMulti` now reports keys the callback locked but never returned a value for
+  via `BatchError` instead of silently reverting them and returning `nil`.
+- Refresh-ahead callbacks are no longer capped at `LockTTL`; a callback slower
+  than `LockTTL` was previously cancelled mid-flight and mis-reported as an
+  error, silently disabling refresh for slow-to-recompute values. The successful
+  back-write now runs under a fresh context so a callback that consumed most of
+  its budget still persists its value.
+- The distributed refresh lock is released with an ownership CAS (and now holds a
+  unique token instead of a fixed value), so a refresh that overran its TTL can
+  no longer delete a concurrent refresher's lock.
+- `tryGetMulti` guards against a truncated `DoMultiCache` response length,
+  matching `waitForReadLocks`, so a short pipeline fails loud instead of silently
+  dropping keys.
+
+### Added
+- `RefreshTimeout` option: bounds a refresh-ahead callback's compute time
+  independently of `LockTTL`. Defaults to the value's per-call `ttl`.
+- Per-call `ttl` validation. `Get`, `GetMulti`, `Set`, `SetMulti`, `Touch`,
+  `TouchMulti`, `ForceSet`, and `ForceSetMulti` reject a non-positive `ttl` up
+  front with a clear error instead of running the callback and surfacing an
+  opaque Redis "invalid expire time" — and `Touch`/`TouchMulti` no longer delete
+  the key via `PEXPIRE 0`.
+
+### Changed
+- `ForceSetMulti` wraps its first error with key context (matches `DelMulti`).
+
 ## [v0.2.0] - 2026-05-04
 
 ### Breaking
