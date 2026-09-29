@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/require"
 
@@ -80,9 +80,9 @@ func TestMetrics_HitAndMiss(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "metrics:" + uuid.New().String()
 
 	_, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, _ string) (string, error) {
@@ -99,8 +99,9 @@ func TestMetrics_HitAndMiss(t *testing.T) {
 	require.GreaterOrEqual(t, metrics.hits.Load(), int64(1), "expected at least 1 hit")
 }
 
+// Refresh metric tests use wall-clock Redis TTL transitions and run serially
+// so package-wide load cannot turn a refresh assertion into foreground expiry.
 func TestMetrics_RefreshTriggered(t *testing.T) {
-	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
@@ -112,9 +113,9 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "refresh-metrics:" + uuid.New().String()
 
 	_, err = client.Get(ctx, time.Second, key, func(ctx context.Context, _ string) (string, error) {
@@ -135,7 +136,6 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 }
 
 func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
-	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
@@ -147,9 +147,9 @@ func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "panic-metrics:" + uuid.New().String()
 	var calls atomic.Int32
 
@@ -181,7 +181,6 @@ func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
 // TestMetrics_RefreshErrorOnCallbackError verifies a failing refresh-ahead callback
 // emits RefreshError tagged with the affected key.
 func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
-	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
@@ -193,9 +192,9 @@ func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "refresh-err-metrics:" + uuid.New().String()
 	var calls atomic.Int32
 
@@ -227,7 +226,6 @@ func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 // TestMetrics_RefreshDroppedUnderBackpressure verifies RefreshDropped fires when
 // the refresh queue saturates.
 func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
-	t.Parallel()
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
@@ -241,8 +239,8 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
-	ctx := context.Background()
+	client := redcache.New(conn, redcache.StringCodec{})
+	ctx := t.Context()
 
 	const numKeys = 20
 	keys := make([]string, numKeys)
@@ -269,11 +267,9 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 	var wg sync.WaitGroup
 	for _, key := range keys {
 		k := key
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = client.Get(ctx, ttl, k, refreshCb)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -283,7 +279,8 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 }
 
 func TestMetrics_LockWaitDuration(t *testing.T) {
-	t.Parallel()
+	// This assertion uses a real wall-clock hold; keep it isolated from the
+	// package's other parallel Redis timing tests.
 	skipIfNoRedis(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
@@ -293,9 +290,9 @@ func TestMetrics_LockWaitDuration(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "lockwait:" + uuid.New().String()
 
 	// Two concurrent Gets — the second observes the lock and waits.
@@ -363,9 +360,9 @@ func TestMetrics_LoaderDuration(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "loader-dur:" + uuid.New().String()
 
 	_, err = client.Get(ctx, time.Second*10, key, func(ctx context.Context, _ string) (string, error) {
@@ -392,9 +389,9 @@ func TestMetrics_LoaderErrors(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "loader-err:" + uuid.New().String()
 
 	loaderErr := errors.New("loader boom")
@@ -420,13 +417,13 @@ func TestMetrics_RedisError(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
 	// Close the underlying client so the next command fails with a real Redis
 	// transport error (not redis-nil, not lock-lost).
 	conn.Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "redis-err:" + uuid.New().String()
 	err = client.ForceSet(ctx, time.Second, key, "v")
 	require.Error(t, err, "ForceSet must fail against a closed client")
@@ -448,11 +445,11 @@ func TestMetrics_RedisErrorOnGetMultiReadFailure(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
 	conn.Close()
 
-	_, err = client.GetMulti(context.Background(), time.Second, []string{"k"}, func(context.Context, []string) (map[string]string, error) {
+	_, err = client.GetMulti(t.Context(), time.Second, []string{"k"}, func(context.Context, []string) (map[string]string, error) {
 		t.Fatal("loader must not run when the read fails")
 		return nil, nil
 	})
@@ -475,11 +472,11 @@ func TestMetrics_RedisErrorOnSetReadFailure(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
 	conn.Close()
 
-	err = client.Set(context.Background(), time.Second, "k", func(context.Context, string) (string, error) {
+	err = client.Set(t.Context(), time.Second, "k", func(context.Context, string) (string, error) {
 		t.Fatal("loader must not run when the read fails")
 		return "", nil
 	})

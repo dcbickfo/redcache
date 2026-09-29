@@ -8,7 +8,10 @@ redcache is a Go library that provides a cache-aside implementation for Redis, b
 
 ## Commands
 
-Tool versions (Go, golangci-lint) are pinned in `.tool-versions`; with [asdf](https://asdf-vm.com) installed, run `make setup` to install missing asdf plugins and the pinned versions. Common tasks are wrapped in the `Makefile` — `make help` lists them, and `make check` runs the full build/vet/lint/test gate. Raw equivalents:
+Go and golangci-lint are pinned in `.tool-versions`; with
+[asdf](https://asdf-vm.com) installed, run `make setup` to install them.
+`make help` lists repository tasks, and `make check` runs the full
+build/lint/coverage/test gate.
 
 ```bash
 # Run all tests (requires Redis on localhost:6379)
@@ -20,11 +23,11 @@ go test -run TestCache_Get ./...
 # Run tests with race detector
 go test -race ./...
 
-# Lint
-golangci-lint run
+# Formatting and static checks
+make lint
 
-# Format (v2 formatters section)
-golangci-lint fmt
+# Format
+make fmt
 
 # Start Redis for local development
 docker compose up -d
@@ -34,7 +37,7 @@ docker compose up -d
 
 The library is a single-package Go module (`package redcache`) with internal helpers.
 
-**Public surface: `Cache[K, V]`** (`cache.go`) — a generic interface obtained from a `Conn` (which owns the `rueidis.Client` and invalidation stream) via `Open` plus `New` / `NewString` / `NewBytes`. It is backed by the unexported `cacheAside` engine (`engine.go`, with the single-key path in `get.go`, multi-key in `getmulti.go`, del/touch in `ops.go`, and metric emitters in `emit.go`). Core operations:
+**Public surface: `Cache`** (`cache.go`) — a concrete, non-generic cache whose generic methods (Go 1.27) infer `K` and `V` independently on each operation. Build a `Conn` with `Open`, then construct caches with `New` (default `StringKeyCodec`), `NewKeyed`, or `NewBytes`; each cache owns a `KeyCodec` and `Codec` (both `any`-based) and shares the `Conn`'s `rueidis.Client` and invalidation stream. There is no interface form (generic methods cannot satisfy interfaces); `OpenMemory` returns a map-backed `Conn` (`memory.go`) for tests. `Conn`/`Cache` hold the unexported `engine` interface, implemented by `cacheAside` (Redis) and `memEngine`. The unexported `cacheAside` engine backs the single-key path (`get.go`), multi-key path (`getmulti.go`), del/touch operations (`ops.go`), and metric emitters (`emit.go`). Core operations:
 - `Get(ctx, ttl, key, fn)` — single-key cache-aside with distributed lock
 - `GetMulti(ctx, ttl, keys, fn)` — multi-key cache-aside; groups SET operations by Redis cluster slot for efficient batching
 - `Peek` — read-only client-side-cached lookup (no loader, no lock)
@@ -69,5 +72,5 @@ The key insight: because `tryGet` uses `DoCache`, any client that reads a lock v
 - **Import ordering** (enforced by `gci`): standard library, third-party, then `github.com/dcbickfo/redcache` internal packages
 - Tests are integration tests requiring a running Redis instance at `127.0.0.1:6379`
 - Tests use UUID-based keys to avoid collisions between test runs
-- Linting config is in `.golangci.yml` (v2 format) — comments must end in a period (`godot`), naked returns limited to functions under 30 lines
-- **Claude Code hooks** (`.claude/settings.json`): auto-lint/format `.go` files after Edit/Write; tests run automatically before Claude stops
+- Linting config is in `.golangci.yml` (v2 format); `make lint` runs the pinned
+  golangci-lint v2.13.1 with Go 1.27 generic-method support.

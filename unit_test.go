@@ -186,7 +186,7 @@ func TestAwaitLockOrPoll_PollCanResolveBeforeWaitChannel(t *testing.T) {
 	t.Parallel()
 	rca := &cacheAside{lockTTL: 100 * time.Millisecond}
 	wait := make(chan struct{})
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
 	polls := 0
@@ -216,7 +216,7 @@ func TestAwaitLockOrPoll_WaitChannelWins(t *testing.T) {
 	wait := make(chan struct{})
 	close(wait)
 
-	resolved, err := rca.awaitLockOrPoll(context.Background(), wait, func() (bool, error) {
+	resolved, err := rca.awaitLockOrPoll(t.Context(), wait, func() (bool, error) {
 		t.Fatal("poll should not run after wait channel closes")
 		return false, nil
 	})
@@ -233,7 +233,7 @@ func TestAwaitLockOrPoll_PollError(t *testing.T) {
 	t.Parallel()
 	rca := &cacheAside{lockTTL: 100 * time.Millisecond}
 	wait := make(chan struct{})
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	wantErr := errors.New("poll failed")
 
@@ -254,7 +254,7 @@ func TestAwaitLockMultiOrPoll_PollCanResolveBeforeAllWaitChannels(t *testing.T) 
 	rca := &cacheAside{lockTTL: 100 * time.Millisecond}
 	wait1 := make(chan struct{})
 	wait2 := make(chan struct{})
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
 	resolved, err := rca.awaitLockMultiOrPoll(ctx, []<-chan struct{}{wait1, wait2}, func() (bool, error) {

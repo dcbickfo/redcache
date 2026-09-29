@@ -6,14 +6,14 @@ import (
 	"strconv"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 
 	"github.com/dcbickfo/redcache"
 )
 
-func newTypedCache[V any](t *testing.T, valCodec redcache.Codec[V]) redcache.Cache[string, V] {
+func newTypedCache(t *testing.T, valCodec redcache.Codec) *redcache.Cache {
 	t.Helper()
 	skipIfNoRedis(t)
 	conn, err := redcache.Open(
@@ -24,20 +24,20 @@ func newTypedCache[V any](t *testing.T, valCodec redcache.Codec[V]) redcache.Cac
 		t.Fatalf("open conn: %v", err)
 	}
 	t.Cleanup(conn.Close)
-	return redcache.NewString[V](conn, valCodec)
+	return redcache.New(conn, valCodec)
 }
 
 func TestTyped_Set_PopulatesAndCaches(t *testing.T) {
-	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
-	key := "set:" + uuid.NewString()
+	users := newTypedCache(t, redcache.JSONCodec{})
+	key := "set:" + uuid.New().String()
 
-	if err := users.Set(context.Background(), time.Second, key,
+	if err := users.Set(t.Context(), time.Second, key,
 		func(context.Context, string) (tUser, error) { return tUser{ID: 1, Name: "a"}, nil },
 	); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 
-	got, err := users.Get(context.Background(), time.Second, key,
+	got, err := users.Get(t.Context(), time.Second, key,
 		func(context.Context, string) (tUser, error) {
 			t.Fatal("loader should not run after Set")
 			return tUser{}, nil
@@ -52,17 +52,17 @@ func TestTyped_Set_PopulatesAndCaches(t *testing.T) {
 }
 
 func TestTyped_ForceSet_OverwritesUnconditionally(t *testing.T) {
-	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
-	key := "force:" + uuid.NewString()
+	users := newTypedCache(t, redcache.JSONCodec{})
+	key := "force:" + uuid.New().String()
 
-	if err := users.ForceSet(context.Background(), time.Second, key, tUser{ID: 1, Name: "a"}); err != nil {
+	if err := users.ForceSet(t.Context(), time.Second, key, tUser{ID: 1, Name: "a"}); err != nil {
 		t.Fatalf("force set 1: %v", err)
 	}
-	if err := users.ForceSet(context.Background(), time.Second, key, tUser{ID: 2, Name: "b"}); err != nil {
+	if err := users.ForceSet(t.Context(), time.Second, key, tUser{ID: 2, Name: "b"}); err != nil {
 		t.Fatalf("force set 2: %v", err)
 	}
 
-	got, err := users.Get(context.Background(), time.Second, key,
+	got, err := users.Get(t.Context(), time.Second, key,
 		func(context.Context, string) (tUser, error) { return tUser{}, errors.New("nope") },
 	)
 	if err != nil {
@@ -74,11 +74,11 @@ func TestTyped_ForceSet_OverwritesUnconditionally(t *testing.T) {
 }
 
 func TestTyped_Set_EncodeFailureReleasesLock(t *testing.T) {
-	users := newTypedCache[badEncode](t, badEncodeCodec{})
-	key := "encfail:" + uuid.NewString()
+	users := newTypedCache(t, badEncodeCodec{})
+	key := "encfail:" + uuid.New().String()
 
 	want := errors.New("nope")
-	err := users.Set(context.Background(), time.Second, key,
+	err := users.Set(t.Context(), time.Second, key,
 		func(context.Context, string) (badEncode, error) { return badEncode{err: want}, nil },
 	)
 	if !errors.Is(err, want) {
@@ -86,7 +86,7 @@ func TestTyped_Set_EncodeFailureReleasesLock(t *testing.T) {
 	}
 
 	// Lock must be released — a follow-up ForceSet should succeed immediately.
-	if err := users.ForceSet(context.Background(), time.Second, key, badEncode{}); err != nil {
+	if err := users.ForceSet(t.Context(), time.Second, key, badEncode{}); err != nil {
 		t.Fatalf("force set after encode failure: %v", err)
 	}
 }
@@ -94,13 +94,24 @@ func TestTyped_Set_EncodeFailureReleasesLock(t *testing.T) {
 type badEncode struct{ err error }
 type badEncodeCodec struct{}
 
-func (badEncodeCodec) Encode(b badEncode) ([]byte, error) {
+func (badEncodeCodec) Encode(v any) ([]byte, error) {
+	b, ok := v.(badEncode)
+	if !ok {
+		return nil, errors.New("badEncodeCodec received the wrong value type")
+	}
 	if b.err != nil {
 		return nil, b.err
 	}
 	return []byte("ok"), nil
 }
-func (badEncodeCodec) Decode(b []byte) (badEncode, error) { return badEncode{}, nil }
+func (badEncodeCodec) Decode(_ []byte, dst any) error {
+	p, ok := dst.(*badEncode)
+	if !ok {
+		return errors.New("badEncodeCodec received the wrong destination type")
+	}
+	*p = badEncode{}
+	return nil
+}
 
 type maybeString struct {
 	val string
@@ -109,21 +120,30 @@ type maybeString struct {
 
 type maybeStringCodec struct{}
 
-func (maybeStringCodec) Encode(v maybeString) ([]byte, error) {
+func (maybeStringCodec) Encode(value any) ([]byte, error) {
+	v, ok := value.(maybeString)
+	if !ok {
+		return nil, errors.New("maybeStringCodec received the wrong value type")
+	}
 	if v.err != nil {
 		return nil, v.err
 	}
 	return []byte(v.val), nil
 }
 
-func (maybeStringCodec) Decode(b []byte) (maybeString, error) {
-	return maybeString{val: string(b)}, nil
+func (maybeStringCodec) Decode(b []byte, dst any) error {
+	p, ok := dst.(*maybeString)
+	if !ok {
+		return errors.New("maybeStringCodec received the wrong destination type")
+	}
+	*p = maybeString{val: string(b)}
+	return nil
 }
 
-func newIntKeyCache[V any](t *testing.T, valCodec redcache.Codec[V]) redcache.Cache[int, V] {
+func newIntKeyCache(t *testing.T, valCodec redcache.Codec) *redcache.Cache {
 	t.Helper()
 	skipIfNoRedis(t)
-	prefix := uuid.NewString() + ":"
+	prefix := uuid.New().String() + ":"
 	codec := redcache.KeyCodecFunc[int](func(i int) (string, error) {
 		return prefix + strconv.Itoa(i), nil
 	})
@@ -135,15 +155,15 @@ func newIntKeyCache[V any](t *testing.T, valCodec redcache.Codec[V]) redcache.Ca
 		t.Fatalf("open conn: %v", err)
 	}
 	t.Cleanup(conn.Close)
-	return redcache.New[int, V](conn, codec, valCodec)
+	return redcache.NewKeyed(conn, codec, valCodec)
 }
 
 func TestTyped_SetMulti_PopulatesAll(t *testing.T) {
-	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
-	prefix := uuid.NewString() + ":"
+	users := newTypedCache(t, redcache.JSONCodec{})
+	prefix := uuid.New().String() + ":"
 	keys := []string{prefix + "a", prefix + "b"}
 
-	if err := users.SetMulti(context.Background(), time.Second, keys,
+	if err := users.SetMulti(t.Context(), time.Second, keys,
 		func(_ context.Context, keys []string) (map[string]tUser, error) {
 			out := make(map[string]tUser, len(keys))
 			for i, k := range keys {
@@ -155,7 +175,7 @@ func TestTyped_SetMulti_PopulatesAll(t *testing.T) {
 		t.Fatalf("setmulti: %v", err)
 	}
 
-	got, err := users.GetMulti(context.Background(), time.Second, keys,
+	got, err := users.GetMulti(t.Context(), time.Second, keys,
 		func(context.Context, []string) (map[string]tUser, error) {
 			t.Fatal("loader should not run after SetMulti")
 			return nil, nil
@@ -170,10 +190,10 @@ func TestTyped_SetMulti_PopulatesAll(t *testing.T) {
 }
 
 func TestTyped_SetMulti_IntKeys_PopulatesAll(t *testing.T) {
-	users := newIntKeyCache[tUser](t, redcache.JSONCodec[tUser]{})
+	users := newIntKeyCache(t, redcache.JSONCodec{})
 	keys := []int{101, 202}
 
-	if err := users.SetMulti(context.Background(), time.Second, keys,
+	if err := users.SetMulti(t.Context(), time.Second, keys,
 		func(_ context.Context, keys []int) (map[int]tUser, error) {
 			out := make(map[int]tUser, len(keys))
 			for _, k := range keys {
@@ -185,7 +205,7 @@ func TestTyped_SetMulti_IntKeys_PopulatesAll(t *testing.T) {
 		t.Fatalf("setmulti int keys: %v", err)
 	}
 
-	got, err := users.GetMulti(context.Background(), time.Second, keys,
+	got, err := users.GetMulti(t.Context(), time.Second, keys,
 		func(context.Context, []int) (map[int]tUser, error) {
 			t.Fatal("loader should not run after SetMulti with int keys")
 			return nil, nil
@@ -202,14 +222,14 @@ func TestTyped_SetMulti_IntKeys_PopulatesAll(t *testing.T) {
 // TestTyped_SetMulti_BatchKeyError_Surfaces verifies the typed
 // wrapper converts *batchError to *BatchKeyError[string] on partial CAS failure.
 func TestTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
-	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
-	prefix := uuid.NewString() + ":"
+	users := newTypedCache(t, redcache.JSONCodec{})
+	prefix := uuid.New().String() + ":"
 	keys := []string{prefix + "a", prefix + "b"}
 
-	err := users.SetMulti(context.Background(), time.Second, keys,
+	err := users.SetMulti(t.Context(), time.Second, keys,
 		func(_ context.Context, gotKeys []string) (map[string]tUser, error) {
 			// Steal the lock on keys[1] before our CAS-set runs.
-			if serr := users.ForceSet(context.Background(), time.Second, keys[1], tUser{Name: "stolen"}); serr != nil {
+			if serr := users.ForceSet(t.Context(), time.Second, keys[1], tUser{Name: "stolen"}); serr != nil {
 				t.Fatalf("steal force set: %v", serr)
 			}
 			out := make(map[string]tUser, len(gotKeys))
@@ -235,12 +255,12 @@ func TestTyped_SetMulti_BatchKeyError_Surfaces(t *testing.T) {
 }
 
 func TestTyped_SetMulti_IntKeys_BatchKeyErrorPreservesTypedKey(t *testing.T) {
-	users := newIntKeyCache[tUser](t, redcache.JSONCodec[tUser]{})
+	users := newIntKeyCache(t, redcache.JSONCodec{})
 	keys := []int{1, 2}
 
-	err := users.SetMulti(context.Background(), time.Second, keys,
+	err := users.SetMulti(t.Context(), time.Second, keys,
 		func(_ context.Context, gotKeys []int) (map[int]tUser, error) {
-			if serr := users.ForceSet(context.Background(), time.Second, 2, tUser{Name: "stolen"}); serr != nil {
+			if serr := users.ForceSet(t.Context(), time.Second, 2, tUser{Name: "stolen"}); serr != nil {
 				t.Fatalf("steal force set: %v", serr)
 			}
 			out := make(map[int]tUser, len(gotKeys))
@@ -266,19 +286,19 @@ func TestTyped_SetMulti_IntKeys_BatchKeyErrorPreservesTypedKey(t *testing.T) {
 }
 
 func TestTyped_ForceSetMulti_OverwritesAll(t *testing.T) {
-	users := newTypedCache[tUser](t, redcache.JSONCodec[tUser]{})
-	prefix := uuid.NewString() + ":"
+	users := newTypedCache(t, redcache.JSONCodec{})
+	prefix := uuid.New().String() + ":"
 	in := map[string]tUser{
 		prefix + "a": {ID: 1, Name: "a"},
 		prefix + "b": {ID: 2, Name: "b"},
 	}
 
-	if err := users.ForceSetMulti(context.Background(), time.Second, in); err != nil {
+	if err := users.ForceSetMulti(t.Context(), time.Second, in); err != nil {
 		t.Fatalf("force set multi: %v", err)
 	}
 
 	keys := []string{prefix + "a", prefix + "b"}
-	got, err := users.GetMulti(context.Background(), time.Second, keys,
+	got, err := users.GetMulti(t.Context(), time.Second, keys,
 		func(context.Context, []string) (map[string]tUser, error) {
 			t.Fatal("loader should not run after ForceSetMulti")
 			return nil, nil
@@ -293,10 +313,10 @@ func TestTyped_ForceSetMulti_OverwritesAll(t *testing.T) {
 }
 
 func TestTyped_ForceSetMulti_IntKeys_PartialEncodeFailure(t *testing.T) {
-	cache := newIntKeyCache[maybeString](t, maybeStringCodec{})
+	cache := newIntKeyCache(t, maybeStringCodec{})
 	wantErr := errors.New("encode failed")
 
-	err := cache.ForceSetMulti(context.Background(), time.Second, map[int]maybeString{
+	err := cache.ForceSetMulti(t.Context(), time.Second, map[int]maybeString{
 		1: {val: "one"},
 		2: {err: wantErr},
 	})
@@ -314,7 +334,7 @@ func TestTyped_ForceSetMulti_IntKeys_PartialEncodeFailure(t *testing.T) {
 		t.Fatalf("key 1 should have succeeded; failures: %+v", bke.Failed)
 	}
 
-	got, err := cache.Get(context.Background(), time.Second, 1, func(context.Context, int) (maybeString, error) {
+	got, err := cache.Get(t.Context(), time.Second, 1, func(context.Context, int) (maybeString, error) {
 		t.Fatal("loader should not run for successfully encoded key")
 		return maybeString{}, nil
 	})
@@ -329,7 +349,7 @@ func TestTyped_ForceSetMulti_IntKeys_PartialEncodeFailure(t *testing.T) {
 func TestTyped_ForceSetMulti_IntKeys_PartialKeyEncodeFailure(t *testing.T) {
 	skipIfNoRedis(t)
 	wantErr := errors.New("key encode failed")
-	prefix := uuid.NewString() + ":"
+	prefix := uuid.New().String() + ":"
 	codec := redcache.KeyCodecFunc[int](func(i int) (string, error) {
 		if i == 2 {
 			return "", wantErr
@@ -344,9 +364,9 @@ func TestTyped_ForceSetMulti_IntKeys_PartialKeyEncodeFailure(t *testing.T) {
 		t.Fatalf("open conn: %v", err)
 	}
 	t.Cleanup(conn.Close)
-	cache := redcache.New[int, string](conn, codec, redcache.StringCodec{})
+	cache := redcache.NewKeyed(conn, codec, redcache.StringCodec{})
 
-	err = cache.ForceSetMulti(context.Background(), time.Second, map[int]string{
+	err = cache.ForceSetMulti(t.Context(), time.Second, map[int]string{
 		1: "one",
 		2: "two",
 	})
@@ -364,7 +384,7 @@ func TestTyped_ForceSetMulti_IntKeys_PartialKeyEncodeFailure(t *testing.T) {
 		t.Fatalf("key 1 should have succeeded; failures: %+v", bke.Failed)
 	}
 
-	got, err := cache.Get(context.Background(), time.Second, 1, func(context.Context, int) (string, error) {
+	got, err := cache.Get(t.Context(), time.Second, 1, func(context.Context, int) (string, error) {
 		t.Fatal("loader should not run for successfully encoded key")
 		return "", nil
 	})
@@ -386,12 +406,12 @@ func TestTyped_ForceSetMulti_IntKeys_DuplicateEncodedKeyFailure(t *testing.T) {
 		t.Fatalf("open conn: %v", err)
 	}
 	t.Cleanup(conn.Close)
-	encoded := "typed-collision:" + uuid.NewString()
-	cache := redcache.New[int, string](conn, redcache.KeyCodecFunc[int](func(int) (string, error) {
+	encoded := "typed-collision:" + uuid.New().String()
+	cache := redcache.NewKeyed(conn, redcache.KeyCodecFunc[int](func(int) (string, error) {
 		return encoded, nil
 	}), redcache.StringCodec{})
 
-	err = cache.ForceSetMulti(context.Background(), time.Second, map[int]string{
+	err = cache.ForceSetMulti(t.Context(), time.Second, map[int]string{
 		1: "one",
 		2: "two",
 	})
@@ -412,7 +432,7 @@ func TestTyped_ForceSetMulti_IntKeys_DuplicateEncodedKeyFailure(t *testing.T) {
 		t.Fatalf("duplicate collision should abort before any key succeeds; got %+v", bke.Succeeded)
 	}
 
-	_, err = conn.Client().Do(context.Background(), conn.Client().B().Get().Key(encoded).Build()).ToString()
+	_, err = conn.Client().Do(t.Context(), conn.Client().B().Get().Key(encoded).Build()).ToString()
 	if !rueidis.IsRedisNil(err) {
 		t.Fatalf("colliding Redis key was written; err=%v", err)
 	}

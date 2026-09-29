@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/require"
 )
@@ -44,11 +44,11 @@ func TestTouchMultiLocks_RetainsLostLocksForCASFailure(t *testing.T) {
 	lostKey := "touch:lost:" + uuid.New().String()
 	heldLock := pca.lockPool.Generate()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	ok, _, err := pca.tryAcquireWriteLock(ctx, heldKey, heldLock, "2000")
 	require.NoError(t, err)
 	require.True(t, ok)
-	t.Cleanup(func() { pca.bestEffortUnlock(context.Background(), heldKey, heldLock) })
+	t.Cleanup(func() { pca.bestEffortUnlock(t.Context(), heldKey, heldLock) })
 
 	lockValues := map[string]string{
 		heldKey: heldLock,
@@ -69,7 +69,7 @@ func TestRestoreValue_LogsErrorOnClientFailure(t *testing.T) {
 
 	pca.Client().Close()
 
-	pca.restoreValue(context.Background(), "restore:"+uuid.New().String(), "lock", savedValue{val: "saved", present: true})
+	pca.restoreValue(t.Context(), "restore:"+uuid.New().String(), "lock", savedValue{val: "saved", present: true})
 }
 
 // bestEffortUnlock must swallow unlock-script errors.
@@ -79,7 +79,7 @@ func TestBestEffortUnlock_LogsErrorOnClientFailure(t *testing.T) {
 
 	pca.Client().Close()
 
-	pca.bestEffortUnlock(context.Background(), "unlock:"+uuid.New().String(), "lock")
+	pca.bestEffortUnlock(t.Context(), "unlock:"+uuid.New().String(), "lock")
 }
 
 // waitForReadLocks must surface real Redis errors (tagged with the key) rather
@@ -91,7 +91,7 @@ func TestWaitForReadLocks_SurfacesRedisError(t *testing.T) {
 	pca.Client().Close()
 
 	key := "wait-readlock-err:" + uuid.New().String()
-	err := pca.waitForReadLocks(context.Background(), []string{key})
+	err := pca.waitForReadLocks(t.Context(), []string{key})
 	require.Error(t, err, "broken client should surface error from waitForReadLocks")
 	require.Contains(t, err.Error(), "read key", "error should be wrapped with read key context")
 	require.Contains(t, err.Error(), key, "error should be tagged with the offending key")
@@ -107,12 +107,12 @@ func TestWaitForFailedKey_ContextCancelled(t *testing.T) {
 	key := "waitfail:" + uuid.New().String()
 	holderLock := holder.lockPool.Generate()
 
-	ok, _, err := holder.tryAcquireWriteLock(context.Background(), key, holderLock, "2000")
+	ok, _, err := holder.tryAcquireWriteLock(t.Context(), key, holderLock, "2000")
 	require.NoError(t, err)
 	require.True(t, ok)
-	t.Cleanup(func() { holder.bestEffortUnlock(context.Background(), key, holderLock) })
+	t.Cleanup(func() { holder.bestEffortUnlock(t.Context(), key, holderLock) })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 
 	err = waiter.waitForFailedKey(ctx, key, map[string]string{}, map[string]savedValue{})

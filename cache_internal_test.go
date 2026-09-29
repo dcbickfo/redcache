@@ -23,7 +23,7 @@ func TestCache_KeyEncodeErrorStopsBeforeCore(t *testing.T) {
 		}),
 		valCodec: StringCodec{},
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	tests := []struct {
 		name string
@@ -126,7 +126,7 @@ func TestCache_DuplicateEncodedKeysStopBeforeCore(t *testing.T) {
 		}),
 		valCodec: StringCodec{},
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	tests := []struct {
 		name string

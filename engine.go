@@ -2,7 +2,6 @@ package redcache
 
 import (
 	"context"
-	"fmt"
 	"math/rand/v2"
 	"strconv"
 	"sync"
@@ -56,7 +55,7 @@ func (le *lockEntry) timerExpired() {
 }
 
 // cacheAside is the string-typed cache-aside engine over a rueidis.Client. It
-// owns the lock/refresh/pool machinery; the generic Cache[K,V] layer encodes
+// owns the lock/refresh/pool machinery; the generic-method Cache layer encodes
 // K/V and delegates here.
 type cacheAside struct {
 	client         rueidis.Client
@@ -90,10 +89,7 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 		return nil, err
 	}
 
-	lp, err := lockpool.New(cfg.lockPrefix)
-	if err != nil {
-		return nil, fmt.Errorf("lock pool: %w", err)
-	}
+	lp := lockpool.New(cfg.lockPrefix)
 	_, isNoop := cfg.metrics.(NoopMetrics)
 	rca := &cacheAside{
 		lockPool:       lp,
@@ -113,6 +109,7 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	clientOption.PipelineMultiplex = -1
 	clientOption.OnInvalidations = rca.onInvalidate
 
+	var err error
 	if cfg.clientBuilder != nil {
 		rca.client, err = cfg.clientBuilder(clientOption)
 	} else {
@@ -123,7 +120,6 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	}
 
 	if rca.refreshAfter > 0 {
-		//nolint:gosec // refreshCancel is retained on the engine and called by Close.
 		rca.refreshCtx, rca.refreshCancel = context.WithCancel(context.Background())
 		rca.refreshQueue = make(chan refreshJob, cfg.refreshQueueSize)
 		rca.refreshDone = make(chan struct{})
@@ -194,8 +190,9 @@ func (rca *cacheAside) awaitLockOrPoll(ctx context.Context, waitChan <-chan stru
 }
 
 // awaitLockMultiOrPoll is awaitLockOrPoll for many channels. The WaitForAll
-// goroutine is cancelled when poll resolves first, so fallback reads do not
-// leave a waiter behind until every stale channel closes.
+// goroutine is cancelled and joined when poll (or ctx) resolves first, so
+// fallback reads do not leave a waiter behind — and so the caller may reuse
+// chans on its next retry without racing a goroutine still ranging over it.
 func (rca *cacheAside) awaitLockMultiOrPoll(ctx context.Context, chans []<-chan struct{}, poll func() (bool, error)) (polled bool, err error) {
 	start := time.Now()
 	defer func() {
@@ -216,11 +213,14 @@ func (rca *cacheAside) awaitLockMultiOrPoll(ctx context.Context, chans []<-chan 
 		case err := <-waitDone:
 			return false, err
 		case <-ctx.Done():
+			waitCancel()
+			<-waitDone
 			return false, ctx.Err()
 		case <-timer.C:
 			ok, err := poll()
 			if ok || err != nil {
 				waitCancel()
+				<-waitDone
 				return ok, err
 			}
 			timer.Reset(rca.nextLockPollDelay())
@@ -244,13 +244,7 @@ func (rca *cacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 }
 
 func (rca *cacheAside) nextLockPollDelay() time.Duration {
-	maxDelay := rca.lockTTL / 10
-	if maxDelay < minLockPollDelay {
-		maxDelay = minLockPollDelay
-	}
-	if maxDelay > maxLockPollDelay {
-		maxDelay = maxLockPollDelay
-	}
+	maxDelay := min(max(rca.lockTTL/10, minLockPollDelay), maxLockPollDelay)
 	if maxDelay >= rca.lockTTL && rca.lockTTL > 0 {
 		maxDelay = rca.lockTTL / 2
 		if maxDelay <= 0 {

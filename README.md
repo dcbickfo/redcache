@@ -11,22 +11,22 @@
 [![codecov](https://codecov.io/gh/dcbickfo/redcache/branch/main/graph/badge.svg)](https://codecov.io/gh/dcbickfo/redcache)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-A typed cache-aside for Redis, built on the [rueidis](https://github.com/redis/rueidis) client. It combines rueidis client-side caching with distributed `SET NX` locking so that, across every process, only one caller populates a missing key while the rest wait on the invalidation push for the populated value. The result is a stampede-resistant cache behind a single generic `Cache[K, V]` interface.
+A typed cache-aside for Redis, built on the [rueidis](https://github.com/redis/rueidis) client. It combines rueidis client-side caching with distributed `SET NX` locking so that, across every process, only one caller populates a missing key while the rest wait on the invalidation push. A single `Cache` serves every key and value type: each operation infers `K` and `V` from its arguments.
 
 ## Features
 
-- **One generic interface** — `Cache[K, V]` for typed keys and values; fakeable in tests.
+- **Per-operation key and value types** — one JSON-backed `Cache` stores different Go types under keys of different Go types; `K` and `V` are inferred per call.
 - **Stampede protection** — in-process leader/follower coordination plus a distributed `SET NX` lock-and-wait, so a single caller runs your loader per key and the rest wait on the invalidation rather than piling onto the origin.
 - **Client-side caching** — rueidis client-side cache with Redis invalidation messages cuts round trips and unblocks waiters the moment the value lands.
 - **Multi-key batching** — `GetMulti` groups operations by Redis cluster slot and executes the per-slot groups concurrently.
 - **Refresh-ahead + XFetch** — optional background refresh of stale-but-valid entries, with XFetch-style probabilistic early expiration to smear reload moments across the keyspace.
 - **Write-through priming** — `Set` / `ForceSet` / `Touch` (and their multi variants) populate or extend entries on every subscribed client without a read-through miss.
-- **Typed keys *and* values** — pluggable `Codec[V]` and `KeyCodec[K]`; per-key partial failures surface as `*BatchKeyError[K]`.
+- **Typed keys and values** — pluggable `Codec` and `KeyCodec`; per-key partial failures surface as `*BatchKeyError[K]`.
 - **Pluggable metrics** — a `Metrics` interface for hits/misses, lock contention, lock-wait duration, and refresh events.
 
 ## Requirements
 
-- Go 1.25+
+- Go 1.27+
 - Redis 7+ with RESP3 and client-side caching (tracking) enabled
 
 RESP3 client-side caching is load-bearing, not optional: redcache wakes waiters
@@ -53,126 +53,54 @@ go run ./examples/metrics
 
 Set `REDIS_ADDR` to point them at a non-default Redis address.
 
-## Migrating from v0.2.x to v0.3.x
+## Migrating from v0.3.x
 
-v0.3.0 is the next minor release after v0.2.x. redcache is still pre-1.0, and
-this minor intentionally breaks the old string-only API. These notes focus on
-the interface changes needed for migration. Existing integrations on
-`*CacheAside` or `*PrimeableCacheAside` do **not** need to adopt typed domain
-keys immediately.
-The direct replacement is usually one `Conn` plus a `Cache[string, string]`
-view:
-
-```go
-// v0.2.x
-client, err := redcache.NewRedCacheAside(
-    rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-    redcache.CacheAsideOption{
-        LockTTL:              5 * time.Second,
-        RefreshAfterFraction: 0.8,
-        RefreshWorkers:       4,
-        RefreshQueueSize:     64,
-    },
-)
-if err != nil {
-    return err
-}
-defer client.Client().Close()
-
-val, err := client.Get(ctx, time.Minute, "user:123", loadString)
-```
+The next release requires Go 1.27 and moves both type parameters from cache
+construction to the operations (Go 1.27 generic methods). `Cache` is no longer
+generic:
 
 ```go
 // v0.3.x
-conn, err := redcache.Open(
-    rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
-    redcache.WithLockTTL(5*time.Second),
-    redcache.WithRefreshAfterFraction(0.8),
-    redcache.WithRefreshWorkers(4),
-    redcache.WithRefreshQueueSize(64),
-)
-if err != nil {
-    return err
-}
-defer conn.Close()
+users  := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
+orders := redcache.New[OrderID, Order](conn, orderIDCodec, redcache.JSONCodec[Order]{})
 
-cache := redcache.NewString[string](conn, redcache.StringCodec{})
-val, err := cache.Get(ctx, time.Minute, "user:123", loadString)
+// next release — one cache, K and V inferred per call
+cache := redcache.New(conn, redcache.JSONCodec{})
+user, err  := cache.Get(ctx, ttl, "u-1", loadUser)      // K=string, V=User
+order, err := cache.Get(ctx, ttl, OrderID(7), loadOrder) // K=OrderID, V=Order
+profile, ok, err := cache.Peek[string, Profile](ctx, ttl, profileKey)
 ```
 
-`NewPrimeableCacheAside` goes away too. You use the same `Cache[string, string]`
-view for read-through and write-through methods:
+`New(conn, valCodec)` uses `StringKeyCodec`, which accepts `string`, any type
+with underlying type `string`, and `encoding.TextMarshaler`. For other key types
+use `NewKeyed(conn, keyCodec, valCodec)`; `KeyCodecFunc[K]` still adapts a
+typed function. `Codec[V]` and `KeyCodec[K]` become `Codec` and `KeyCodec`
+(their methods take `any`); `JSONCodec[V]{}` becomes `JSONCodec{}`.
 
-```go
-// v0.2.x
-client, err := redcache.NewPrimeableCacheAside(opt, redcache.CacheAsideOption{
-    LockTTL: 5 * time.Second,
-})
-if err != nil {
-    return err
-}
-defer client.Client().Close()
-
-err = client.Set(ctx, time.Minute, "config:greeting", func(ctx context.Context, key string) (string, error) {
-    return "hello", nil
-})
-```
+There is no interface form anymore — generic methods cannot satisfy Go
+interfaces — so code that depended on the `Cache[K, V]` interface now takes
+`*redcache.Cache`. For tests, `redcache.OpenMemory()` returns a `Conn` backed by
+an in-process map; `redcachetest` is removed:
 
 ```go
 // v0.3.x
-conn, err := redcache.Open(opt, redcache.WithLockTTL(5*time.Second))
-if err != nil {
-    return err
-}
-defer conn.Close()
+func NewUserService(c redcache.Cache[string, User]) *UserService
+svc := NewUserService(redcachetest.New[string, User]())
 
-cache := redcache.NewString[string](conn, redcache.StringCodec{})
-err = cache.Set(ctx, time.Minute, "config:greeting", func(ctx context.Context, key string) (string, error) {
-    return "hello", nil
-})
+// next release
+func NewUserService(c *redcache.Cache) *UserService
+svc := NewUserService(redcache.New(redcache.OpenMemory(), redcache.JSONCodec{}))
 ```
 
-### Migration checklist
-
-- Replace `NewRedCacheAside` / `NewPrimeableCacheAside` with `Open`, then derive
-  one or more views with `NewString`, `New`, or `NewBytes`.
-- Keep old string-key integrations on `redcache.NewString[string](conn,
-  redcache.StringCodec{})`. Move to `New[K, V]` and a `KeyCodec[K]` only when
-  you want domain-typed keys.
-- Move lifecycle and raw Redis access to the `Conn`: `cache.Close()` /
-  `cache.Client()` become `conn.Close()` / `conn.Client()`. A derived
-  `Cache[K, V]` is operations-only and safe to inject into application code.
-- Replace `CacheAsideOption{...}` fields with functional options:
-  `LockTTL` -> `WithLockTTL`, `Logger` -> `WithLogger`, `Metrics` ->
-  `WithMetrics`, `LockPrefix` -> `WithLockPrefix`, `RefreshLockPrefix` ->
-  `WithRefreshLockPrefix`, `RefreshAfterFraction` ->
-  `WithRefreshAfterFraction`, `RefreshBeta` -> `WithRefreshBeta`,
-  `RefreshWorkers` -> `WithRefreshWorkers`, `RefreshQueueSize` ->
-  `WithRefreshQueueSize`, and `ClientBuilder` -> `WithClientBuilder`.
-  `WithRefreshTimeout` is new; omit it to use the data `ttl` as the refresh
-  callback budget, or set it explicitly for slower refresh functions.
-- If you implemented `Metrics` directly, add `LoaderDuration`,
-  `LoaderErrors`, and `RedisError`. Implementations that embed `NoopMetrics`
-  only need to override the methods they care about.
-- `DelMulti` and `TouchMulti` now take `[]K`, matching `GetMulti` and
-  `SetMulti`: change `cache.DelMulti(ctx, "a", "b")` to
-  `cache.DelMulti(ctx, []string{"a", "b"})`.
-- Partial multi-key write errors are now `*BatchKeyError[K]`. For string-key
-  caches, migrate `var be *redcache.BatchError` checks to
-  `var be *redcache.BatchKeyError[string]`.
-- TTL-bearing methods now reject `ttl <= 0` with `ErrInvalidTTL` before touching
-  Redis. Use `Del` / `DelMulti` to remove entries.
-- The Go floor is now 1.25.
-
-Once the string-key migration compiles, you can opt into typed values by
-choosing a value codec, for example `NewString[User](conn,
-redcache.JSONCodec[User]{})`. That changes loaders from returning strings to
-returning `User` directly, but it is not required for a straight v0.2.x
-migration.
+`JSONCodec` keeps `encoding/json` (v1) semantics, so stored payloads are
+unchanged. `JSONV2Codec` is new and opts in to `encoding/json/v2` defaults.
 
 ## Quickstart
 
-`Open` builds a `Conn` that owns a rueidis client; `NewString[V]` derives a `Cache[string, V]` view over it. Pair it with `JSONCodec[V]` to store JSON-encoded values. `Get` returns the cached value, calling your loader only on a miss — and only on one caller per key.
+`Open` builds a `Conn` that owns a rueidis client. `New` constructs a `Cache`
+with one value codec (string-ish keys by default). `Get` infers its key type
+from the key and its value type from the loader, which runs only on a miss and
+only on one caller per key.
 
 ```go
 package main
@@ -202,7 +130,7 @@ func main() {
     }
     defer conn.Close()
 
-    cache := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
+    cache := redcache.New(conn, redcache.JSONCodec{})
 
     ctx := context.Background()
 
@@ -243,13 +171,16 @@ users, err := cache.GetMulti(ctx, time.Minute, []string{"u-1", "u-2", "u-3"},
 the key currently holds a lock value), for warm-cache checks without populating:
 
 ```go
-u, ok, err := cache.Peek(ctx, time.Minute, "u-123")
+u, ok, err := cache.Peek[string, User](ctx, time.Minute, "u-123")
 // ok == false means not currently cached; Peek never runs your loader.
 ```
 
 ## Typed keys
 
-Derive a view with `New[K, V]` and a `KeyCodec[K]` to key the cache by a domain type. `KeyCodecFunc[K]` adapts a plain function into a `KeyCodec[K]`.
+Keys whose underlying type is `string` (e.g. `type UserID string`) and types
+implementing `encoding.TextMarshaler` work with `New` as-is. For anything else,
+construct the cache with `NewKeyed`, a `KeyCodec`, and a value `Codec`;
+`KeyCodecFunc[K]` adapts a plain function into a `KeyCodec` that accepts only `K`.
 
 ```go
 type UserID int64
@@ -266,7 +197,7 @@ if err != nil {
 }
 defer conn.Close()
 
-cache := redcache.New[UserID, User](conn, userIDCodec, redcache.JSONCodec[User]{})
+cache := redcache.NewKeyed(conn, userIDCodec, redcache.JSONCodec{})
 
 u, err := cache.Get(ctx, time.Minute, UserID(123),
     func(ctx context.Context, id UserID) (User, error) {
@@ -281,7 +212,9 @@ reject typed-key collisions before touching Redis.
 
 ## Raw bytes
 
-`NewBytes` derives a zero-copy `Cache[string, []byte]` for opaque payloads — `NewString[[]byte]` preset with `UnsafeBytesCodec`. The decoded slice aliases the cache's borrowed read buffer; do not mutate or retain it past the callback. Copy it out if you need an owned value.
+`NewBytes` constructs a zero-copy `Cache` for opaque `[]byte` payloads. The
+decoded slice aliases the cache's borrowed read buffer; do not mutate or retain
+it past the callback. Copy it out if you need an owned value.
 
 ```go
 conn, err := redcache.Open(
@@ -304,24 +237,25 @@ b, err := cache.Get(ctx, time.Minute, "blob:42",
 
 ## Codecs
 
-A `Codec[V]` maps values to and from the stored envelope payload; a `KeyCodec[K]` maps typed keys to the Redis key string. Both must be concurrent-safe.
+A `Codec` maps operation values to and from the stored envelope payload; a
+`KeyCodec` maps keys to Redis key strings. Both must be concurrent-safe.
+`Decode` receives a pointer to the operation's value type, like
+`json.Unmarshal`. A codec that does not support that type returns an error.
 
 | Codec | For | Allocation behavior |
 |---|---|---|
-| `JSONCodec[V]` | any `V` (default) | Encode/Decode via `encoding/json`; returns fresh, caller-owned copies — safe to retain. |
-| `StringCodec` | `V = string` | Identity for immutable strings; cache fast paths may skip byte copies — safe to retain. |
+| `JSONCodec` | any JSON-supported value | Encode/Decode via `encoding/json` (v1 semantics); decoded values are caller-owned. |
+| `JSONV2Codec` | any JSON-supported value | `encoding/json/v2`: nil slices/maps encode as `[]`/`{}`, case-sensitive field matching, duplicate names rejected. Changes the stored form of nil containers relative to `JSONCodec`. |
+| `StringCodec` | `V = string` | Identity for immutable strings; safe to retain. |
 | `UnsafeBytesCodec` | `V = []byte` | Zero-copy. The decoded slice **aliases borrowed library memory**; do not mutate or retain it past the call. |
-| `StringKeyCodec` | `K = string` | Identity key codec; enables the `K=string` fast path. |
-| `KeyCodecFunc[K]` | any `K` | Adapts `func(K) (string, error)` into a `KeyCodec[K]`. |
+| `StringKeyCodec` | `string`, `~string`, `encoding.TextMarshaler` | Default key codec. String-underlying keys take the zero-copy multi-key fast path. |
+| `KeyCodecFunc[K]` | exactly `K` | Adapts `func(K) (string, error)` into a `KeyCodec`; other key types are rejected. |
 
-The allocation tradeoff is explicit: `JSONCodec` returns owned decoded values,
-and `StringCodec` returns immutable strings that are safe to retain while the
-cache may avoid extra byte copies on string-valued views. `UnsafeBytesCodec`
-skips the copy for throughput, but the `[]byte` it returns borrows the cache's
-internal buffer — it is only valid for the duration of the call and must not be
-mutated. Likewise, a slice handed to `Encode` is given to the library and must
-not be mutated afterward. Choose the copying codecs unless you have measured a
-reason not to.
+`JSONCodec` returns owned decoded values, and `StringCodec` returns immutable
+strings that are safe to retain. `UnsafeBytesCodec` skips the copy, so its
+decoded `[]byte` borrows the cache's internal buffer and must not be mutated or
+retained. A slice returned by any codec's `Encode` is also owned by the library
+after the call.
 
 Decode failures on read are returned wrapped with `redcache.ErrDecode` (`errors.Is`-checkable). The library does not auto-evict on a decode failure; the caller decides whether to log, `Del`, or retry.
 
@@ -341,7 +275,7 @@ Construction takes functional options. They are applied in order; later wins.
 | `WithRefreshTimeout(d)` | data `ttl` | Bounds how long a refresh-ahead callback may run. Decoupled from `LockTTL`. |
 | `WithRefreshWorkers(n)` | `4` | Refresh worker pool size. |
 | `WithRefreshQueueSize(n)` | `64` | Pending-refresh queue capacity; over-full drops silently and the stale value keeps serving. |
-| `WithClientBuilder(b)` | `rueidis.NewClient` | Overrides how the internal client is built. A test seam (see Testing). |
+| `WithClientBuilder(b)` | `rueidis.NewClient` | Overrides how the internal client is built, including for tests. |
 
 ## Refresh-ahead and XFetch
 
@@ -361,7 +295,7 @@ if err != nil {
 }
 defer conn.Close()
 
-cache := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
+cache := redcache.New(conn, redcache.JSONCodec{})
 ```
 
 ### XFetch probabilistic refresh
@@ -386,55 +320,38 @@ redcache adds, on top of that shared foundation:
 
 - **`GetMulti` with cluster-slot batching** — multi-key reads and writes grouped by Redis cluster slot and executed concurrently per slot.
 - **Refresh-ahead + XFetch** — probabilistic early refresh of stale-but-valid entries, decoupling reload latency from request latency.
-- **Typed keys, not just values** — a `KeyCodec[K]` maps a domain key type to the Redis key, and multi-key write failures come back as a typed, per-key `*BatchKeyError[K]`.
+- **Typed keys, not just values** — a `KeyCodec` maps a domain key type to the Redis key, and multi-key write failures come back as a typed, per-key `*BatchKeyError[K]`.
 - **Write-through priming** — `Set` / `ForceSet` / `Touch` (and multi variants) populate or extend entries without a read-through miss. This is the hardest piece for `rueidisaside` to absorb rather than just a missing feature: `rueidisaside` claims only *missing* keys, with a single per-client placeholder and no value backup, whereas `Set` overwrites an already-live value under a per-call lock token and restores the prior value if the write fails. In-place locking, per-call lock identity, and a backup/restore path are structural to redcache's model, not a flag on the read-miss-only one.
-- **`Conn` + `New`** — open one connection and derive sibling typed caches that share its client, engine, and invalidation stream, so you can cache multiple value types over a single connection.
+- **Per-operation value types** — a JSON-backed cache can read and write
+  unrelated Go types without constructing a cache per type.
 
 This is an honest superset for those specific needs, not a claim that `rueidisaside` is deficient — it deliberately keeps a smaller surface.
 
-## Sharing one client across value types
+## Sharing one client across caches
 
-Open a `Conn` once, then derive typed `Cache[K, V]` views over it with `New` (or `NewString` / `NewBytes`). Every view shares the `Conn`'s rueidis client and invalidation stream, with its own key/value types and codecs. Use it to cache several value types over a single Redis connection instead of opening one connection per type. Lifecycle lives on the `Conn`: the views are operations-only (no `Close` / `Client`), so closing happens in exactly one place. Open the `Conn`, derive all the views you need, and close the `Conn` when done.
+Open one `Conn`, then construct one cache per codec pair the service needs.
+Every cache shares the Conn's client and invalidation stream, and a single
+JSON-backed cache serves any key and value types on each operation.
 
 ```go
-// One connection backs several typed views.
 conn, err := redcache.Open(
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 )
 if err != nil {
     log.Fatal(err)
 }
-defer conn.Close() // closes the shared client and all views
-
-sessions := redcache.NewString[Session](conn, redcache.JSONCodec[Session]{})
-
-orders := redcache.New[OrderID, Order](
-    conn,
-    orderIDCodec,
-    redcache.JSONCodec[Order]{},
-)
-```
-
-`New` (and `NewString` / `NewBytes`) does no I/O — it returns a `Cache[K, V]` with no error, and panics on a nil codec. The constructors are exactly `Open` (which builds the `Conn` and owns the client) plus the `New` / `NewString` / `NewBytes` derive-funcs; close the `Conn` to tear down the underlying client and every view derived from it.
-
-### Long-lived service caching multiple value types
-
-For a service that caches several value types, open one `Conn`, derive a view per type, and inject the views. Because views are operations-only, the injected code can read and write the cache but cannot close the shared connection — lifecycle stays with whoever holds the `Conn`:
-
-```go
-conn, err := redcache.Open(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}})
-if err != nil {
-    log.Fatal(err)
-}
 defer conn.Close()
 
-users := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
-sessions := redcache.NewString[Session](conn, redcache.JSONCodec[Session]{})
+values := redcache.New(conn, redcache.JSONCodec{})
+raw := redcache.NewBytes(conn)
 
-// Inject `users` and `sessions` (operations-only Cache values) into services.
-userSvc := NewUserService(users)
-sessionSvc := NewSessionService(sessions)
+session, err := values.Get(ctx, ttl, sessionKey, loadSession)  // K=string,  V=Session
+order, err   := values.Get(ctx, ttl, OrderID("o-9"), loadOrder) // K=OrderID, V=Order
+payload, err := raw.Get(ctx, ttl, "blob", loadBlob)             // V=[]byte
 ```
+
+`New`, `NewKeyed`, and `NewBytes` do no I/O and panic on a nil codec. Close the `Conn` to tear down
+the shared client and every cache built over it.
 
 ## Metrics
 
@@ -460,7 +377,7 @@ if err != nil {
 }
 defer conn.Close()
 
-cache := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
+cache := redcache.New(conn, redcache.JSONCodec{})
 ```
 
 ### OpenTelemetry
@@ -480,30 +397,34 @@ if err != nil {
 }
 defer conn.Close()
 
-cache := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
+cache := redcache.New(conn, redcache.JSONCodec{})
 ```
 
 It records counters (hits, misses, lock contention, refresh and error events) and histograms (`lock.wait.duration`, `loader.duration`, in seconds). High-cardinality keys are deliberately not attached as labels; `RedisError`'s bounded `op` is.
 
 Importing redcache's core does **not** pull OpenTelemetry into your binary (verified: zero otel symbols linked) — OTel is only compiled in if you import `redcacheotel`. It does appear in the module graph, since it lives in the main module.
 
-## Testing code that depends on redcache
+## Testing
 
-Depend on the `redcache.Cache[K, V]` interface in your own code, not on a concrete type. Then in unit tests substitute the in-memory fake from the `redcachetest` subpackage — no Redis required:
+`Cache` is concrete because generic methods cannot satisfy a Go interface, so
+code under test takes `*redcache.Cache`. To unit-test without Redis, build the
+cache over `redcache.OpenMemory()` — a `Conn` backed by an in-process map:
 
 ```go
-import "github.com/dcbickfo/redcache/redcachetest"
-
 func TestUserService(t *testing.T) {
-    cache := redcachetest.New[string, User]() // satisfies redcache.Cache[string, User]
+    cache := redcache.New(redcache.OpenMemory(), redcache.JSONCodec{})
     svc := NewUserService(cache)
-    // exercise svc; the fake calls your loader, stores results, and honours TTL.
+    // exercise svc; the real codecs run, a miss calls your loader once,
+    // a present unexpired entry is a hit, and TTLs expire.
 }
 ```
 
-`redcachetest.New[K, V]()` returns a `*Fake[K, V]` that satisfies `redcache.Cache[K, V]`, backed by a map with TTL semantics. It validates the observable single-process contract — your loader runs once per miss, a present unexpired entry is a hit, TTLs expire — which is enough to test loaders, wiring, and call shape. For deterministic expiry tests, construct it with `redcachetest.NewWithClock[K, V](clk)` and advance a `redcachetest.Clock` by hand instead of sleeping.
-
-What the fake does **not** model: distributed single-flight, the `SET NX` lock layer, client-side-cache invalidation pushes, the stored envelope, or refresh-ahead. Those only emerge against real Redis. For fuller fidelity, drive the real `redcache.Cache` against [`rueidis/mock`](https://github.com/redis/rueidis/tree/main/mock) via `WithClientBuilder` (note: miniredis cannot emulate RESP3 client-side invalidation, so it is unsuitable here).
+For deterministic expiry pass `redcache.WithMemoryClock(func() time.Time)` and
+move the returned time forward instead of sleeping. The memory Conn does not
+model distributed single-flight, invalidation pushes, refresh-ahead, or
+metrics; for those, construct the real cache with `WithClientBuilder` and
+[`rueidis/mock`](https://github.com/redis/rueidis/tree/main/mock), or run against
+Redis. Miniredis cannot emulate RESP3 client-side invalidation.
 
 ## Stampede mitigation without refresh-ahead
 
@@ -521,7 +442,7 @@ For workloads that already use `WithRefreshAfterFraction` + `WithRefreshBeta`, X
 ## Local Development
 
 ```bash
-# Install pinned Go/golangci-lint versions via asdf
+# Install the pinned Go and golangci-lint versions via asdf
 make setup
 
 # Start Redis

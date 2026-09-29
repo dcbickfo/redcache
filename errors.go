@@ -3,7 +3,7 @@ package redcache
 import (
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -34,7 +34,7 @@ func (e *batchError) Error() string {
 	for key := range e.Failed {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	for _, key := range keys {
 		fmt.Fprintf(&b, "; key %q: %s", key, e.Failed[key])
 	}
@@ -109,7 +109,7 @@ func (e *BatchKeyError[K]) Error() string {
 	for k := range e.Failed {
 		pairs = append(pairs, kv{k: k, s: fmt.Sprintf("%v", k)})
 	}
-	sort.SliceStable(pairs, func(i, j int) bool { return pairs[i].s < pairs[j].s })
+	slices.SortStableFunc(pairs, func(a, b kv) int { return strings.Compare(a.s, b.s) })
 	for _, p := range pairs {
 		fmt.Fprintf(&b, "; key %q: %s", p.s, e.Failed[p.k])
 	}

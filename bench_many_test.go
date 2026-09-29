@@ -1,7 +1,6 @@
 package redcache_test
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -18,12 +17,12 @@ func BenchmarkCache_Get_ManyKeys(b *testing.B) {
 	}
 	defer conn.Close()
 
-	cache := redcache.NewString[string](conn, redcache.StringCodec{})
-	ctx := context.Background()
+	cache := redcache.New(conn, redcache.StringCodec{})
+	ctx := b.Context()
 
 	// Prime 100,000 keys
 	b.Log("Priming keys...")
-	for i := 0; i < 100000; i++ {
+	for i := range 100000 {
 		if err := cache.ForceSet(ctx, time.Minute, fmt.Sprintf("k:%d", i), "v"); err != nil {
 			b.Fatal(err)
 		}

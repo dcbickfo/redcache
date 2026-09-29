@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,9 +31,9 @@ func TestCache_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "close-stress:" + uuid.New().String()
 
 	_, err = client.Get(ctx, time.Second, key, func(_ context.Context, _ string) (string, error) {
@@ -45,9 +45,7 @@ func TestCache_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 	for range 50 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -58,7 +56,7 @@ func TestCache_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 					return "v", nil
 				})
 			}
-		}()
+		})
 	}
 
 	time.Sleep(50 * time.Millisecond)
@@ -93,9 +91,9 @@ func TestCache_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "clean-miss:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
@@ -122,9 +120,9 @@ func TestCache_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	suffix := uuid.New().String()
 	keys := []string{"multi-clean:1:" + suffix, "multi-clean:2:" + suffix}
 	want := map[string]string{keys[0]: "v1", keys[1]: "v2"}
@@ -155,9 +153,9 @@ func TestCache_EmptyValueIsCacheHit(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	pca := redcache.NewString[string](conn, redcache.StringCodec{})
+	pca := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "empty-hit:" + uuid.New().String()
 
 	require.NoError(t, pca.ForceSet(ctx, 10*time.Second, key, ""))
@@ -177,7 +175,7 @@ func TestCache_EmptyValueIsCacheHit(t *testing.T) {
 func TestCache_Set_RollbackPreservesEmptyValue(t *testing.T) {
 	t.Parallel()
 	pca, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "rollback-empty:" + uuid.New().String()
 
@@ -205,7 +203,7 @@ func TestCache_Set_RollbackPreservesEmptyValue(t *testing.T) {
 func TestCache_Set_RollbackPreservesPTTL(t *testing.T) {
 	t.Parallel()
 	pca, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "rollback-pttl:" + uuid.New().String()
 
@@ -244,9 +242,9 @@ func TestCache_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	pca := redcache.NewString[string](conn, redcache.StringCodec{})
+	pca := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key1 := "cas:1:" + uuid.New().String()
 	key2 := "cas:2:" + uuid.New().String()
 	forcedVal := "forced:" + uuid.New().String()
@@ -280,9 +278,9 @@ func TestCache_Set_RollbackSurvivesContextCancel(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	bg := context.Background()
+	bg := t.Context()
 	key := "rollback-cancel:" + uuid.New().String()
 	originalVal := "original:" + uuid.New().String()
 

@@ -27,9 +27,7 @@ type refreshJob struct {
 // even with recover.
 func (rca *cacheAside) startRefreshWorkers(n int) {
 	for range n {
-		rca.refreshWg.Add(1)
-		go func() {
-			defer rca.refreshWg.Done()
+		rca.refreshWg.Go(func() {
 			for {
 				select {
 				case <-rca.refreshDone:
@@ -41,7 +39,7 @@ func (rca *cacheAside) startRefreshWorkers(n int) {
 					rca.runRefreshJob(job)
 				}
 			}
-		}()
+		})
 	}
 }
 
@@ -143,6 +141,7 @@ func (rca *cacheAside) shouldRefresh(cachePTTL int64, ttl time.Duration, delta t
 	if delta <= 0 || rca.refreshBeta <= 0 {
 		return true
 	}
+	//nolint:gosec // This jitter spreads refresh timing; it is not security-sensitive.
 	jitter := time.Duration(float64(delta) * rca.refreshBeta * rand.ExpFloat64())
 	return cachePTTLd <= jitter
 }

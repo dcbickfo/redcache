@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 
 	"github.com/dcbickfo/redcache"
@@ -15,7 +15,7 @@ import (
 
 // makeBenchClient opens a Conn (closed via b.Cleanup) and returns a string view
 // plus the Conn for benches that need the raw client.
-func makeBenchClient(b *testing.B) (redcache.Cache[string, string], *redcache.Conn) {
+func makeBenchClient(b *testing.B) (*redcache.Cache, *redcache.Conn) {
 	b.Helper()
 	skipIfNoRedis(b)
 	conn, err := redcache.Open(
@@ -28,7 +28,7 @@ func makeBenchClient(b *testing.B) (redcache.Cache[string, string], *redcache.Co
 		b.Fatal(err)
 	}
 	b.Cleanup(conn.Close)
-	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
+	return redcache.New(conn, redcache.StringCodec{}), conn
 }
 
 func runBenchParallel(b *testing.B, body func(*testing.PB) error) {
@@ -71,7 +71,7 @@ var (
 func BenchmarkCache_Get(b *testing.B) {
 	b.ReportAllocs()
 	client, _ := makeBenchClient(b)
-	ctx := context.Background()
+	ctx := b.Context()
 	key := "bench:get:" + uuid.New().String()
 
 	if _, err := client.Get(ctx, time.Minute, key, benchPrimeFn); err != nil {
@@ -90,7 +90,7 @@ func BenchmarkCache_Get(b *testing.B) {
 func BenchmarkCache_Get_Parallel(b *testing.B) {
 	b.ReportAllocs()
 	client, _ := makeBenchClient(b)
-	ctx := context.Background()
+	ctx := b.Context()
 	key := "bench:get:parallel:" + uuid.New().String()
 
 	if _, err := client.Get(ctx, time.Minute, key, benchPrimeFn); err != nil {
@@ -112,7 +112,7 @@ func BenchmarkCache_Get_Parallel(b *testing.B) {
 func BenchmarkCache_GetMulti(b *testing.B) {
 	b.ReportAllocs()
 	client, _ := makeBenchClient(b)
-	ctx := context.Background()
+	ctx := b.Context()
 
 	keys := make([]string, 10)
 	for i := range keys {
@@ -135,7 +135,7 @@ func BenchmarkCache_GetMulti(b *testing.B) {
 func BenchmarkCache_GetMulti_Parallel(b *testing.B) {
 	b.ReportAllocs()
 	client, _ := makeBenchClient(b)
-	ctx := context.Background()
+	ctx := b.Context()
 
 	keys := make([]string, 10)
 	for i := range keys {
@@ -161,7 +161,7 @@ func BenchmarkCache_GetMulti_Parallel(b *testing.B) {
 func BenchmarkCache_Del(b *testing.B) {
 	b.ReportAllocs()
 	client, _ := makeBenchClient(b)
-	ctx := context.Background()
+	ctx := b.Context()
 	key := "bench:del:" + uuid.New().String()
 
 	b.ResetTimer()
@@ -176,7 +176,7 @@ func BenchmarkCache_Del(b *testing.B) {
 func BenchmarkCache_DelMulti(b *testing.B) {
 	b.ReportAllocs()
 	client, _ := makeBenchClient(b)
-	ctx := context.Background()
+	ctx := b.Context()
 
 	keys := make([]string, 10)
 	for i := range keys {
@@ -195,7 +195,7 @@ func BenchmarkCache_DelMulti(b *testing.B) {
 func BenchmarkSet(b *testing.B) {
 	b.ReportAllocs()
 	client, _ := makeBenchClient(b)
-	ctx := context.Background()
+	ctx := b.Context()
 	key := "bench:set:" + uuid.New().String()
 
 	b.ResetTimer()
@@ -210,7 +210,7 @@ func BenchmarkSet(b *testing.B) {
 func BenchmarkSetMulti(b *testing.B) {
 	b.ReportAllocs()
 	client, _ := makeBenchClient(b)
-	ctx := context.Background()
+	ctx := b.Context()
 
 	keys := make([]string, 10)
 	for i := range keys {
@@ -229,7 +229,7 @@ func BenchmarkSetMulti(b *testing.B) {
 func BenchmarkForceSet(b *testing.B) {
 	b.ReportAllocs()
 	client, _ := makeBenchClient(b)
-	ctx := context.Background()
+	ctx := b.Context()
 	key := "bench:forceset:" + uuid.New().String()
 
 	b.ResetTimer()
@@ -244,7 +244,7 @@ func BenchmarkForceSet(b *testing.B) {
 func BenchmarkForceSetMulti(b *testing.B) {
 	b.ReportAllocs()
 	client, _ := makeBenchClient(b)
-	ctx := context.Background()
+	ctx := b.Context()
 
 	values := make(map[string]string, 10)
 	for i := range 10 {
@@ -275,8 +275,8 @@ func BenchmarkCache_Get_Refresh(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
-	ctx := context.Background()
+	client := redcache.New(conn, redcache.StringCodec{})
+	ctx := b.Context()
 	key := "bench:get:refresh:" + uuid.New().String()
 	const val = "bench-value"
 
@@ -309,8 +309,8 @@ func BenchmarkCache_GetMulti_Refresh(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
-	ctx := context.Background()
+	client := redcache.New(conn, redcache.StringCodec{})
+	ctx := b.Context()
 
 	keys := make([]string, 10)
 	for i := range keys {

@@ -14,17 +14,15 @@ func WaitForAll[C ~<-chan V, V any](ctx context.Context, channels []C) error {
 
 	done := make(chan struct{}, len(channels))
 	var wg sync.WaitGroup
-	wg.Add(len(channels))
 
 	for _, ch := range channels {
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			select {
 			case <-ch:
 				done <- struct{}{}
 			case <-ctx.Done():
 			}
-		}()
+		})
 	}
 
 	for range len(channels) {

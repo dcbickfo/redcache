@@ -5,9 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.3.0] - Unreleased
+## [Unreleased]
 
-v0.3.0 is planned as the next minor release after v0.2.x. It collapses the
+### Breaking
+
+- **Go 1.27 is now required.** The module, local toolchain pin, and CI all
+  target Go 1.27.
+- **`Cache[K, V]` is replaced by the non-generic `Cache`.** Both type
+  parameters move to the operations as Go 1.27 generic methods — `Get[K, V]`,
+  `GetMulti[K, V]`, `Peek[K, V]`, `Set[K, V]`, `SetMulti[K, V]`,
+  `ForceSet[K, V]`, `ForceSetMulti[K, V]`, `Del[K]`, `DelMulti[K]`,
+  `Touch[K]`, `TouchMulti[K]` — so one cache serves every key and value type.
+  Keys and loaders normally infer both; `Peek` needs explicit `Peek[K, V]`
+  (nothing to infer `V` from), and an untyped nil passed to a multi-key method
+  needs explicit type arguments.
+- **Constructors are `New(conn, valCodec)`, `NewKeyed(conn, keyCodec,
+  valCodec)`, and `NewBytes(conn)`.** `New[K]` and `NewString` are gone.
+- **`Codec[V]` and `KeyCodec[K]` are replaced by `any`-based `Codec` and
+  `KeyCodec`.** A codec decodes into the operation's `*V`, following the
+  `encoding/json` destination pattern; mismatches are returned as errors.
+  `StringKeyCodec` (the `New` default) accepts `string`, any `~string` type,
+  and `encoding.TextMarshaler`; `KeyCodecFunc[K]` accepts exactly `K`.
+  String-underlying key types now take the zero-copy multi-key fast path that
+  was previously limited to `K == string`.
+- **No interface form; `redcachetest` is removed.** Generic methods cannot
+  satisfy Go interfaces, so `Cache` is the only type and code under test takes
+  `*Cache`. `OpenMemory(opts ...MemoryOption)` replaces the fake: it returns a
+  `Conn` backed by an in-process map, so tests build a real `Cache` with real
+  codecs over it. `WithMemoryClock` replaces `redcachetest.Clock`.
+
+### Added
+
+- `JSONV2Codec` — opt-in `encoding/json/v2` codec (nil slices/maps as `[]`/`{}`,
+  case-sensitive field matching, duplicate object names rejected). `JSONCodec`
+  keeps `encoding/json` v1 semantics and wire format.
+- `TestConn_Close_LeaksNoGoroutines` uses Go 1.27's `goroutineleak` profile to
+  assert `Conn.Close` leaves no engine goroutines blocked.
+
+### Fixed
+
+- `GetMulti` retry loop no longer races a still-running lock waiter: the
+  internal `WaitForAll` goroutine is joined before the poll fallback returns,
+  so the reused channel slice is not rewritten underneath it (found by the race
+  detector; pre-existing).
+
+### Changed
+
+- `github.com/google/uuid` is replaced by the Go 1.27 standard-library `uuid`
+  package; the module has one fewer direct dependency.
+- Concurrent worker launches use `sync.WaitGroup.Go`, typed error matching uses
+  `errors.AsType`, and tests use `t.Context()`, `b.Loop()`, and stdlib
+  `slices` sorting.
+- golangci-lint is updated to v2.13.1, retaining the full lint and formatting
+  gates with Go 1.27 generic-method support.
+
+## [v0.3.0] - 2026-06-19
+
+v0.3.0 collapses the
 public surface to a single generic `Cache[K, V]` interface. The on-disk value
 format is unchanged from v0.2.x, so this is a surface redesign and runtime
 hardening release. Stay v0.x; a v1 will be cut once the surface settles.

@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,28 +21,28 @@ import (
 
 func requireEventuallyPeekString(
 	t *testing.T,
-	client redcache.Cache[string, string],
+	client *redcache.Cache,
 	ctx context.Context,
 	key string,
 	want string,
 ) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		got, ok, err := client.Peek(ctx, time.Second*10, key)
+		got, ok, err := client.Peek[string, string](ctx, time.Second*10, key)
 		return err == nil && ok && got == want
 	}, 2*time.Second, 10*time.Millisecond, "Peek(%q) did not observe %q", key, want)
 }
 
 func requireEventuallyPeekStrings(
 	t *testing.T,
-	client redcache.Cache[string, string],
+	client *redcache.Cache,
 	ctx context.Context,
 	want map[string]string,
 ) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		for key, wantValue := range want {
-			got, ok, err := client.Peek(ctx, time.Second*10, key)
+			got, ok, err := client.Peek[string, string](ctx, time.Second*10, key)
 			if err != nil || !ok || got != wantValue {
 				return false
 			}
@@ -54,7 +54,7 @@ func requireEventuallyPeekStrings(
 func TestCache_Set_Basic(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
@@ -78,7 +78,7 @@ func TestCache_Set_Basic(t *testing.T) {
 func TestCache_Set_Overwrites(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	val1 := "val1:" + uuid.New().String()
@@ -106,7 +106,7 @@ func TestCache_Set_Overwrites(t *testing.T) {
 func TestCache_Set_WaitsForExistingReadLock(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	getVal := "get-val:" + uuid.New().String()
@@ -146,7 +146,7 @@ func TestCache_Set_WaitsForExistingReadLock(t *testing.T) {
 func TestCache_Set_Concurrent(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	var callCount atomic.Int32
@@ -155,9 +155,7 @@ func TestCache_Set_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, 10)
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			err := client.Set(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 				callCount.Add(1)
 				return "val-from-" + uuid.New().String(), nil
@@ -167,7 +165,7 @@ func TestCache_Set_Concurrent(t *testing.T) {
 				return
 			}
 			errs <- err
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)
@@ -182,7 +180,7 @@ func TestCache_Set_Concurrent(t *testing.T) {
 func TestCache_SetMulti_Basic(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	keyAndVals := map[string]string{
 		"key:0:" + uuid.New().String(): "val:0:" + uuid.New().String(),
@@ -216,7 +214,7 @@ func TestCache_SetMulti_Basic(t *testing.T) {
 func TestCache_SetMulti_NoDeadlock(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
 	// Sorted key order is what prevents deadlock under overlap.
@@ -278,7 +276,7 @@ func TestCache_SetMulti_NoDeadlock(t *testing.T) {
 func TestCache_ForceSet_Basic(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	val := "forced-val:" + uuid.New().String()
@@ -297,7 +295,7 @@ func TestCache_ForceSet_Basic(t *testing.T) {
 func TestCache_ForceSet_StealsLock(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	forcedVal := "forced:" + uuid.New().String()
@@ -338,7 +336,7 @@ func TestCache_ForceSet_StealsLock(t *testing.T) {
 func TestCache_ForceSetMulti_Basic(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	values := map[string]string{
 		"key:0:" + uuid.New().String(): "val:0:" + uuid.New().String(),
@@ -367,10 +365,10 @@ func TestCache_Set_ContextCancellation(t *testing.T) {
 	// Lock the key so Set waits.
 	innerClient := conn.Client()
 	lockVal := "__redcache:lock:" + uuid.New().String()
-	err := innerClient.Do(context.Background(), innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
+	err := innerClient.Do(t.Context(), innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 
 	err = client.Set(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
@@ -383,7 +381,7 @@ func TestCache_Set_ContextCancellation(t *testing.T) {
 func TestCache_Close_CancelsPendingLocks(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 
@@ -393,7 +391,7 @@ func TestCache_Close_CancelsPendingLocks(t *testing.T) {
 	require.True(t, rueidis.IsRedisNil(err))
 
 	// Bound Set so it can't loop forever after Close.
-	setCtx, setCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	setCtx, setCancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer setCancel()
 
 	errCh := make(chan error, 1)
@@ -431,11 +429,11 @@ func TestCache_SetMulti_ContextCancellation(t *testing.T) {
 	innerClient := conn.Client()
 	for _, key := range keys {
 		lockVal := "__redcache:lock:" + uuid.New().String()
-		err := innerClient.Do(context.Background(), innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
+		err := innerClient.Do(t.Context(), innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
 		require.True(t, rueidis.IsRedisNil(err))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 
 	err := client.SetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {
@@ -449,7 +447,7 @@ func TestCache_SetMulti_ContextCancellation(t *testing.T) {
 func TestCache_Set_CallbackError(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	cbErr := fmt.Errorf("set callback failed")
@@ -477,7 +475,7 @@ func TestCache_Set_CallbackError(t *testing.T) {
 func TestCache_Set_CallbackError_RestoresValue(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	originalVal := "original:" + uuid.New().String()
@@ -507,7 +505,7 @@ func TestCache_Set_CallbackError_RestoresValue(t *testing.T) {
 func TestCache_SetMulti_CallbackError_RestoresValues(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	keys := []string{
 		"key:0:" + uuid.New().String(),
@@ -552,7 +550,7 @@ func TestCache_SetMulti_CallbackError_RestoresValues(t *testing.T) {
 func TestCache_SetMulti_PartialCASFailure_BatchError(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key1 := "key:0:" + uuid.New().String()
 	key2 := "key:1:" + uuid.New().String()
@@ -590,7 +588,7 @@ func TestCache_SetMulti_PartialCASFailure_BatchError(t *testing.T) {
 func TestCache_ForceSet_OverwritesExistingValue(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	originalVal := "original:" + uuid.New().String()
@@ -638,7 +636,7 @@ func TestCache_MultiClient_SetGet(t *testing.T) {
 	t.Parallel()
 	client1, _ := makeClient(t, addr)
 	client2, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	setVal := "set-val:" + uuid.New().String()
@@ -661,7 +659,7 @@ func TestCache_MultiClient_SetGet(t *testing.T) {
 func TestCache_ConcurrentSetAndGet(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
 	key := "key:" + uuid.New().String()
@@ -712,7 +710,7 @@ func TestCache_ConcurrentSetAndGet(t *testing.T) {
 func TestCache_SetMulti_EmptyKeys(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	err := client.SetMulti(ctx, time.Second*10, nil, func(ctx context.Context, ks []string) (map[string]string, error) {
 		t.Fatal("callback should not be called for empty keys")
@@ -724,9 +722,9 @@ func TestCache_SetMulti_EmptyKeys(t *testing.T) {
 func TestCache_ForceSetMulti_EmptyMap(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
-	err := client.ForceSetMulti(ctx, time.Second*10, nil)
+	err := client.ForceSetMulti[string, string](ctx, time.Second*10, nil)
 	require.NoError(t, err)
 
 	err = client.ForceSetMulti(ctx, time.Second*10, map[string]string{})

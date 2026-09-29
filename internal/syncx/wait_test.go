@@ -27,7 +27,7 @@ func delayedClose[T any](ch chan T, delay time.Duration) {
 
 func TestWaitForAll_Success(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	ch1 := make(chan struct{})
 	ch2 := make(chan struct{})
 
@@ -42,7 +42,7 @@ func TestWaitForAll_Success(t *testing.T) {
 
 func TestWaitForAll_SuccessClosed(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	ch1 := make(chan struct{})
 	ch2 := make(chan struct{})
 
@@ -57,7 +57,7 @@ func TestWaitForAll_SuccessClosed(t *testing.T) {
 
 func TestWaitForAll_ContextCancelled(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
 	defer cancel()
 
 	ch1 := make(chan int)
@@ -74,7 +74,7 @@ func TestWaitForAll_ContextCancelled(t *testing.T) {
 
 func TestWaitForAll_PartialCompleteContextCancelled(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 
 	ch1 := make(chan int)
@@ -91,7 +91,7 @@ func TestWaitForAll_PartialCompleteContextCancelled(t *testing.T) {
 
 func TestWaitForAll_NoChannels(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	var waitLock []<-chan int
 
 	err := syncx.WaitForAll(ctx, waitLock)
@@ -100,7 +100,7 @@ func TestWaitForAll_NoChannels(t *testing.T) {
 
 func TestWaitForAll_ImmediateContextCancel(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
 	ch1 := make(chan int)
@@ -114,7 +114,7 @@ func TestWaitForAll_ImmediateContextCancel(t *testing.T) {
 
 func TestWaitForAll_ChannelAlreadyClosed(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	ch1 := make(chan int)
 	ch2 := make(chan int)
 

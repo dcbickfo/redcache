@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,7 +35,7 @@ func skipIfNoRedis(tb testing.TB) {
 // makeClient opens a Conn and derives a string view over it. The Conn is closed
 // via t.Cleanup, so callers need no teardown of their own. The Conn is returned
 // too for tests that inspect Redis directly (conn.Client()).
-func makeClient(t *testing.T, addr []string) (redcache.Cache[string, string], *redcache.Conn) {
+func makeClient(t *testing.T, addr []string) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
 	skipIfNoRedis(t)
 	conn, err := redcache.Open(
@@ -48,13 +48,13 @@ func makeClient(t *testing.T, addr []string) (redcache.Cache[string, string], *r
 		t.Fatal(err)
 	}
 	t.Cleanup(conn.Close)
-	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
+	return redcache.New(conn, redcache.StringCodec{}), conn
 }
 
 func TestCache_Get(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 	called := false
@@ -84,7 +84,7 @@ func TestCache_Get(t *testing.T) {
 func TestCache_GetMulti(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -123,7 +123,7 @@ func TestCache_GetMulti(t *testing.T) {
 func TestCache_GetMulti_Partial(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -194,9 +194,9 @@ func TestCache_GetMulti_IgnoresLoaderExtraKeys(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	extra := "extra:" + uuid.New().String()
 
@@ -217,7 +217,7 @@ func TestCache_GetMulti_IgnoresLoaderExtraKeys(t *testing.T) {
 func TestCache_GetMulti_PartLock(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -261,7 +261,7 @@ func TestCache_GetMulti_PartLock(t *testing.T) {
 func TestCache_Del(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
@@ -286,7 +286,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 	client, _ := makeClient(t, addr)
 	client2, _ := makeClient(t, addr)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 6 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -318,7 +318,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 		keys[5]: keyAndVals[keys[5]],
 	}
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -349,7 +349,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			out, err := client.GetMulti(
-				context.Background(),
+				t.Context(),
 				time.Second*10,
 				keys[3:],
 				cb)
@@ -361,7 +361,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			out, err := client2.GetMulti(
-				context.Background(),
+				t.Context(),
 				time.Second*10,
 				keys[3:],
 				cb)
@@ -382,7 +382,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 	client3, _ := makeClient(t, addr)
 	client4, _ := makeClient(t, addr)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 6 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -430,7 +430,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 		keys[5]: keyAndVals[keys[5]],
 	}
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -475,7 +475,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
 			})
 			out, err := client3.GetMulti(
-				context.Background(),
+				t.Context(),
 				time.Second*10,
 				localKeys,
 				cb)
@@ -492,7 +492,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
 			})
 			out, err := client4.GetMulti(
-				context.Background(),
+				t.Context(),
 				time.Second*10,
 				localKeys,
 				cb)
@@ -511,7 +511,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 
 	client, _ := makeClient(t, addr)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 6 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -559,7 +559,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 		keys[5]: keyAndVals[keys[5]],
 	}
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -604,7 +604,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
 			})
 			out, err := client.GetMulti(
-				context.Background(),
+				t.Context(),
 				time.Second*10,
 				localKeys,
 				cb)
@@ -621,7 +621,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
 			})
 			out, err := client.GetMulti(
-				context.Background(),
+				t.Context(),
 				time.Second*10,
 				localKeys,
 				cb)
@@ -638,7 +638,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 func TestCache_DelMulti(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
@@ -668,7 +668,7 @@ func TestCache_DelMulti(t *testing.T) {
 func TestCache_Touch_ExtendsTTL(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "touch:" + uuid.New().String()
 
@@ -687,7 +687,7 @@ func TestCache_Touch_ExtendsTTL(t *testing.T) {
 func TestCache_Touch_NoOpOnMissing(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "touch-missing:" + uuid.New().String()
 	require.NoError(t, client.Touch(ctx, 5*time.Second, key), "Touch on missing key must succeed silently")
@@ -699,7 +699,7 @@ func TestCache_Touch_NoOpOnMissing(t *testing.T) {
 func TestCache_Touch_NoOpOnLockValue(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "touch-lock:" + uuid.New().String()
 	lockVal := "__redcache:lock:abc"
@@ -721,7 +721,7 @@ func TestCache_Touch_NoOpOnLockValue(t *testing.T) {
 func TestCache_TouchMulti_ExtendsTTLs(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	keys := []string{
 		"touchm:0:" + uuid.New().String(),
@@ -747,21 +747,21 @@ func TestCache_TouchMulti_ExtendsTTLs(t *testing.T) {
 func TestCache_TouchMulti_EmptyKeysIsNoOp(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	require.NoError(t, client.TouchMulti(context.Background(), 5*time.Second, nil))
+	require.NoError(t, client.TouchMulti[string](t.Context(), 5*time.Second, nil))
 }
 
 func TestCache_GetParentContextCancellation(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
 	// Lock the key so Get will wait.
 	innerClient := conn.Client()
 	lockVal := "__redcache:lock:" + uuid.New().String()
-	err := innerClient.Do(context.Background(), innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
+	err := innerClient.Do(t.Context(), innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
 	go func() {
@@ -791,9 +791,9 @@ func TestConcurrentRegisterRace(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
@@ -809,7 +809,7 @@ func TestConcurrentRegisterRace(t *testing.T) {
 	}
 
 	wg := sync.WaitGroup{}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -851,7 +851,7 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
@@ -866,7 +866,7 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 	}
 
 	wg := sync.WaitGroup{}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -909,7 +909,7 @@ func TestCache_Get_LeaderNXFailure_WaitsForInvalidation(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
@@ -959,7 +959,7 @@ func TestConcurrentInvalidation(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 
 	callCount := 0
@@ -982,7 +982,7 @@ func TestConcurrentInvalidation(t *testing.T) {
 	require.NoError(t, err)
 
 	wg := sync.WaitGroup{}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -1015,7 +1015,7 @@ func TestConcurrentInvalidation(t *testing.T) {
 func TestCache_Get_CallbackError(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	cbErr := fmt.Errorf("callback failed")
@@ -1037,7 +1037,7 @@ func TestCache_Get_CallbackError(t *testing.T) {
 func TestCache_GetMulti_CallbackError(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	keys := []string{
 		"key:0:" + uuid.New().String(),
@@ -1071,7 +1071,7 @@ func TestCache_GetMulti_CallbackError(t *testing.T) {
 func TestCache_Close(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 
@@ -1121,9 +1121,9 @@ func TestCache_CloseCancelsRefreshCallback(t *testing.T) {
 		redcache.WithRefreshTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "close-refresh:" + uuid.New().String()
 	ttl := time.Second
 
@@ -1163,7 +1163,7 @@ func TestCache_CloseCancelsRefreshCallback(t *testing.T) {
 	}
 }
 
-func makeRefreshClient(t *testing.T, addr []string, fraction float64) (redcache.Cache[string, string], *redcache.Conn) {
+func makeRefreshClient(t *testing.T, addr []string, fraction float64) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
 	skipIfNoRedis(t)
 	conn, err := redcache.Open(
@@ -1180,14 +1180,16 @@ func makeRefreshClient(t *testing.T, addr []string, fraction float64) (redcache.
 		t.Fatal(err)
 	}
 	t.Cleanup(conn.Close)
-	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
+	return redcache.New(conn, redcache.StringCodec{}), conn
 }
 
+// Refresh-ahead integration tests use wall-clock Redis TTL transitions. Keep
+// this group serial so package-wide load cannot expire data before an expected
+// stale-value assertion.
 func TestRefreshAhead_TriggersBackgroundRefresh(t *testing.T) {
-	t.Parallel()
 	// fraction=0.5 -> refresh once <50% TTL remaining.
 	client, _ := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	callCount := 0
@@ -1225,9 +1227,8 @@ func TestRefreshAhead_TriggersBackgroundRefresh(t *testing.T) {
 }
 
 func TestRefreshAhead_Dedup(t *testing.T) {
-	t.Parallel()
 	client, _ := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	var refreshCount int64
@@ -1259,16 +1260,25 @@ func TestRefreshAhead_Dedup(t *testing.T) {
 	time.Sleep(1200 * time.Millisecond)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	results := make(chan struct {
+		value string
+		err   error
+	}, 20)
+	for range 20 {
+		wg.Go(func() {
 			res, err := client.Get(ctx, ttl, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, "initial", res)
-		}()
+			results <- struct {
+				value string
+				err   error
+			}{value: res, err: err}
+		})
 	}
 	wg.Wait()
+	close(results)
+	for result := range results {
+		require.NoError(t, result.err)
+		assert.Equal(t, "initial", result.value)
+	}
 
 	// All 20 Gets have made their dedup decision; release the worker.
 	close(refreshUnblock)
@@ -1285,9 +1295,8 @@ func TestRefreshAhead_Dedup(t *testing.T) {
 }
 
 func TestRefreshAhead_Disabled(t *testing.T) {
-	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	callCount := 0
@@ -1316,9 +1325,8 @@ func TestRefreshAhead_Disabled(t *testing.T) {
 }
 
 func TestRefreshAhead_ErrorLogged(t *testing.T) {
-	t.Parallel()
 	client, _ := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	firstCall := true
@@ -1356,9 +1364,8 @@ func TestRefreshAhead_ErrorLogged(t *testing.T) {
 }
 
 func TestRefreshAhead_PanicRecovered(t *testing.T) {
-	t.Parallel()
 	client, _ := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	var calls atomic.Int32
@@ -1410,9 +1417,8 @@ func TestRefreshAhead_PanicRecovered(t *testing.T) {
 }
 
 func TestRefreshAhead_DoesNotStompLockValue(t *testing.T) {
-	t.Parallel()
 	client, conn := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	callbackStarted := make(chan struct{})
@@ -1469,9 +1475,8 @@ func TestRefreshAhead_DoesNotStompLockValue(t *testing.T) {
 }
 
 func TestRefreshAhead_DoesNotStompNewerRealValue(t *testing.T) {
-	t.Parallel()
 	client, conn := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	callbackStarted := make(chan struct{})
@@ -1520,10 +1525,9 @@ func TestRefreshAhead_DoesNotStompNewerRealValue(t *testing.T) {
 }
 
 func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
-	t.Parallel()
 	skipIfNoRedis(t)
 
-	open := func(t *testing.T, lockTTL time.Duration) (redcache.Cache[string, string], *redcache.Conn) {
+	open := func(t *testing.T, lockTTL time.Duration) (*redcache.Cache, *redcache.Conn) {
 		t.Helper()
 		conn, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
@@ -1535,7 +1539,7 @@ func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
 			redcache.WithRefreshTimeout(2*time.Second),
 		)
 		require.NoError(t, err)
-		return redcache.NewString[string](conn, redcache.StringCodec{}), conn
+		return redcache.New(conn, redcache.StringCodec{}), conn
 	}
 
 	client1, conn1 := open(t, 150*time.Millisecond)
@@ -1545,7 +1549,7 @@ func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
 	t.Cleanup(conn2.Close)
 	t.Cleanup(conn3.Close)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "refresh-lock:" + uuid.New().String()
 	ttl := time.Second
 
@@ -1556,7 +1560,7 @@ func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
 
 	triggerRefresh := func(
 		t *testing.T,
-		client redcache.Cache[string, string],
+		client *redcache.Cache,
 		started <-chan struct{},
 		fn func(context.Context, string) (string, error),
 		failureMsg string,
@@ -1627,9 +1631,8 @@ func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
 }
 
 func TestRefreshAhead_GetMulti(t *testing.T) {
-	t.Parallel()
 	client, _ := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	keys := []string{
 		"key:0:" + uuid.New().String(),
@@ -1685,7 +1688,6 @@ func TestRefreshAhead_GetMulti(t *testing.T) {
 }
 
 func TestRefreshAhead_Backpressure(t *testing.T) {
-	t.Parallel()
 	skipIfNoRedis(t)
 	// Tiny pool (1 worker, queue size 1) plus a sleeping callback so the queue fills fast.
 	conn, err := redcache.Open(
@@ -1698,8 +1700,8 @@ func TestRefreshAhead_Backpressure(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
-	ctx := context.Background()
+	client := redcache.New(conn, redcache.StringCodec{})
+	ctx := t.Context()
 
 	// Distinct keys so each triggers its own refresh.
 	const numKeys = 20
@@ -1731,17 +1733,26 @@ func TestRefreshAhead_Backpressure(t *testing.T) {
 
 	// 1 worker + queue size 1 accepts ~2 jobs; the rest are dropped.
 	var wg sync.WaitGroup
+	results := make(chan struct {
+		value string
+		err   error
+	}, len(keys))
 	for _, key := range keys {
 		k := key
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			res, err := client.Get(ctx, ttl, k, refreshCb)
-			assert.NoError(t, err)
-			assert.Equal(t, "initial", res)
-		}()
+			results <- struct {
+				value string
+				err   error
+			}{value: res, err: err}
+		})
 	}
 	wg.Wait()
+	close(results)
+	for result := range results {
+		require.NoError(t, result.err)
+		assert.Equal(t, "initial", result.value)
+	}
 
 	time.Sleep(1500 * time.Millisecond)
 
@@ -1888,8 +1899,8 @@ func TestCache_Get_ErrLockLostRetry(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
-	ctx := context.Background()
+	client := redcache.New(conn, redcache.StringCodec{})
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	forcedVal := "forced:" + uuid.New().String()

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 
 	"github.com/dcbickfo/redcache"
@@ -36,15 +36,14 @@ var (
 func BenchmarkTypedGet(b *testing.B) {
 	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
-	ctx := context.Background()
-	key := "bench:typed:get:" + uuid.NewString()
+	ctx := b.Context()
+	key := "bench:typed:get:" + uuid.New().String()
 
 	if err := users.ForceSet(ctx, time.Minute, key, benchTUser); err != nil {
 		b.Fatal(err)
 	}
 
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		if _, err := users.Get(ctx, time.Minute, key, benchTypedUnreachableFn); err != nil {
 			b.Fatal(err)
 		}
@@ -54,8 +53,8 @@ func BenchmarkTypedGet(b *testing.B) {
 func BenchmarkTypedGet_Parallel(b *testing.B) {
 	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
-	ctx := context.Background()
-	key := "bench:typed:get:parallel:" + uuid.NewString()
+	ctx := b.Context()
+	key := "bench:typed:get:parallel:" + uuid.New().String()
 
 	if err := users.ForceSet(ctx, time.Minute, key, benchTUser); err != nil {
 		b.Fatal(err)
@@ -75,12 +74,12 @@ func BenchmarkTypedGet_Parallel(b *testing.B) {
 func BenchmarkTypedGetMulti(b *testing.B) {
 	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
-	ctx := context.Background()
+	ctx := b.Context()
 
 	keys := make([]string, 10)
 	seed := make(map[string]tUser, len(keys))
 	for i := range keys {
-		keys[i] = fmt.Sprintf("bench:typed:getmulti:%d:%s", i, uuid.NewString())
+		keys[i] = fmt.Sprintf("bench:typed:getmulti:%d:%s", i, uuid.New().String())
 		seed[keys[i]] = benchTUser
 	}
 	if err := users.ForceSetMulti(ctx, time.Minute, seed); err != nil {
@@ -98,12 +97,12 @@ func BenchmarkTypedGetMulti(b *testing.B) {
 func BenchmarkTypedGetMulti_Parallel(b *testing.B) {
 	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
-	ctx := context.Background()
+	ctx := b.Context()
 
 	keys := make([]string, 10)
 	seed := make(map[string]tUser, len(keys))
 	for i := range keys {
-		keys[i] = fmt.Sprintf("bench:typed:getmulti:parallel:%d:%s", i, uuid.NewString())
+		keys[i] = fmt.Sprintf("bench:typed:getmulti:parallel:%d:%s", i, uuid.New().String())
 		seed[keys[i]] = benchTUser
 	}
 	if err := users.ForceSetMulti(ctx, time.Minute, seed); err != nil {
@@ -124,8 +123,8 @@ func BenchmarkTypedGetMulti_Parallel(b *testing.B) {
 func BenchmarkTypedSet(b *testing.B) {
 	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
-	ctx := context.Background()
-	key := "bench:typed:set:" + uuid.NewString()
+	ctx := b.Context()
+	key := "bench:typed:set:" + uuid.New().String()
 
 	b.ResetTimer()
 	for range b.N {
@@ -138,11 +137,11 @@ func BenchmarkTypedSet(b *testing.B) {
 func BenchmarkTypedSetMulti(b *testing.B) {
 	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
-	ctx := context.Background()
+	ctx := b.Context()
 
 	keys := make([]string, 10)
 	for i := range keys {
-		keys[i] = fmt.Sprintf("bench:typed:setmulti:%d:%s", i, uuid.NewString())
+		keys[i] = fmt.Sprintf("bench:typed:setmulti:%d:%s", i, uuid.New().String())
 	}
 
 	b.ResetTimer()
@@ -156,8 +155,8 @@ func BenchmarkTypedSetMulti(b *testing.B) {
 func BenchmarkTypedForceSet(b *testing.B) {
 	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
-	ctx := context.Background()
-	key := "bench:typed:forceset:" + uuid.NewString()
+	ctx := b.Context()
+	key := "bench:typed:forceset:" + uuid.New().String()
 
 	b.ResetTimer()
 	for range b.N {
@@ -170,11 +169,11 @@ func BenchmarkTypedForceSet(b *testing.B) {
 func BenchmarkTypedForceSetMulti(b *testing.B) {
 	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
-	ctx := context.Background()
+	ctx := b.Context()
 
 	values := make(map[string]tUser, 10)
 	for i := range 10 {
-		values[fmt.Sprintf("bench:typed:forcesetmulti:%d:%s", i, uuid.NewString())] = benchTUser
+		values[fmt.Sprintf("bench:typed:forcesetmulti:%d:%s", i, uuid.New().String())] = benchTUser
 	}
 
 	b.ResetTimer()
@@ -190,12 +189,12 @@ func BenchmarkTypedForceSetMulti(b *testing.B) {
 func BenchmarkTypedGet_Codec(b *testing.B) {
 	b.ReportAllocs()
 	skipIfNoRedis(b)
-	ctx := context.Background()
+	ctx := b.Context()
 	payload := `{"id":1,"name":"alice"}`
 
 	b.Run("json", func(b *testing.B) {
 		users := newBenchBase(b)
-		key := "bench:typed:codec:json:" + uuid.NewString()
+		key := "bench:typed:codec:json:" + uuid.New().String()
 		if err := users.ForceSet(ctx, time.Minute, key, benchTUser); err != nil {
 			b.Fatal(err)
 		}
@@ -214,7 +213,7 @@ func BenchmarkTypedGet_Codec(b *testing.B) {
 		}
 		b.Cleanup(conn.Close)
 		users := redcache.NewBytes(conn)
-		key := "bench:typed:codec:bytes:" + uuid.NewString()
+		key := "bench:typed:codec:bytes:" + uuid.New().String()
 		if err := users.ForceSet(ctx, time.Minute, key, []byte(payload)); err != nil {
 			b.Fatal(err)
 		}
@@ -235,8 +234,8 @@ func BenchmarkTypedGet_Codec(b *testing.B) {
 			b.Fatalf("new cache: %v", err)
 		}
 		b.Cleanup(conn.Close)
-		users := redcache.NewString[string](conn, redcache.StringCodec{})
-		key := "bench:typed:codec:string:" + uuid.NewString()
+		users := redcache.New(conn, redcache.StringCodec{})
+		key := "bench:typed:codec:string:" + uuid.New().String()
 		if err := users.ForceSet(ctx, time.Minute, key, payload); err != nil {
 			b.Fatal(err)
 		}
@@ -252,12 +251,12 @@ func BenchmarkTypedGet_Codec(b *testing.B) {
 	})
 }
 
-func newBenchTypedJSON(b *testing.B) redcache.Cache[string, tUser] {
+func newBenchTypedJSON(b *testing.B) *redcache.Cache {
 	b.Helper()
 	return newBenchBase(b)
 }
 
-func newBenchBase(b *testing.B) redcache.Cache[string, tUser] {
+func newBenchBase(b *testing.B) *redcache.Cache {
 	b.Helper()
 	skipIfNoRedis(b)
 	conn, err := redcache.Open(
@@ -268,7 +267,7 @@ func newBenchBase(b *testing.B) redcache.Cache[string, tUser] {
 		b.Fatalf("new cache: %v", err)
 	}
 	b.Cleanup(conn.Close)
-	c := redcache.NewString[tUser](conn, redcache.JSONCodec[tUser]{})
+	c := redcache.New(conn, redcache.JSONCodec{})
 	return c
 }
 

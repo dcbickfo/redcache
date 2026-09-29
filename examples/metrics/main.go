@@ -42,7 +42,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	cache := redcache.NewString[string](conn, redcache.StringCodec{})
+	cache := redcache.New(conn, redcache.StringCodec{})
 	key := "redcache:examples:metrics:" + runID
 
 	load := func(_ context.Context, _ string) (string, error) {
