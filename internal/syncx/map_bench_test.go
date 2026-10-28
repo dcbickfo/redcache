@@ -2,11 +2,33 @@ package syncx_test
 
 import (
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/dcbickfo/redcache/internal/syncx"
 )
+
+// stdMap adapts sync.Map as the baseline for ShardedMap.
+type stdMap struct{ m sync.Map }
+
+func (s *stdMap) Load(key string) (*int, bool) {
+	v, ok := s.m.Load(key)
+	p, _ := v.(*int)
+	return p, ok
+}
+
+func (s *stdMap) LoadAndDelete(key string) (*int, bool) {
+	v, ok := s.m.LoadAndDelete(key)
+	p, _ := v.(*int)
+	return p, ok
+}
+
+func (s *stdMap) LoadOrStore(key string, value *int) (*int, bool) {
+	v, ok := s.m.LoadOrStore(key, value)
+	p, _ := v.(*int)
+	return p, ok
+}
 
 type benchLockMap interface {
 	Load(key string) (*int, bool)
@@ -17,8 +39,8 @@ type benchLockMap interface {
 func BenchmarkLockMapReadMostly(b *testing.B) {
 	keys := benchKeys(4096)
 	value := new(int)
-	b.Run("syncx", func(b *testing.B) {
-		var sm syncx.Map[string, *int]
+	b.Run("sync.Map", func(b *testing.B) {
+		var sm stdMap
 		for _, key := range keys {
 			sm.LoadOrStore(key, value)
 		}
@@ -36,8 +58,8 @@ func BenchmarkLockMapReadMostly(b *testing.B) {
 func BenchmarkLockMapChurn(b *testing.B) {
 	keys := benchKeys(4096)
 	value := new(int)
-	b.Run("syncx", func(b *testing.B) {
-		var sm syncx.Map[string, *int]
+	b.Run("sync.Map", func(b *testing.B) {
+		var sm stdMap
 		benchmarkMapChurn(b, &sm, keys, value)
 	})
 	b.Run("sharded", func(b *testing.B) {
@@ -48,8 +70,8 @@ func BenchmarkLockMapChurn(b *testing.B) {
 
 func BenchmarkLockMapHotKeyChurn(b *testing.B) {
 	value := new(int)
-	b.Run("syncx", func(b *testing.B) {
-		var sm syncx.Map[string, *int]
+	b.Run("sync.Map", func(b *testing.B) {
+		var sm stdMap
 		benchmarkMapChurn(b, &sm, []string{"hot"}, value)
 	})
 	b.Run("sharded", func(b *testing.B) {

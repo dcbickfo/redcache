@@ -147,7 +147,7 @@ func (rca *cacheAside) shouldRefresh(cachePTTL int64, ttl time.Duration, delta t
 }
 
 // triggerRefresh enqueues a single-key refresh job to the worker pool.
-// Two-level dedup: local syncx.Map + distributed SET NX on a separate refresh key.
+// Two-level dedup: local ShardedMap + distributed SET NX on a separate refresh key.
 // If the queue is full, the refresh is dropped and counted via RefreshDropped.
 //
 // Safe against concurrent Close: the closing flag is a fast-exit optimization;
@@ -263,7 +263,7 @@ func (rca *cacheAside) doSingleRefresh(
 }
 
 // triggerMultiRefresh enqueues a multi-key refresh job. Two-level dedup: local
-// syncx.Map + distributed SET NX on separate refresh keys. Drops are counted via
+// ShardedMap + distributed SET NX on separate refresh keys. Drops are counted via
 // RefreshDropped when the queue is full. Safe against concurrent Close (see
 // triggerRefresh).
 func (rca *cacheAside) triggerMultiRefresh(

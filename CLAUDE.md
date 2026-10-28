@@ -57,7 +57,7 @@ The library is a single-package Go module (`package redcache`) with internal hel
 
 The key insight: because `tryGet` uses `DoCache`, any client that reads a lock value automatically subscribes to invalidation for that key. When the lock holder replaces the lock with the real value, Redis pushes an invalidation message, which unblocks all waiters.
 
-**Lock mechanism:** Lock values are prefixed UUIDv7 strings (default prefix `__redcache:lock:`). `tryGet` recognizes these by prefix and treats them as cache misses. Lua scripts (`delKeyLua`, `setKeyLua`) atomically verify lock ownership before deleting or overwriting values. Lock entries are tracked locally via `syncx.Map` with context-based auto-expiration via `context.AfterFunc`.
+**Lock mechanism:** Lock values are prefixed UUIDv7 strings (default prefix `__redcache:lock:`). `tryGet` recognizes these by prefix and treats them as cache misses. Lua scripts (`delKeyLua`, `setKeyLua`) atomically verify lock ownership before deleting or overwriting values. Lock entries are tracked locally via `syncx.ShardedMap` with context-based auto-expiration via `context.AfterFunc`.
 
 **Multi-key operations:** `GetMulti` follows the same pattern but batches operations. `tryGetMulti` uses `DoMultiCache` for batch reads. `tryLockMulti` acquires locks in batch. `setMultiWithLock` groups SET Lua scripts by Redis cluster slot (via `cmdx.Slot`) and executes each group in parallel via goroutines coordinated with `sync.WaitGroup` (results merged under a `sync.Mutex`). `syncx.WaitForAll` waits on each channel in turn (no goroutines), returning the context error on cancellation.
 
@@ -65,7 +65,7 @@ The key insight: because `tryGet` uses `DoCache`, any client that reads a lock v
 - `internal/cmdx` — Redis cluster slot calculation (CRC16) for grouping multi-key operations
 - `internal/lockpool` — fast lock-value generation: a per-instance UUIDv7 prefix plus an atomic counter, avoiding a per-lock `uuid.NewV7()` call
 - `internal/poolx` — typed `sync.Pool` wrappers that reuse `[]T` slice headers (stored as `*[]T` to avoid interface-boxing allocations) across multi-key paths; capacity-capped, with live elements cleared on return
-- `internal/syncx` — Generic typed wrapper around `sync.Map`; `WaitForAll` waits on each channel in turn, returning the context error on cancellation
+- `internal/syncx` — `ShardedMap`, a string-keyed map sharded by `maphash` for Store/Delete churn; `WaitForAll` waits on each channel in turn, returning the context error on cancellation
 
 ## Code Conventions
 
