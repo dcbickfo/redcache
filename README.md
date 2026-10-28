@@ -68,7 +68,7 @@ orders := redcache.New[OrderID, Order](conn, orderIDCodec, redcache.JSONCodec[Or
 cache := redcache.New(conn, redcache.JSONCodec{})
 user, err  := cache.Get(ctx, ttl, "u-1", loadUser)      // K=string, V=User
 order, err := cache.Get(ctx, ttl, OrderID(7), loadOrder) // K=OrderID, V=Order
-profile, ok, err := cache.Peek[string, Profile](ctx, ttl, profileKey)
+profile, ok, err := cache.Peek[Profile](ctx, ttl, profileKey)
 ```
 
 `New(conn, valCodec)` uses `StringKeyCodec`, which accepts `string`, any type
@@ -171,7 +171,7 @@ users, err := cache.GetMulti(ctx, time.Minute, []string{"u-1", "u-2", "u-3"},
 the key currently holds a lock value), for warm-cache checks without populating:
 
 ```go
-u, ok, err := cache.Peek[string, User](ctx, time.Minute, "u-123")
+u, ok, err := cache.Peek[User](ctx, time.Minute, "u-123")
 // ok == false means not currently cached; Peek never runs your loader.
 ```
 

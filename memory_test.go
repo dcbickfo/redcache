@@ -37,7 +37,7 @@ func TestMemory_ConnShape(t *testing.T) {
 	conn.Close() // no-op, must not panic
 	raw := redcache.NewBytes(conn)
 	require.NoError(t, raw.ForceSet(t.Context(), time.Minute, "k", []byte("v")))
-	got, ok, err := raw.Peek[string, []byte](t.Context(), time.Minute, "k")
+	got, ok, err := raw.Peek[[]byte](t.Context(), time.Minute, "k")
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.Equal(t, []byte("v"), got)
@@ -114,7 +114,7 @@ func TestMemory_DelAndDelMulti(t *testing.T) {
 	require.NoError(t, c.Del(t.Context(), "a"))
 	require.NoError(t, c.DelMulti(t.Context(), []string{"b", "missing"}))
 	for k, want := range map[string]bool{"a": false, "b": false, "c": true} {
-		_, ok, err := c.Peek[string, int](t.Context(), time.Minute, k)
+		_, ok, err := c.Peek[int](t.Context(), time.Minute, k)
 		require.NoError(t, err)
 		assert.Equal(t, want, ok, k)
 	}
@@ -142,10 +142,10 @@ func TestMemory_Touch_ExtendsExpiryAndNoOpsOnMissing(t *testing.T) {
 	require.NoError(t, c.Touch(t.Context(), time.Minute, "k"))
 	require.NoError(t, c.Touch(t.Context(), time.Minute, "missing"))
 	*now = now.Add(50 * time.Second) // 100s after store; alive only because of Touch
-	_, ok, err := c.Peek[string, int](t.Context(), time.Minute, "k")
+	_, ok, err := c.Peek[int](t.Context(), time.Minute, "k")
 	require.NoError(t, err)
 	assert.True(t, ok)
-	_, ok, err = c.Peek[string, int](t.Context(), time.Minute, "missing")
+	_, ok, err = c.Peek[int](t.Context(), time.Minute, "missing")
 	require.NoError(t, err)
 	assert.False(t, ok, "Touch must not create entries")
 	require.NoError(t, c.TouchMulti(t.Context(), time.Minute, []string{"k", "missing"}))
@@ -185,14 +185,14 @@ func TestMemory_SetAndSetMulti(t *testing.T) {
 	t.Parallel()
 	c, _ := memCache(t)
 	require.NoError(t, c.Set(t.Context(), time.Minute, "k", func(context.Context, string) (int, error) { return 3, nil }))
-	got, ok, err := c.Peek[string, int](t.Context(), time.Minute, "k")
+	got, ok, err := c.Peek[int](t.Context(), time.Minute, "k")
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.Equal(t, 3, got)
 
 	wantErr := errors.New("boom")
 	require.ErrorIs(t, c.Set(t.Context(), time.Minute, "k2", func(context.Context, string) (int, error) { return 0, wantErr }), wantErr)
-	_, ok, err = c.Peek[string, int](t.Context(), time.Minute, "k2")
+	_, ok, err = c.Peek[int](t.Context(), time.Minute, "k2")
 	require.NoError(t, err)
 	assert.False(t, ok)
 

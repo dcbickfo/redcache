@@ -36,7 +36,7 @@ func TestCache_InfersValueTypesPerOperation(t *testing.T) {
 		_, _ = cache.Get(t.Context(), time.Second, "user", func(context.Context, string) (tUser, error) {
 			return tUser{}, nil
 		})
-		_, _, _ = cache.Peek[string, tUser](t.Context(), time.Second, "user")
+		_, _, _ = cache.Peek[tUser](t.Context(), time.Second, "user")
 	}
 	_ = compile
 }
