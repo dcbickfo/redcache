@@ -223,7 +223,7 @@ func main() {
 
 Absence semantics are the caller's to own — there is no `ErrNotFound` sentinel. Use a `*T`, `sql.Null[T]`, or a domain sentinel inside `V` to cache "not found" and avoid cache penetration.
 
-`GetMulti` follows the same pattern in batch: it returns the cached values and calls the loader once with just the missing keys.
+`GetMulti` follows the same pattern in batch: it returns the cached values and calls the loader once with just the missing keys. The loader must return a value for every key it is given; an omitted key fails the call with `ErrMissingValue`.
 
 ```go
 users, err := cache.GetMulti(ctx, time.Minute, []string{"u-1", "u-2", "u-3"},

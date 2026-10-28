@@ -412,3 +412,28 @@ func TestPeek_DoesNotMutate(t *testing.T) {
 	assert.Equal(t, 5, got)
 	assert.Equal(t, int64(1), calls.Load(), "Peek must not populate the cache")
 }
+
+// The Fake enforces the same loader-completeness contract as the real Cache.
+func TestFake_LoaderOmitsKey(t *testing.T) {
+	f := redcachetest.New[string, int]()
+	ctx := context.Background()
+	onlyA := func(context.Context, []string) (map[string]int, error) { return map[string]int{"a": 1}, nil }
+
+	_, err := f.GetMulti(ctx, time.Minute, []string{"a", "b"}, onlyA)
+	require.ErrorIs(t, err, redcache.ErrMissingValue)
+	require.ErrorContains(t, err, "b")
+	_, ok, err := f.Peek(ctx, time.Minute, "a")
+	require.NoError(t, err)
+	assert.False(t, ok, "a failed GetMulti stores nothing")
+
+	require.NoError(t, f.ForceSet(ctx, time.Minute, "b", 7))
+	err = f.SetMulti(ctx, time.Minute, []string{"a", "b"}, onlyA)
+	var bke *redcache.BatchKeyError[string]
+	require.ErrorAs(t, err, &bke)
+	require.ErrorIs(t, bke.ErrorFor("b"), redcache.ErrMissingValue)
+	assert.Equal(t, []string{"a"}, bke.Succeeded)
+	v, ok, err := f.Peek(ctx, time.Minute, "b")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, 7, v, "an omitted key keeps its prior value")
+}

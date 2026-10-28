@@ -3,6 +3,7 @@ package redcache
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -76,6 +77,23 @@ func newBatchError(failed map[string]error, succeeded []string) error {
 		Failed:    failed,
 		Succeeded: succeeded,
 	}
+}
+
+// ErrMissingValue is returned (wrapped, naming the keys) when a GetMulti or
+// SetMulti loader returns no value for a key it was given. Loaders must return
+// every key; encode a known-absent entity as a value (e.g. a tombstone).
+var ErrMissingValue = errors.New("redcache: loader returned no value for key")
+
+// missingKeys returns the keys of want absent from got, sorted.
+func missingKeys[V any](want map[string]V, got map[string]string) []string {
+	var missing []string
+	for k := range want {
+		if _, ok := got[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	slices.Sort(missing)
+	return missing
 }
 
 // ErrDecode is returned (wrapped) from typed reads when a stored value

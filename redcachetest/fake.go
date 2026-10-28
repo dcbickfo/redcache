@@ -18,6 +18,7 @@ package redcachetest
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -145,7 +146,9 @@ func (f *Fake[K, V]) Get(
 
 // GetMulti returns cached values for the present keys and calls fn exactly once
 // with the missing keys (if any). Results from fn are stored under ttl and
-// merged into the returned map. fn is not called when every key is a hit.
+// merged into the returned map. fn is not called when every key is a hit. Like
+// the real Cache, a key fn omits fails the call with redcache.ErrMissingValue
+// and nothing is stored.
 func (f *Fake[K, V]) GetMulti(
 	ctx context.Context,
 	ttl time.Duration,
@@ -175,6 +178,15 @@ func (f *Fake[K, V]) GetMulti(
 	loaded, err := fn(ctx, missing)
 	if err != nil {
 		return nil, err
+	}
+	var omitted []K
+	for _, k := range missing {
+		if _, ok := loaded[k]; !ok {
+			omitted = append(omitted, k)
+		}
+	}
+	if len(omitted) > 0 {
+		return nil, fmt.Errorf("%w: %v", redcache.ErrMissingValue, omitted)
 	}
 
 	deadline := f.deadlineFor(ttl)
@@ -224,7 +236,9 @@ func (f *Fake[K, V]) Set(
 }
 
 // SetMulti calls fn once with all keys and stores every returned entry under
-// ttl, overwriting any existing entries.
+// ttl, overwriting any existing entries. Like the real Cache, a key fn omits
+// keeps its prior value and fails with redcache.ErrMissingValue in a
+// *redcache.BatchKeyError.
 func (f *Fake[K, V]) SetMulti(
 	ctx context.Context,
 	ttl time.Duration,
@@ -242,11 +256,25 @@ func (f *Fake[K, V]) SetMulti(
 		return err
 	}
 	deadline := f.deadlineFor(ttl)
+	var failed map[K]error
+	succeeded := make([]K, 0, len(keys))
 	f.mu.Lock()
-	for k, v := range loaded {
+	for _, k := range keys {
+		v, ok := loaded[k]
+		if !ok {
+			if failed == nil {
+				failed = make(map[K]error)
+			}
+			failed[k] = fmt.Errorf("%w: %v", redcache.ErrMissingValue, k)
+			continue
+		}
 		f.data[k] = entry[V]{value: v, deadline: deadline}
+		succeeded = append(succeeded, k)
 	}
 	f.mu.Unlock()
+	if failed != nil {
+		return &redcache.BatchKeyError[K]{Failed: failed, Succeeded: succeeded}
+	}
 	return nil
 }
 
