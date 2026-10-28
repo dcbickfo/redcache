@@ -3,6 +3,7 @@ package redcache_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -305,4 +306,36 @@ func TestCache_Set_RollbackSurvivesContextCancel(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, originalVal, res, "rollback must succeed under cancelled ctx so key is restored, not held by lock")
+}
+
+// Multi-key paths must not recycle the []rueidis.Completed they pass to
+// DoMulti: on ctx cancel DoMulti returns while rueidis's writer goroutine still
+// reads the slice, and a cleared entry panics in that goroutine, killing the
+// process. Short deadlines with large pipelined writes hit that window.
+func TestGetMulti_CancelMidPipelineDoesNotCrash(t *testing.T) {
+	t.Parallel()
+	cache, _ := makeClient(t, []string{"127.0.0.1:6379"})
+	big := strings.Repeat("x", 64<<10)
+	deadline := time.Now().Add(time.Second)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for it := 0; time.Now().Before(deadline); it++ {
+				keys := make([]string, 16)
+				for i := range keys {
+					keys[i] = "cancel-pipe:" + uuid.New().String()
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), time.Duration(1+it%5)*time.Millisecond)
+				_, _ = cache.GetMulti(ctx, time.Second, keys, func(_ context.Context, ks []string) (map[string]string, error) {
+					m := make(map[string]string, len(ks))
+					for _, k := range ks {
+						m[k] = big
+					}
+					return m, nil
+				})
+				cancel()
+			}
+		})
+	}
+	wg.Wait()
 }

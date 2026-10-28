@@ -28,9 +28,7 @@ func newLuaScript(src string) *luaScript {
 // ExecMulti runs the script once per exec in one pipeline. Results are in exec
 // order.
 func (s *luaScript) ExecMulti(ctx context.Context, c rueidis.Client, multi ...rueidis.LuaExec) []rueidis.RedisResult {
-	cmdsP := commandsPool.Get(len(multi))
-	defer commandsPool.Put(cmdsP)
-	cmds := *cmdsP
+	cmds := make(rueidis.Commands, len(multi))
 	for i, m := range multi {
 		cmds[i] = c.B().Evalsha().Sha1(s.sha1).Numkeys(int64(len(m.Keys))).Key(m.Keys...).Arg(m.Args...).Build()
 	}
