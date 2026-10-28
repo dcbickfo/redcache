@@ -277,3 +277,21 @@ func TestMemory_SubMillisecondTTLRejected(t *testing.T) {
 	require.ErrorIs(t, err, redcache.ErrInvalidTTL)
 	require.NoError(t, c.ForceSet(t.Context(), time.Millisecond, "k", 1))
 }
+
+// OpenMemory enforces the same loader-completeness contract as Redis.
+func TestMemory_LoaderOmitsKey(t *testing.T) {
+	t.Parallel()
+	c, _ := memCache(t)
+	ctx := t.Context()
+	onlyA := func(context.Context, []string) (map[string]int, error) { return map[string]int{"a": 1}, nil }
+
+	_, err := c.GetMulti(ctx, time.Minute, []string{"a", "b"}, onlyA)
+	require.ErrorIs(t, err, redcache.ErrMissingValue)
+	require.ErrorContains(t, err, `"b"`)
+
+	err = c.SetMulti(ctx, time.Minute, []string{"a", "b"}, onlyA)
+	bke, ok := errors.AsType[*redcache.BatchKeyError[string]](err)
+	require.True(t, ok, "want *BatchKeyError[string], got %v", err)
+	require.ErrorIs(t, bke.ErrorFor("b"), redcache.ErrMissingValue)
+	assert.Equal(t, []string{"a"}, bke.Succeeded)
+}

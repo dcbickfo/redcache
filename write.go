@@ -185,6 +185,12 @@ func (rca *cacheAside) setMulti(
 			toRestore[key] = lockVal
 		}
 	}
+	for _, key := range missingKeys(lockValues, vals) {
+		if failed == nil {
+			failed = make(map[string]error)
+		}
+		failed[key] = fmt.Errorf("%w: %q", ErrMissingValue, key)
+	}
 	if len(toRestore) > 0 {
 		rca.restoreMultiValues(ctx, toRestore, savedValues)
 	}

@@ -141,8 +141,9 @@ func (c *Cache) Get[K comparable, V any](
 }
 
 // GetMulti returns cached values for keys, calling fn for misses. V is inferred
-// from fn. SETs are grouped by Redis cluster slot; a decode error aborts the
-// batch and is wrapped with ErrDecode.
+// from fn. fn must return a value for every key it is given; an omitted key
+// fails the call with ErrMissingValue. SETs are grouped by Redis cluster slot;
+// a decode error aborts the batch and is wrapped with ErrDecode.
 func (c *Cache) GetMulti[K comparable, V any](
 	ctx context.Context,
 	ttl time.Duration,
@@ -174,7 +175,8 @@ func (c *Cache) Set[K comparable, V any](
 }
 
 // SetMulti populates keys via fn under write locks. V is inferred from fn.
-// Partial failures surface as *BatchKeyError[K] via errors.As.
+// Partial failures surface as *BatchKeyError[K] via errors.As; a key fn omits
+// is restored to its prior value and fails with ErrMissingValue.
 func (c *Cache) SetMulti[K comparable, V any](
 	ctx context.Context,
 	ttl time.Duration,

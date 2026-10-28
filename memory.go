@@ -2,6 +2,7 @@ package redcache
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -108,6 +109,10 @@ func (m *memEngine) getMulti(ctx context.Context, ttl time.Duration, keys []stri
 	if err != nil {
 		return nil, err
 	}
+	if omitted := slices.DeleteFunc(slices.Clone(missing), func(k string) bool { _, ok := loaded[k]; return ok }); len(omitted) > 0 {
+		slices.Sort(omitted)
+		return nil, fmt.Errorf("%w: %q", ErrMissingValue, omitted)
+	}
 	m.mu.Lock()
 	for _, k := range missing {
 		if v, ok := loaded[k]; ok {
@@ -140,14 +145,23 @@ func (m *memEngine) setMulti(ctx context.Context, ttl time.Duration, keys []stri
 	if err != nil {
 		return err
 	}
+	var failed map[string]error
+	succeeded := make([]string, 0, len(keys))
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, k := range keys {
-		if v, ok := vals[k]; ok {
-			m.store(ttl, k, v)
+		v, ok := vals[k]
+		if !ok {
+			if failed == nil {
+				failed = make(map[string]error)
+			}
+			failed[k] = fmt.Errorf("%w: %q", ErrMissingValue, k)
+			continue
 		}
+		m.store(ttl, k, v)
+		succeeded = append(succeeded, k)
 	}
-	return nil
+	return newBatchError(failed, succeeded)
 }
 
 func (m *memEngine) forceSet(_ context.Context, ttl time.Duration, key, value string) error {

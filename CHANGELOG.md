@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ErrMissingValue`, returned when a multi-key loader omits a key it was given.
 - `JSONV2Codec` — opt-in `encoding/json/v2` codec (nil slices/maps as `[]`/`{}`,
   case-sensitive field matching, duplicate object names rejected). `JSONCodec`
   keeps `encoding/json` v1 semantics and wire format.
@@ -49,6 +50,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refresh-ahead) no longer send `SCRIPT LOAD` to every node, replicas included,
   on every call. They pipeline `EVALSHA` and re-send only `NOSCRIPT` replies as
   `EVAL`, replacing rueidis's `Lua.ExecMulti`.
+- `GetMulti` no longer re-locks and re-runs the loader until the context ends
+  when the loader omits a requested key; it fails fast with `ErrMissingValue`
+  naming the keys. `SetMulti` reports such keys as failed with
+  `ErrMissingValue` (restoring their prior value) instead of returning nil.
+  Ported from the unreleased `fix/correctness-bundle` work.
+- Multi-key operations no longer recycle the command slice passed to rueidis
+  `DoMulti`. On context cancellation rueidis's writer goroutine could still be
+  reading it, and the pooled reset crashed the process with a nil-pointer
+  panic.
 - A ttl under 1ms returns `ErrInvalidTTL` up front instead of running the
   loader and then failing on Redis `PX 0`.
 - `ForceSetMulti` with two keys that encode to the same Redis key returns a

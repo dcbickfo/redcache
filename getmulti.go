@@ -303,6 +303,21 @@ func (rca *cacheAside) collectGetMultiResponse(
 	return needRefresh, needRefreshExpected, nil
 }
 
+// unlockUnset releases the locks in lockVals whose keys never landed in res.
+func (rca *cacheAside) unlockUnset(ctx context.Context, lockVals, res map[string]string) {
+	toUnlock := make(map[string]string)
+	for key, lockVal := range lockVals {
+		if _, ok := res[key]; !ok {
+			toUnlock[key] = lockVal
+		}
+	}
+	if len(toUnlock) > 0 {
+		toCtx, cancel := rca.cleanupCtx(ctx)
+		defer cancel()
+		rca.unlockMulti(toCtx, toUnlock)
+	}
+}
+
 // trySetMultiKeyFn locks each pending key, calls fn, writes the values, and
 // records successes in res.
 func (rca *cacheAside) trySetMultiKeyFn(
@@ -317,19 +332,7 @@ func (rca *cacheAside) trySetMultiKeyFn(
 		return err
 	}
 
-	defer func() {
-		toUnlock := make(map[string]string)
-		for key, lockVal := range lockVals {
-			if _, ok := res[key]; !ok {
-				toUnlock[key] = lockVal
-			}
-		}
-		if len(toUnlock) > 0 {
-			toCtx, cancel := rca.cleanupCtx(ctx)
-			defer cancel()
-			rca.unlockMulti(toCtx, toUnlock)
-		}
-	}()
+	defer rca.unlockUnset(ctx, lockVals, res)
 
 	if len(lockVals) == 0 {
 		return nil
@@ -342,6 +345,12 @@ func (rca *cacheAside) trySetMultiKeyFn(
 	if err != nil {
 		rca.emitLoaderErrors(len(fnKeys))
 		return err
+	}
+	// A key the loader omits would never land in res, so the retry loop would
+	// re-lock it and re-run fn until ctx ends. Fail fast; the deferred unlock
+	// releases every lock.
+	if missing := missingKeys(lockVals, vals); len(missing) > 0 {
+		return fmt.Errorf("%w: %q", ErrMissingValue, missing)
 	}
 	// Amortise fn time across returned values for XFetch sampling. Skewed but
 	// better than 0 — slow batches get proportionally more refresh headroom.
