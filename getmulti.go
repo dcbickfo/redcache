@@ -71,9 +71,8 @@ func (rca *cacheAside) getMultiLoop(
 
 retry:
 	chans = chans[:len(pending)]
-	leaderKeys := rca.registerPending(pending, chans, (*leaderKeysP)[:0])
+	leaderKeys := rca.registerPending(pending, chans, (*leaderKeysP)[:0], owned)
 	*leaderKeysP = leaderKeys
-	*owned = recordOwned(*owned, pending, chans, leaderKeys)
 
 	if err := rca.readGetMultiHits(ctx, ttl, pending, res, needRefreshP, fn); err != nil {
 		return nil, err
@@ -104,31 +103,18 @@ retry:
 	return res, nil
 }
 
-// recordOwned adds the wait channels of this round's leader keys to owned.
-// leaderKeys is in pending order, so one forward scan pairs them.
-func recordOwned(owned map[string]<-chan struct{}, pending []string, chans []<-chan struct{}, leaderKeys []string) map[string]<-chan struct{} {
-	if len(leaderKeys) == 0 {
-		return owned
-	}
-	if owned == nil {
-		owned = make(map[string]<-chan struct{}, len(leaderKeys))
-	}
-	j := 0
-	for i, k := range pending {
-		if j < len(leaderKeys) && leaderKeys[j] == k {
-			owned[k] = chans[i]
-			j++
-		}
-	}
-	return owned
-}
-
-func (rca *cacheAside) registerPending(pending []string, chans []<-chan struct{}, leaderKeys []string) []string {
+// registerPending registers each pending key, appending the keys this call
+// leads to leaderKeys and recording their wait channels in owned.
+func (rca *cacheAside) registerPending(pending []string, chans []<-chan struct{}, leaderKeys []string, owned *map[string]<-chan struct{}) []string {
 	for i, key := range pending {
 		var isLeader bool
 		chans[i], isLeader = rca.register(key)
 		if isLeader {
 			leaderKeys = append(leaderKeys, key)
+			if *owned == nil {
+				*owned = make(map[string]<-chan struct{}, len(pending))
+			}
+			(*owned)[key] = chans[i]
 		}
 	}
 	return leaderKeys

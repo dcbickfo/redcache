@@ -21,8 +21,10 @@ func (rca *cacheAside) get(
 	fn func(ctx context.Context, key string) (val string, err error),
 ) (string, error) {
 	// owned is the wait channel of the entry this call registered as leader.
-	// An error exit wrote nothing, so no invalidation will wake the local
-	// followers parked on it; release it so they retry now, not after lockTTL.
+	// Most error exits (cancelled ctx, Redis error) wrote nothing, so no
+	// invalidation will wake the local followers parked on it; release it so
+	// they retry now, not after lockTTL. After a loader error the unlock DEL
+	// also invalidates, and the release is redundant but harmless.
 	var owned <-chan struct{}
 	val, err := rca.getLoop(ctx, ttl, key, fn, &owned)
 	if err != nil && owned != nil {

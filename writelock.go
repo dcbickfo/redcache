@@ -546,9 +546,6 @@ func (rca *cacheAside) restoreMultiValues(ctx context.Context, lockValues map[st
 	}
 }
 
-// restoreValue restores a single key's previous value (with original TTL) or
-// deletes the key if saved.present is false. Empty values with present=true
-// are restored as-is.
 // restoreArgs builds restoreValueOrDeleteScript's ARGV.
 func restoreArgs(lockVal string, saved savedValue) []string {
 	hadSaved := "0"
@@ -558,6 +555,9 @@ func restoreArgs(lockVal string, saved savedValue) []string {
 	return []string{lockVal, hadSaved, saved.val, strconv.FormatInt(saved.pttl, 10)}
 }
 
+// restoreValue restores a single key's previous value (with original TTL) or
+// deletes the key if saved.present is false. Empty values with present=true
+// are restored as-is.
 func (rca *cacheAside) restoreValue(ctx context.Context, key, lockVal string, saved savedValue) {
 	err := restoreValueOrDeleteScript.Exec(ctx, rca.client, []string{key}, restoreArgs(lockVal, saved)).Error()
 	if err != nil {
