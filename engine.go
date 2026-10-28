@@ -21,12 +21,12 @@ const (
 )
 
 var (
-	cacheableTTLPool = poolx.NewSlice(func() []rueidis.CacheableTTL { return make([]rueidis.CacheableTTL, 0, 16) })
+	cacheableTTLPool poolx.Slice[rueidis.CacheableTTL]
 	// No pool for []rueidis.Completed: on ctx cancel, DoMulti returns while
 	// rueidis's writer goroutine still reads the slice, so recycling it crashes.
-	luaExecPool = poolx.NewSlice(func() []rueidis.LuaExec { return make([]rueidis.LuaExec, 0, 16) })
-	stringPool  = poolx.NewSlice(func() []string { return make([]string, 0, 16) })
-	chanPool    = poolx.NewSlice(func() []<-chan struct{} { return make([]<-chan struct{}, 0, 16) })
+	luaExecPool poolx.Slice[rueidis.LuaExec]
+	stringPool  poolx.Slice[string]
+	chanPool    poolx.Slice[<-chan struct{}]
 )
 
 // lockEntry tracks a key's wait channel and its TTL timer. cancel and
