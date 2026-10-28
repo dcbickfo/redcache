@@ -13,11 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target Go 1.27.
 - **`Cache[K, V]` is replaced by the non-generic `Cache`.** Both type
   parameters move to the operations as Go 1.27 generic methods — `Get[K, V]`,
-  `GetMulti[K, V]`, `Peek[V, K]`, `Set[K, V]`, `SetMulti[K, V]`,
+  `GetMulti[K, V]`, `Peek[K, V]`, `Set[K, V]`, `SetMulti[K, V]`,
   `ForceSet[K, V]`, `ForceSetMulti[K, V]`, `Del[K]`, `DelMulti[K]`,
   `Touch[K]`, `TouchMulti[K]` — so one cache serves every key and value type.
-  Keys and loaders normally infer both; `Peek` takes `V` first so
-  `Peek[User](ctx, ttl, id)` names only the value type, and an untyped nil passed to a multi-key method
+  Keys and loaders normally infer both; `Peek` needs explicit `Peek[K, V]`
+  (nothing to infer `V` from), and an untyped nil passed to a multi-key method
   needs explicit type arguments.
 - **Constructors are `New(conn, valCodec)`, `NewKeyed(conn, keyCodec,
   valCodec)`, and `NewBytes(conn)`.** `New[K]` and `NewString` are gone.
@@ -62,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `errors.AsType`, and tests use `t.Context()`, `b.Loop()`, and stdlib
   `slices` sorting. `internal/syncx` timing tests run in `testing/synctest`
   bubbles instead of racing wall-clock deadlines.
-- golangci-lint is updated to v2.13.1, retaining the full lint and formatting
+- golangci-lint is updated to v2.15.0, retaining the full lint and formatting
   gates with Go 1.27 generic-method support.
 
 ## [v0.3.0] - 2026-06-19
