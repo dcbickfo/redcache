@@ -21,8 +21,7 @@ type tUser struct {
 }
 
 func TestCache_InfersValueTypesPerOperation(t *testing.T) {
-	var conn redcache.Conn
-	cache := redcache.New(&conn, redcache.JSONCodec{})
+	cache := redcache.New(new(redcache.Conn), redcache.JSONCodec{})
 	if cache == nil {
 		t.Fatal("New returned nil")
 	}

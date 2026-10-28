@@ -19,10 +19,7 @@ type Slice[T any] struct {
 
 // NewSlice creates a Slice pool. The newFn is invoked when the pool is empty.
 func NewSlice[T any](newFn func() []T) *Slice[T] {
-	return &Slice[T]{p: sync.Pool{New: func() any {
-		v := newFn()
-		return &v
-	}}}
+	return &Slice[T]{p: sync.Pool{New: func() any { return new(newFn()) }}}
 }
 
 // Get returns a *[]T whose slice has length n and capacity ≥ n, zero-valued.

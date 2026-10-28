@@ -39,8 +39,7 @@ func TestSlicePutDropsOversized(t *testing.T) {
 	t.Parallel()
 	pool := NewSlice(func() []byte { return make([]byte, 0, 4) })
 
-	huge := make([]byte, maxCap+1)
-	pool.Put(&huge)
+	pool.Put(new(make([]byte, maxCap+1)))
 
 	h := pool.Get(2)
 	if cap(*h) > maxCap {
