@@ -1,10 +1,7 @@
 package redcache
 
 import (
-	"bytes"
 	"context"
-	"runtime/pprof"
-	"strings"
 	"testing"
 	"time"
 	"uuid"
@@ -85,9 +82,8 @@ func TestConn_ClosesCleanly(t *testing.T) {
 }
 
 // Close must not leave engine goroutines (refresh workers, lock waiters) blocked
-// forever. Go 1.27's goroutineleak profile finds goroutines blocked on
-// primitives no runnable goroutine can reach; we only fail on stacks that pass
-// through this package so unrelated leaks elsewhere in the process are ignored.
+// forever. TestMain checks the whole run; this pins the check to Close with a
+// refresh worker live.
 func TestConn_Close_LeaksNoGoroutines(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires Redis")
@@ -108,11 +104,5 @@ func TestConn_Close_LeaksNoGoroutines(t *testing.T) {
 	require.NoError(t, err)
 	conn.Close()
 
-	var buf bytes.Buffer
-	require.NoError(t, pprof.Lookup("goroutineleak").WriteTo(&buf, 1))
-	for stack := range strings.SplitSeq(buf.String(), "\n\n") {
-		if strings.Contains(stack, "github.com/dcbickfo/redcache.") && !strings.Contains(stack, "_test.go") {
-			t.Fatalf("leaked goroutine after Close:\n%s", stack)
-		}
-	}
+	require.Empty(t, leakedGoroutines(), "leaked goroutines after Close")
 }

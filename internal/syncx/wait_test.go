@@ -3,6 +3,7 @@ package syncx_test
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -27,66 +28,80 @@ func delayedClose[T any](ch chan T, delay time.Duration) {
 
 func TestWaitForAll_Success(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
-	ch1 := make(chan struct{})
-	ch2 := make(chan struct{})
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		ch1 := make(chan struct{})
+		ch2 := make(chan struct{})
 
-	delayedSend(ch1, struct{}{}, 100*time.Millisecond)
-	delayedSend(ch2, struct{}{}, 200*time.Millisecond)
+		delayedSend(ch1, struct{}{}, 100*time.Millisecond)
+		delayedSend(ch2, struct{}{}, 200*time.Millisecond)
 
-	waitLock := []<-chan struct{}{ch1, ch2}
+		waitLock := []<-chan struct{}{ch1, ch2}
 
-	err := syncx.WaitForAll(ctx, waitLock)
-	assert.NoErrorf(t, err, "expected no error, got %v", err)
+		err := syncx.WaitForAll(ctx, waitLock)
+		assert.NoErrorf(t, err, "expected no error, got %v", err)
+	})
 }
 
 func TestWaitForAll_SuccessClosed(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
-	ch1 := make(chan struct{})
-	ch2 := make(chan struct{})
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		ch1 := make(chan struct{})
+		ch2 := make(chan struct{})
 
-	delayedClose(ch1, 100*time.Millisecond)
-	delayedClose(ch2, 200*time.Millisecond)
+		delayedClose(ch1, 100*time.Millisecond)
+		delayedClose(ch2, 200*time.Millisecond)
 
-	waitLock := []<-chan struct{}{ch1, ch2}
+		waitLock := []<-chan struct{}{ch1, ch2}
 
-	err := syncx.WaitForAll(ctx, waitLock)
-	assert.NoErrorf(t, err, "expected no error, got %v", err)
+		err := syncx.WaitForAll(ctx, waitLock)
+		assert.NoErrorf(t, err, "expected no error, got %v", err)
+	})
 }
 
 func TestWaitForAll_ContextCancelled(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+		defer cancel()
 
-	ch1 := make(chan int)
-	ch2 := make(chan int)
+		ch1 := make(chan int)
+		ch2 := make(chan int)
 
-	delayedSend(ch1, 1, 200*time.Millisecond)
-	delayedSend(ch2, 2, 300*time.Millisecond)
+		delayedSend(ch1, 1, 200*time.Millisecond)
+		delayedSend(ch2, 2, 300*time.Millisecond)
 
-	waitLock := []<-chan int{ch1, ch2}
+		waitLock := []<-chan int{ch1, ch2}
 
-	err := syncx.WaitForAll(ctx, waitLock)
-	assert.ErrorIsf(t, err, context.DeadlineExceeded, "expected context.DeadlineExceeded, got %v", err)
+		err := syncx.WaitForAll(ctx, waitLock)
+		assert.ErrorIsf(t, err, context.DeadlineExceeded, "expected context.DeadlineExceeded, got %v", err)
+		// Drain so the late senders exit inside the bubble.
+		<-ch1
+		<-ch2
+	})
 }
 
 func TestWaitForAll_PartialCompleteContextCancelled(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		defer cancel()
 
-	ch1 := make(chan int)
-	ch2 := make(chan int)
+		ch1 := make(chan int)
+		ch2 := make(chan int)
 
-	delayedSend(ch1, 1, 100*time.Millisecond)
-	delayedSend(ch2, 2, 300*time.Millisecond)
+		delayedSend(ch1, 1, 100*time.Millisecond)
+		delayedSend(ch2, 2, 300*time.Millisecond)
 
-	waitLock := []<-chan int{ch1, ch2}
+		waitLock := []<-chan int{ch1, ch2}
 
-	err := syncx.WaitForAll(ctx, waitLock)
-	assert.ErrorIsf(t, err, context.DeadlineExceeded, "expected context.DeadlineExceeded, got %v", err)
+		err := syncx.WaitForAll(ctx, waitLock)
+		assert.ErrorIsf(t, err, context.DeadlineExceeded, "expected context.DeadlineExceeded, got %v", err)
+		// Drain so the late senders exit inside the bubble.
+		<-ch1
+		<-ch2
+	})
 }
 
 func TestWaitForAll_NoChannels(t *testing.T) {

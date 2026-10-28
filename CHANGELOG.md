@@ -13,11 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target Go 1.27.
 - **`Cache[K, V]` is replaced by the non-generic `Cache`.** Both type
   parameters move to the operations as Go 1.27 generic methods — `Get[K, V]`,
-  `GetMulti[K, V]`, `Peek[K, V]`, `Set[K, V]`, `SetMulti[K, V]`,
+  `GetMulti[K, V]`, `Peek[V, K]`, `Set[K, V]`, `SetMulti[K, V]`,
   `ForceSet[K, V]`, `ForceSetMulti[K, V]`, `Del[K]`, `DelMulti[K]`,
   `Touch[K]`, `TouchMulti[K]` — so one cache serves every key and value type.
-  Keys and loaders normally infer both; `Peek` needs explicit `Peek[K, V]`
-  (nothing to infer `V` from), and an untyped nil passed to a multi-key method
+  Keys and loaders normally infer both; `Peek` takes `V` first so
+  `Peek[User](ctx, ttl, id)` names only the value type, and an untyped nil passed to a multi-key method
   needs explicit type arguments.
 - **Constructors are `New(conn, valCodec)`, `NewKeyed(conn, keyCodec,
   valCodec)`, and `NewBytes(conn)`.** `New[K]` and `NewString` are gone.
@@ -39,11 +39,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `JSONV2Codec` — opt-in `encoding/json/v2` codec (nil slices/maps as `[]`/`{}`,
   case-sensitive field matching, duplicate object names rejected). `JSONCodec`
   keeps `encoding/json` v1 semantics and wire format.
-- `TestConn_Close_LeaksNoGoroutines` uses Go 1.27's `goroutineleak` profile to
-  assert `Conn.Close` leaves no engine goroutines blocked.
+- The test binary's `TestMain` fails the run on any leaked package goroutine,
+  using Go 1.27's `goroutineleak` profile; `TestConn_Close_LeaksNoGoroutines`
+  pins the same check to `Conn.Close`.
 
 ### Fixed
 
+- Multi-key Lua paths (`GetMulti`, `SetMulti`, `TouchMulti`, `DelMulti`,
+  refresh-ahead) no longer send `SCRIPT LOAD` to every node, replicas included,
+  on every call. They pipeline `EVALSHA` and re-send only `NOSCRIPT` replies as
+  `EVAL`, replacing rueidis's `Lua.ExecMulti`.
 - `GetMulti` retry loop no longer races a still-running lock waiter: the
   internal `WaitForAll` goroutine is joined before the poll fallback returns,
   so the reused channel slice is not rewritten underneath it (found by the race
@@ -55,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package; the module has one fewer direct dependency.
 - Concurrent worker launches use `sync.WaitGroup.Go`, typed error matching uses
   `errors.AsType`, and tests use `t.Context()`, `b.Loop()`, and stdlib
-  `slices` sorting.
+  `slices` sorting. `internal/syncx` timing tests run in `testing/synctest`
+  bubbles instead of racing wall-clock deadlines.
 - golangci-lint is updated to v2.13.1, retaining the full lint and formatting
   gates with Go 1.27 generic-method support.
 
