@@ -384,8 +384,15 @@ func (rca *cacheAside) rollbackAfterFirstFailure(
 func (rca *cacheAside) touchMultiLocks(ctx context.Context, lockValues map[string]string) {
 	cleanCtx, cancel := rca.cleanupCtx(ctx)
 	defer cancel()
+	keys := make([]string, 0, len(lockValues))
+	execs := make([]rueidis.LuaExec, 0, len(lockValues))
 	for key, lockVal := range lockValues {
-		result, err := refreshLockScript.Exec(cleanCtx, rca.client, []string{key}, []string{lockVal, rca.lockTTLMs}).AsInt64()
+		keys = append(keys, key)
+		execs = append(execs, rueidis.LuaExec{Keys: []string{key}, Args: []string{lockVal, rca.lockTTLMs}})
+	}
+	for i, resp := range refreshLockScript.ExecMulti(cleanCtx, rca.client, execs...) {
+		key := keys[i]
+		result, err := resp.AsInt64()
 		if err != nil {
 			rca.logger.Error("lock refresh script error", "key", key, "error", err)
 			continue
@@ -526,21 +533,33 @@ func (rca *cacheAside) restoreMultiValues(ctx context.Context, lockValues map[st
 	toCtx, cancel := rca.cleanupCtx(ctx)
 	defer cancel()
 
+	keys := make([]string, 0, len(lockValues))
+	execs := make([]rueidis.LuaExec, 0, len(lockValues))
 	for key, lockVal := range lockValues {
-		rca.restoreValue(toCtx, key, lockVal, savedValues[key])
+		keys = append(keys, key)
+		execs = append(execs, rueidis.LuaExec{Keys: []string{key}, Args: restoreArgs(lockVal, savedValues[key])})
+	}
+	for i, resp := range restoreValueOrDeleteScript.ExecMulti(toCtx, rca.client, execs...) {
+		if err := resp.Error(); err != nil {
+			rca.logger.Error("failed to restore value", "key", keys[i], "error", err)
+		}
 	}
 }
 
 // restoreValue restores a single key's previous value (with original TTL) or
 // deletes the key if saved.present is false. Empty values with present=true
 // are restored as-is.
-func (rca *cacheAside) restoreValue(ctx context.Context, key, lockVal string, saved savedValue) {
+// restoreArgs builds restoreValueOrDeleteScript's ARGV.
+func restoreArgs(lockVal string, saved savedValue) []string {
 	hadSaved := "0"
 	if saved.present {
 		hadSaved = "1"
 	}
-	pttlStr := strconv.FormatInt(saved.pttl, 10)
-	err := restoreValueOrDeleteScript.Exec(ctx, rca.client, []string{key}, []string{lockVal, hadSaved, saved.val, pttlStr}).Error()
+	return []string{lockVal, hadSaved, saved.val, strconv.FormatInt(saved.pttl, 10)}
+}
+
+func (rca *cacheAside) restoreValue(ctx context.Context, key, lockVal string, saved savedValue) {
+	err := restoreValueOrDeleteScript.Exec(ctx, rca.client, []string{key}, restoreArgs(lockVal, saved)).Error()
 	if err != nil {
 		rca.logger.Error("failed to restore value", "key", key, "error", err)
 	}

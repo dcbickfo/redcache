@@ -373,10 +373,15 @@ func (rca *cacheAside) acquireRefreshLocks(ctx context.Context, keys []string) (
 func (rca *cacheAside) deleteRefreshLocks(ctx context.Context, locks map[string]string) {
 	cleanupCtx, cleanupCancel := rca.cleanupCtx(ctx)
 	defer cleanupCancel()
+	keys := make([]string, 0, len(locks))
+	execs := make([]rueidis.LuaExec, 0, len(locks))
 	for key, refreshLock := range locks {
-		refreshKey := rca.refreshKeyFor(key)
-		if err := delKeyLua.Exec(cleanupCtx, rca.client, []string{refreshKey}, []string{refreshLock}).Error(); err != nil {
-			rca.logger.Error("refresh-ahead lock release failed", "key", key, "refreshKey", refreshKey, "error", err)
+		keys = append(keys, key)
+		execs = append(execs, rueidis.LuaExec{Keys: []string{rca.refreshKeyFor(key)}, Args: []string{refreshLock}})
+	}
+	for i, resp := range delKeyLua.ExecMulti(cleanupCtx, rca.client, execs...) {
+		if err := resp.Error(); err != nil {
+			rca.logger.Error("refresh-ahead lock release failed", "key", keys[i], "refreshKey", execs[i].Keys[0], "error", err)
 		}
 	}
 }
