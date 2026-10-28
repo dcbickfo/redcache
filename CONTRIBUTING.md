@@ -6,7 +6,7 @@ non-trivial before sending a large PR.
 
 ## Prerequisites
 
-- Go 1.27+ (the module and `.tool-versions` both target Go 1.27.0).
+- Go 1.27+ (the module requires Go 1.27.0; `.tool-versions` pins the toolchain CI also uses).
 - Docker, to run a local Redis. The tests are integration tests that need a
   real Redis at `127.0.0.1:6379` — they exercise RESP3 client-side
   invalidation, which can't be faked.

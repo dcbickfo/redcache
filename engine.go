@@ -201,17 +201,19 @@ func (rca *cacheAside) awaitLockMultiOrPoll(ctx context.Context, chans []<-chan 
 
 	waitCtx, waitCancel := context.WithCancel(ctx)
 	defer waitCancel()
-	waitDone := make(chan error, 1)
+	var waitErr error
+	waitDone := make(chan struct{})
 	go func() {
-		waitDone <- syncx.WaitForAll(waitCtx, chans)
+		defer close(waitDone)
+		waitErr = syncx.WaitForAll(waitCtx, chans)
 	}()
 
 	timer := time.NewTimer(rca.nextLockPollDelay())
 	defer timer.Stop()
 	for {
 		select {
-		case err := <-waitDone:
-			return false, err
+		case <-waitDone:
+			return false, waitErr
 		case <-ctx.Done():
 			waitCancel()
 			<-waitDone

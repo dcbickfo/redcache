@@ -73,4 +73,4 @@ The key insight: because `tryGet` uses `DoCache`, any client that reads a lock v
 - Tests are integration tests requiring a running Redis instance at `127.0.0.1:6379`
 - Tests use UUID-based keys to avoid collisions between test runs
 - Linting config is in `.golangci.yml` (v2 format); `make lint` runs the pinned
-  golangci-lint v2.13.1 with Go 1.27 generic-method support.
+  golangci-lint v2.15.0 with Go 1.27 generic-method support.
