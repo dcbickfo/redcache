@@ -1,35 +1,16 @@
 package syncx
 
-import (
-	"context"
-	"sync"
-)
+import "context"
 
 // WaitForAll blocks until all channels are closed (or receive a value) or the
-// context is cancelled. Returns nil on success, or the context error.
+// context is cancelled. Returns nil on success, or the context error. Channels
+// are waited on in turn: the total wait is the slowest channel either way, and
+// no goroutines are started.
 func WaitForAll[C ~<-chan V, V any](ctx context.Context, channels []C) error {
-	if len(channels) == 0 {
-		return nil
-	}
-
-	done := make(chan struct{}, len(channels))
-	var wg sync.WaitGroup
-
 	for _, ch := range channels {
-		wg.Go(func() {
-			select {
-			case <-ch:
-				done <- struct{}{}
-			case <-ctx.Done():
-			}
-		})
-	}
-
-	for range len(channels) {
 		select {
-		case <-done:
+		case <-ch:
 		case <-ctx.Done():
-			wg.Wait()
 			return ctx.Err()
 		}
 	}
