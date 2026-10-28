@@ -231,7 +231,19 @@ func (rca *cacheAside) awaitLockMultiOrPoll(ctx context.Context, chans []<-chan 
 	}
 }
 
+// onInvalidate wakes waiters on invalidated keys. rueidis passes nil to mean
+// every key (connection lost, FLUSHALL/FLUSHDB): wake every waiter, since no
+// per-key message will follow for what changed meanwhile.
 func (rca *cacheAside) onInvalidate(messages []rueidis.RedisMessage) {
+	if messages == nil {
+		rca.locks.Range(func(key string, entry *lockEntry) bool {
+			if rca.locks.CompareAndDelete(key, entry) {
+				entry.cancel()
+			}
+			return true
+		})
+		return
+	}
 	for _, m := range messages {
 		key, err := m.ToString()
 		if err != nil {

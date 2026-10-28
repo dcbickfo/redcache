@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `Get`/`GetMulti` leader that exits on error (cancelled context, Redis
   error) releases its local wait entry. Later callers in the same process used
   to park on it until `LockTTL`, since nothing was written to invalidate it.
+- rueidis's nil invalidation (connection lost, `FLUSHALL`/`FLUSHDB`) now wakes
+  every local waiter. It was ignored, so after a Redis restart or flush the next
+  miss on a recently-read key could stall until `LockTTL`.
 - A ttl under 1ms returns `ErrInvalidTTL` up front instead of running the
   loader and then failing on Redis `PX 0`.
 - `ForceSetMulti` with two keys that encode to the same Redis key returns a

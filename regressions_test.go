@@ -364,7 +364,9 @@ func TestGet_ErroredLeaderDoesNotStallNextCaller(t *testing.T) {
 	assert.Less(t, time.Since(start), time.Second, "Get stalled on the errored leader's entry")
 
 	keys := []string{"errored-leader:" + uuid.New().String()}
-	loadMulti := func(context.Context, []string) (map[string]string, error) { return map[string]string{keys[0]: "v"}, nil }
+	loadMulti := func(context.Context, []string) (map[string]string, error) {
+		return map[string]string{keys[0]: "v"}, nil
+	}
 	_, err = cache.GetMulti(dead, time.Minute, keys, loadMulti)
 	require.Error(t, err)
 	start = time.Now()
@@ -372,4 +374,37 @@ func TestGet_ErroredLeaderDoesNotStallNextCaller(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{keys[0]: "v"}, m)
 	assert.Less(t, time.Since(start), time.Second, "GetMulti stalled on the errored leader's entry")
+}
+
+// After a disconnect rueidis invalidates everything with a nil message; local
+// entries from before it must not make the next miss wait out lockTTL.
+func TestGet_DisconnectInvalidatesLocalEntries(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}, redcache.WithLockTTL(3*time.Second))
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	other, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}, DisableCache: true})
+	require.NoError(t, err)
+	t.Cleanup(other.Close)
+	cache := redcache.New(conn, redcache.StringCodec{})
+	ctx := t.Context()
+	key := "disconnect:" + uuid.New().String()
+	load := func(context.Context, string) (string, error) { return "v", nil }
+
+	_, err = cache.Get(ctx, time.Minute, key, load)
+	require.NoError(t, err)
+	_, err = cache.Get(ctx, time.Minute, key, load) // a hit leaves a local entry alive
+	require.NoError(t, err)
+
+	id, err := conn.Client().Do(ctx, conn.Client().B().ClientId().Build()).AsInt64()
+	require.NoError(t, err)
+	_ = other.Do(ctx, other.B().ClientKill().Id(id).Build()).Error()
+	require.NoError(t, other.Do(ctx, other.B().Del().Key(key).Build()).Error())
+
+	require.Eventually(t, func() bool {
+		start := time.Now()
+		v, err := cache.Get(ctx, time.Minute, key, load)
+		return err == nil && v == "v" && time.Since(start) < time.Second
+	}, 2*time.Second, 50*time.Millisecond)
 }
