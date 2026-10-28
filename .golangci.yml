@@ -51,6 +51,7 @@ linters:
     - errname       # Enforces conventional error identifier names.
     - usestdlibvars # Prefers standard library constants over literals.
     - bodyclose     # Ensures HTTP response bodies are closed.
+    - modernize     # Go modernizers (same suite as go fix): keeps code on current idioms.
 
   settings:
     gocyclo:
