@@ -1,16 +1,14 @@
 package redcache
 
-import "github.com/redis/rueidis"
-
 // Lua scripts for Cache lock operations.
 var (
 	// delKeyLua atomically deletes a key only if the current value matches the lock.
-	delKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("DEL",KEYS[1]) else return 0 end`)
+	delKeyLua = newLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then return redis.call("DEL",KEYS[1]) else return 0 end`)
 	// setKeyLua atomically sets a value only if the current value matches the lock (CAS).
 	// Returns 1 on success, 0 if the lock was lost. The explicit `return 1` is
 	// required: Redis SET replies with status string "OK", which AsInt64 cannot
 	// parse — bubbling that up would mis-report every success as a lock-lost.
-	setKeyLua = rueidis.NewLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then redis.call("SET",KEYS[1],ARGV[2],"PX",ARGV[3]) return 1 else return 0 end`)
+	setKeyLua = newLuaScript(`if redis.call("GET",KEYS[1]) == ARGV[1] then redis.call("SET",KEYS[1],ARGV[2],"PX",ARGV[3]) return 1 else return 0 end`)
 )
 
 // Lua scripts for write-lock, touch, and refresh-ahead operations.
@@ -23,7 +21,7 @@ var (
 	// Returns [success (0 or 1), previous_value or false, previous_pttl].
 	// previous_pttl is -1 (persistent), positive (ms remaining), or 0 when
 	// previous_value is false.
-	acquireWriteLockWithBackupScript = rueidis.NewLuaScript(`
+	acquireWriteLockWithBackupScript = newLuaScript(`
 		local key = KEYS[1]
 		local lock_value = ARGV[1]
 		local ttl = ARGV[2]
@@ -52,7 +50,7 @@ var (
 	// had_saved=0 means DEL; had_saved=1 means SET (preserves empty-string
 	// values). restore_pttl <= 0 means persistent (SET without PX); > 0 means
 	// SET PX <ms>.
-	restoreValueOrDeleteScript = rueidis.NewLuaScript(`
+	restoreValueOrDeleteScript = newLuaScript(`
 		local key = KEYS[1]
 		local expected_lock = ARGV[1]
 		local had_saved = ARGV[2]
@@ -76,7 +74,7 @@ var (
 
 	// setWithWriteLockScript is a strict CAS: SET value only if we hold the exact lock.
 	// Returns 1 on success, 0 if lock was lost.
-	setWithWriteLockScript = rueidis.NewLuaScript(`
+	setWithWriteLockScript = newLuaScript(`
 		local key = KEYS[1]
 		local value = ARGV[1]
 		local ttl = ARGV[2]
@@ -95,7 +93,7 @@ var (
 	// concurrently-written value. The PEXPIRE emits a CSC invalidation that
 	// harmlessly wakes any waiters, which re-check and resume waiting.
 	// Returns 1 on success, 0 if the lock was lost.
-	refreshLockScript = rueidis.NewLuaScript(`
+	refreshLockScript = newLuaScript(`
 		if redis.call("GET", KEYS[1]) == ARGV[1] then
 			redis.call("PEXPIRE", KEYS[1], ARGV[2])
 			return 1
@@ -107,7 +105,7 @@ var (
 	// touchScript extends a key's TTL via PEXPIRE only if the current value is
 	// a real (non-lock) value. No-ops on missing key or lock value.
 	// Returns 1 on PEXPIRE applied, 0 if skipped.
-	touchScript = rueidis.NewLuaScript(`
+	touchScript = newLuaScript(`
 		local cur = redis.call("GET", KEYS[1])
 		if cur == false then
 			return 0
@@ -124,7 +122,7 @@ var (
 	// Skips on missing key (let Get-on-miss handle it), lock value (a Get/Set
 	// will write its own value), or any newer real value. Returns 1 on write,
 	// 0 if skipped.
-	refreshAheadSetScript = rueidis.NewLuaScript(`
+	refreshAheadSetScript = newLuaScript(`
 		local cur = redis.call("GET", KEYS[1])
 		if cur == false then
 			return 0
