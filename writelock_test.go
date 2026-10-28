@@ -91,7 +91,7 @@ func TestWaitForReadLocks_SurfacesRedisError(t *testing.T) {
 	pca.Client().Close()
 
 	key := "wait-readlock-err:" + uuid.New().String()
-	err := pca.waitForReadLocks(t.Context(), []string{key})
+	err := pca.waitForReadLocks(t.Context(), []string{key}, new(entryOwner))
 	require.Error(t, err, "broken client should surface error from waitForReadLocks")
 	require.Contains(t, err.Error(), "read key", "error should be wrapped with read key context")
 	require.Contains(t, err.Error(), key, "error should be tagged with the offending key")
@@ -115,6 +115,6 @@ func TestWaitForFailedKey_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 
-	err = waiter.waitForFailedKey(ctx, key, map[string]string{}, map[string]savedValue{})
+	err = waiter.waitForFailedKey(ctx, key, map[string]string{}, map[string]savedValue{}, new(entryOwner))
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }

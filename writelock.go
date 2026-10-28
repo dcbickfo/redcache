@@ -72,6 +72,7 @@ func parseBackup(logger Logger, key string, valMsg, pttlMsg rueidis.RedisMessage
 func (rca *cacheAside) acquireMultiWriteLocks(
 	ctx context.Context,
 	keys []string,
+	owned *entryOwner,
 ) (lockValues map[string]string, savedValues map[string]savedValue, err error) {
 	sortedP := stringPool.Get(len(keys))
 	defer stringPool.Put(sortedP)
@@ -95,7 +96,7 @@ func (rca *cacheAside) acquireMultiWriteLocks(
 			break
 		}
 
-		if err := rca.waitForFailedKey(ctx, firstFailed, lockValues, savedValues); err != nil {
+		if err := rca.waitForFailedKey(ctx, firstFailed, lockValues, savedValues, owned); err != nil {
 			return nil, nil, err
 		}
 
@@ -154,8 +155,9 @@ func (rca *cacheAside) waitForFailedKey(
 	firstFailed string,
 	lockValues map[string]string,
 	savedValues map[string]savedValue,
+	owned *entryOwner,
 ) error {
-	waitChan, _ := rca.register(firstFailed)
+	waitChan, _ := rca.registerOwned(owned, firstFailed)
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(firstFailed).Cache(), rca.lockTTL)
 	val, rerr := resp.ToString()
 	if rueidis.IsRedisNil(rerr) {

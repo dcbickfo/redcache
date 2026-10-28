@@ -23,10 +23,28 @@ func (rca *cacheAside) set(
 	key string,
 	fn func(ctx context.Context, key string) (string, error),
 ) error {
+	// Writers register only to wait, but an entry they create is theirs: on an
+	// error exit release it so a Get parked on it retries instead of waiting
+	// out lockTTL (no Redis write may follow to invalidate it).
+	var owned entryOwner
+	err := rca.setLoop(ctx, ttl, key, fn, &owned)
+	if err != nil {
+		rca.releaseOwned(owned)
+	}
+	return err
+}
+
+func (rca *cacheAside) setLoop(
+	ctx context.Context,
+	ttl time.Duration,
+	key string,
+	fn func(ctx context.Context, key string) (string, error),
+	owned *entryOwner,
+) error {
 	lockVal := rca.lockPool.Generate()
 
 	for {
-		saved, retry, err := rca.acquireSingleWriteLock(ctx, key, lockVal, rca.lockTTLMs)
+		saved, retry, err := rca.acquireSingleWriteLock(ctx, key, lockVal, rca.lockTTLMs, owned)
 		if err != nil {
 			return err
 		}
@@ -77,8 +95,9 @@ func (rca *cacheAside) set(
 func (rca *cacheAside) acquireSingleWriteLock(
 	ctx context.Context,
 	key, lockVal, lockTTLMs string,
+	owned *entryOwner,
 ) (saved savedValue, retry bool, err error) {
-	waitChan, _ := rca.register(key)
+	waitChan, _ := rca.registerOwned(owned, key)
 
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), rca.lockTTL)
 	val, rerr := resp.ToString()
@@ -141,12 +160,27 @@ func (rca *cacheAside) setMulti(
 	if len(keys) == 0 {
 		return nil
 	}
+	// As in set: release the entries this call created on an error exit.
+	var owned entryOwner
+	err := rca.setMultiLocked(ctx, ttl, keys, fn, &owned)
+	if err != nil {
+		rca.releaseOwned(owned)
+	}
+	return err
+}
 
-	if err := rca.waitForReadLocks(ctx, keys); err != nil {
+func (rca *cacheAside) setMultiLocked(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []string,
+	fn func(ctx context.Context, keys []string) (map[string]string, error),
+	owned *entryOwner,
+) error {
+	if err := rca.waitForReadLocks(ctx, keys, owned); err != nil {
 		return err
 	}
 
-	lockValues, savedValues, err := rca.acquireMultiWriteLocks(ctx, keys)
+	lockValues, savedValues, err := rca.acquireMultiWriteLocks(ctx, keys, owned)
 	if err != nil {
 		return err
 	}
@@ -249,12 +283,12 @@ func (rca *cacheAside) forceSetMulti(ctx context.Context, ttl time.Duration, val
 // waitForReadLocks batch-reads keys and waits out any that currently hold a
 // lock value. Registration must precede DoCache so onInvalidate can find the
 // lockEntries.
-func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string) error {
+func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string, owned *entryOwner) error {
 	waitChansP := chanPool.Get(len(keys))
 	defer chanPool.Put(waitChansP)
 	waitChans := *waitChansP
 	for i, key := range keys {
-		waitChans[i], _ = rca.register(key)
+		waitChans[i], _ = rca.registerOwned(owned, key)
 	}
 
 	multiP := cacheableTTLPool.Get(len(keys))

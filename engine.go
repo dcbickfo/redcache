@@ -274,6 +274,31 @@ func (rca *cacheAside) nextLockPollDelay() time.Duration {
 	return minDelay + time.Duration(rand.Int64N(int64(maxDelay-minDelay)))
 }
 
+// entryOwner records the local wait entries one call created (register
+// returned leader=true). Nothing else wakes an entry its creator abandons
+// before writing to Redis, so an error exit must releaseOwned them, or local
+// followers park on them until lockTTL.
+type entryOwner map[string]<-chan struct{}
+
+// registerOwned is register that records a created entry in o.
+func (rca *cacheAside) registerOwned(o *entryOwner, key string) (<-chan struct{}, bool) {
+	wait, leader := rca.register(key)
+	if leader {
+		if *o == nil {
+			*o = make(entryOwner)
+		}
+		(*o)[key] = wait
+	}
+	return wait, leader
+}
+
+// releaseOwned releases every entry in o that is still the one it recorded.
+func (rca *cacheAside) releaseOwned(o entryOwner) {
+	for key, wait := range o {
+		rca.release(key, wait)
+	}
+}
+
 // release cancels and removes key's entry if it is still the one whose wait
 // channel is wait, waking its followers. Comparing channels ensures a stale
 // owner never cancels an entry another caller registered since.

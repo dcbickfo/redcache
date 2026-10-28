@@ -26,14 +26,11 @@ func (rca *cacheAside) getMulti(
 	if len(keys) == 0 {
 		return map[string]string{}, nil
 	}
-	// owned holds the wait channels of entries this call registered as leader;
-	// an error exit releases them, as in get.
-	var owned map[string]<-chan struct{}
+	// An error exit releases the entries this call leads, as in get.
+	var owned entryOwner
 	res, err := rca.getMultiLoop(ctx, ttl, keys, fn, &owned)
 	if err != nil {
-		for k, w := range owned {
-			rca.release(k, w)
-		}
+		rca.releaseOwned(owned)
 	}
 	return res, err
 }
@@ -43,7 +40,7 @@ func (rca *cacheAside) getMultiLoop(
 	ttl time.Duration,
 	keys []string,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
-	owned *map[string]<-chan struct{},
+	owned *entryOwner,
 ) (map[string]string, error) {
 	res := make(map[string]string, len(keys))
 
@@ -104,17 +101,13 @@ retry:
 }
 
 // registerPending registers each pending key, appending the keys this call
-// leads to leaderKeys and recording their wait channels in owned.
-func (rca *cacheAside) registerPending(pending []string, chans []<-chan struct{}, leaderKeys []string, owned *map[string]<-chan struct{}) []string {
+// leads to leaderKeys and recording their entries in owned.
+func (rca *cacheAside) registerPending(pending []string, chans []<-chan struct{}, leaderKeys []string, owned *entryOwner) []string {
 	for i, key := range pending {
 		var isLeader bool
-		chans[i], isLeader = rca.register(key)
+		chans[i], isLeader = rca.registerOwned(owned, key)
 		if isLeader {
 			leaderKeys = append(leaderKeys, key)
-			if *owned == nil {
-				*owned = make(map[string]<-chan struct{}, len(pending))
-			}
-			(*owned)[key] = chans[i]
 		}
 	}
 	return leaderKeys

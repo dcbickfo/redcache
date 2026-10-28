@@ -408,3 +408,54 @@ func TestGet_DisconnectInvalidatesLocalEntries(t *testing.T) {
 		return err == nil && v == "v" && time.Since(start) < time.Second
 	}, 2*time.Second, 50*time.Millisecond)
 }
+
+// Set/SetMulti register local wait entries too. A writer that fails before any
+// Redis write (here: cancelled ctx on the first read) must release the entries
+// it created, or the next Get on the key parks on one until lockTTL.
+func TestSet_ErroredWriterDoesNotStallNextGet(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}, redcache.WithLockTTL(3*time.Second))
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	cache := redcache.New(conn, redcache.StringCodec{})
+	dead, cancel := context.WithCancel(t.Context())
+	cancel()
+	load := func(context.Context, string) (string, error) { return "v", nil }
+	loadMulti := func(_ context.Context, ks []string) (map[string]string, error) {
+		m := make(map[string]string, len(ks))
+		for _, k := range ks {
+			m[k] = "v"
+		}
+		return m, nil
+	}
+
+	tests := []struct {
+		name  string
+		write func(key string) error
+		read  func(key string) error
+	}{
+		{"set then get", func(k string) error { return cache.Set(dead, time.Minute, k, load) }, func(k string) error {
+			_, err := cache.Get(t.Context(), time.Minute, k, load)
+			return err
+		}},
+		{"setmulti then get", func(k string) error { return cache.SetMulti(dead, time.Minute, []string{k}, loadMulti) }, func(k string) error {
+			_, err := cache.Get(t.Context(), time.Minute, k, load)
+			return err
+		}},
+		{"setmulti then getmulti", func(k string) error { return cache.SetMulti(dead, time.Minute, []string{k}, loadMulti) }, func(k string) error {
+			_, err := cache.GetMulti(t.Context(), time.Minute, []string{k}, loadMulti)
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			key := "errored-writer:" + uuid.New().String()
+			require.Error(t, tt.write(key))
+			start := time.Now()
+			require.NoError(t, tt.read(key))
+			assert.Less(t, time.Since(start), time.Second, "read stalled on the errored writer's entry")
+		})
+	}
+}
