@@ -341,9 +341,7 @@ func (rca *cacheAside) doMultiRefresh(
 // acquireRefreshLocks batch-acquires distributed SET NX locks for refresh keys,
 // distinguishing IsRedisNil (healthy dedup) from real Redis errors.
 func (rca *cacheAside) acquireRefreshLocks(ctx context.Context, keys []string) ([]string, map[string]string) {
-	cmdsP := commandsPool.Get(len(keys))
-	defer commandsPool.Put(cmdsP)
-	cmds := *cmdsP
+	cmds := make(rueidis.Commands, len(keys))
 	refreshLocks := make(map[string]string, len(keys))
 	for i, key := range keys {
 		refreshLock := rca.lockPool.Generate()

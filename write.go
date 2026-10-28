@@ -216,14 +216,13 @@ func (rca *cacheAside) forceSetMulti(ctx context.Context, ttl time.Duration, val
 	if len(values) == 0 {
 		return nil
 	}
-	cmdsP := commandsPool.GetCap(len(values))
-	defer commandsPool.Put(cmdsP)
+	cmds := make(rueidis.Commands, 0, len(values))
 	keyOrder := make([]string, 0, len(values))
 	for key, val := range values {
 		keyOrder = append(keyOrder, key)
-		*cmdsP = append(*cmdsP, rca.client.B().Set().Key(key).Value(wrapEnvelope(val, 0)).Px(ttl).Build())
+		cmds = append(cmds, rca.client.B().Set().Key(key).Value(wrapEnvelope(val, 0)).Px(ttl).Build())
 	}
-	resps := rca.client.DoMulti(ctx, *cmdsP...)
+	resps := rca.client.DoMulti(ctx, cmds...)
 	var failed map[string]error
 	succeeded := make([]string, 0, len(resps))
 	for i, resp := range resps {

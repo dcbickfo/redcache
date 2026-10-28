@@ -379,13 +379,12 @@ func perValueDelta(total time.Duration, n int) time.Duration {
 
 func (rca *cacheAside) tryLockMulti(ctx context.Context, keys []string) (map[string]string, error) {
 	lockVals := make(map[string]string, len(keys))
-	cmdsP := commandsPool.GetCap(len(keys))
-	defer commandsPool.Put(cmdsP)
+	cmds := make(rueidis.Commands, 0, len(keys))
 	for _, k := range keys {
 		lockVals[k] = rca.lockPool.Generate()
-		*cmdsP = append(*cmdsP, rca.client.B().Set().Key(k).Value(lockVals[k]).Nx().Get().Px(rca.lockTTL).Build())
+		cmds = append(cmds, rca.client.B().Set().Key(k).Value(lockVals[k]).Nx().Get().Px(rca.lockTTL).Build())
 	}
-	resps := rca.client.DoMulti(ctx, *cmdsP...)
+	resps := rca.client.DoMulti(ctx, cmds...)
 	// Drain every response: DoMulti has already executed all SET NXs in the
 	// pipeline, so an early return would leak the later acquires for lockTTL.
 	// IsRedisNil = acquired; nil = NX rejected; other = propagate.
