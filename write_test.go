@@ -28,7 +28,7 @@ func requireEventuallyPeekString(
 ) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		got, ok, err := client.Peek[string](ctx, time.Second*10, key)
+		got, ok, err := client.Peek[string, string](ctx, time.Second*10, key)
 		return err == nil && ok && got == want
 	}, 2*time.Second, 10*time.Millisecond, "Peek(%q) did not observe %q", key, want)
 }
@@ -42,7 +42,7 @@ func requireEventuallyPeekStrings(
 	t.Helper()
 	require.Eventually(t, func() bool {
 		for key, wantValue := range want {
-			got, ok, err := client.Peek[string](ctx, time.Second*10, key)
+			got, ok, err := client.Peek[string, string](ctx, time.Second*10, key)
 			if err != nil || !ok || got != wantValue {
 				return false
 			}

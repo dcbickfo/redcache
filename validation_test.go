@@ -43,7 +43,7 @@ func TestWrite_InvalidTTLRejected(t *testing.T) {
 		return nil, nil
 	})
 	require.ErrorIs(t, err, redcache.ErrInvalidTTL)
-	_, _, err = cache.Peek[string](ctx, 0, "k")
+	_, _, err = cache.Peek[string, string](ctx, 0, "k")
 	require.ErrorIs(t, err, redcache.ErrInvalidTTL)
 	require.ErrorIs(t, cache.ForceSet(ctx, 0, "k", "v"), redcache.ErrInvalidTTL)
 	require.ErrorIs(t, cache.Set(ctx, -1, "k",

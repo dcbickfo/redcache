@@ -30,7 +30,7 @@ func TestPeek_MissThenHit(t *testing.T) {
 	key := "peek:" + uuid.New().String()
 
 	// Miss: no loader runs, no value present.
-	v, ok, err := client.Peek[string](ctx, time.Second*10, key)
+	v, ok, err := client.Peek[string, string](ctx, time.Second*10, key)
 	require.NoError(t, err)
 	require.False(t, ok, "Peek on an absent key must miss")
 	require.Empty(t, v)
@@ -43,7 +43,7 @@ func TestPeek_MissThenHit(t *testing.T) {
 	require.Equal(t, "hello", got)
 
 	// Hit: Peek now sees the populated value.
-	v, ok, err = client.Peek[string](ctx, time.Second*10, key)
+	v, ok, err = client.Peek[string, string](ctx, time.Second*10, key)
 	require.NoError(t, err)
 	require.True(t, ok, "Peek must hit after Get populated the key")
 	require.Equal(t, "hello", v)
@@ -83,7 +83,7 @@ func TestPeek_LockValueReadsAsMiss(t *testing.T) {
 	}()
 
 	<-inCb // loader is running; the key currently holds a lock value
-	v, ok, err := client.Peek[string](ctx, time.Second*10, key)
+	v, ok, err := client.Peek[string, string](ctx, time.Second*10, key)
 	require.NoError(t, err)
 	require.False(t, ok, "a lock value must read as a miss through Peek")
 	require.Empty(t, v)

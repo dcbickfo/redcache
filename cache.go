@@ -153,11 +153,11 @@ func (c *Cache) GetMulti[K comparable, V any](
 }
 
 // Peek is a read-only, client-side-cached lookup with no loader and no lock.
-// V comes first because nothing infers it: name it and let k infer K, as in
-// Peek[User](ctx, ttl, id). It returns (value, true, nil) on a hit, (zero,
-// false, nil) on a miss or lock value, and (zero, false, err) on a Redis or decode error. ttl is the
+// The caller must supply both K and V (as Peek[K, V]) because Peek has no
+// value argument from which Go can infer V. It returns (value, true, nil) on a hit, (zero, false, nil) on a miss
+// or lock value, and (zero, false, err) on a Redis or decode error. ttl is the
 // client-side-cache subscription TTL, like Get.
-func (c *Cache) Peek[V any, K comparable](ctx context.Context, ttl time.Duration, k K) (V, bool, error) {
+func (c *Cache) Peek[K comparable, V any](ctx context.Context, ttl time.Duration, k K) (V, bool, error) {
 	return viewFor[K, V](c).Peek(ctx, ttl, k)
 }
 
