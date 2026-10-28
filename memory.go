@@ -2,6 +2,8 @@ package redcache
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,8 +22,9 @@ func WithMemoryClock(now func() time.Time) MemoryOption {
 // OpenMemory returns a Conn backed by an in-process map instead of Redis, for
 // unit tests and local development. Caches built over it (New, NewKeyed,
 // NewBytes) behave identically at the typed layer — codecs run, TTLs expire,
-// a present entry is a hit and a miss calls the loader once — but there is no
-// distributed locking, invalidation, refresh-ahead, or metrics, and Client()
+// a present entry is a hit, a miss calls the loader, and loader results for keys
+// nobody asked for are dropped — but there is no single-flight (concurrent
+// misses each call the loader), no distributed locking, invalidation, refresh-ahead, or metrics, and Client()
 // returns nil. It never fails and needs no Close.
 func OpenMemory(opts ...MemoryOption) *Conn {
 	m := &memEngine{data: make(map[string]memEntry), now: time.Now}
@@ -60,8 +63,10 @@ func (m *memEngine) load(key string) (string, bool) {
 	return e.val, true
 }
 
+// store copies val: it may alias the caller's buffer (UnsafeBytesCodec), which
+// the Redis engine never retains past the call either.
 func (m *memEngine) store(ttl time.Duration, key, val string) {
-	m.data[key] = memEntry{val: val, deadline: m.now().Add(ttl)}
+	m.data[key] = memEntry{val: strings.Clone(val), deadline: m.now().Add(ttl)}
 }
 
 func (m *memEngine) get(ctx context.Context, ttl time.Duration, key string, fn func(context.Context, string) (string, error)) (string, error) {
@@ -86,6 +91,9 @@ func (m *memEngine) getMulti(ctx context.Context, ttl time.Duration, keys []stri
 	var missing []string
 	m.mu.Lock()
 	for _, k := range keys {
+		if _, seen := out[k]; seen || slices.Contains(missing, k) {
+			continue
+		}
 		if v, ok := m.load(k); ok {
 			out[k] = v
 		} else {
@@ -101,9 +109,11 @@ func (m *memEngine) getMulti(ctx context.Context, ttl time.Duration, keys []stri
 		return nil, err
 	}
 	m.mu.Lock()
-	for k, v := range loaded {
-		m.store(ttl, k, v)
-		out[k] = v
+	for _, k := range missing {
+		if v, ok := loaded[k]; ok {
+			m.store(ttl, k, v)
+			out[k] = v
+		}
 	}
 	m.mu.Unlock()
 	return out, nil
@@ -125,11 +135,19 @@ func (m *memEngine) set(ctx context.Context, ttl time.Duration, key string, fn f
 }
 
 func (m *memEngine) setMulti(ctx context.Context, ttl time.Duration, keys []string, fn func(context.Context, []string) (map[string]string, error)) error {
+	keys = slices.Compact(slices.Sorted(slices.Values(keys)))
 	vals, err := fn(ctx, keys)
 	if err != nil {
 		return err
 	}
-	return m.forceSetMulti(ctx, ttl, vals)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, k := range keys {
+		if v, ok := vals[k]; ok {
+			m.store(ttl, k, v)
+		}
+	}
+	return nil
 }
 
 func (m *memEngine) forceSet(_ context.Context, ttl time.Duration, key, value string) error {

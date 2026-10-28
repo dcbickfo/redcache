@@ -221,3 +221,59 @@ func TestMemory_InvalidTTLRejected(t *testing.T) {
 	require.ErrorIs(t, err, redcache.ErrInvalidTTL)
 	require.ErrorIs(t, c.Touch(t.Context(), -time.Second, "k"), redcache.ErrInvalidTTL)
 }
+
+// The Redis engine caches only keys it locked, so OpenMemory must also drop
+// loader results for keys nobody asked for, or tests would pass for prefetch
+// code that never caches on Redis.
+func TestMemory_MultiDropsUnrequestedKeysAndDedupes(t *testing.T) {
+	t.Parallel()
+	c, _ := memCache(t)
+	ctx := t.Context()
+
+	var gotMissing []string
+	got, err := c.GetMulti(ctx, time.Minute, []string{"a", "a"}, func(_ context.Context, missing []string) (map[string]int, error) {
+		gotMissing = missing
+		return map[string]int{"a": 1, "extra": 2}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a"}, gotMissing)
+	assert.Equal(t, map[string]int{"a": 1}, got)
+
+	require.NoError(t, c.SetMulti(ctx, time.Minute, []string{"b", "b"}, func(_ context.Context, keys []string) (map[string]int, error) {
+		assert.Equal(t, []string{"b"}, keys)
+		return map[string]int{"b": 3, "extra2": 4}, nil
+	}))
+
+	for _, k := range []string{"extra", "extra2"} {
+		_, ok, err := c.Peek[string, int](ctx, time.Minute, k)
+		require.NoError(t, err)
+		assert.False(t, ok, k)
+	}
+}
+
+// Redis copies the value on write; OpenMemory must not alias the caller's
+// UnsafeBytesCodec buffer either.
+func TestMemory_StoreDoesNotAliasCallerBuffer(t *testing.T) {
+	t.Parallel()
+	raw := redcache.NewBytes(redcache.OpenMemory())
+	buf := []byte("v1")
+	require.NoError(t, raw.ForceSet(t.Context(), time.Minute, "k", buf))
+	copy(buf, "XX")
+	got, ok, err := raw.Peek[string, []byte](t.Context(), time.Minute, "k")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, []byte("v1"), got)
+}
+
+// Redis PX has millisecond resolution and rejects PX 0, so a sub-millisecond
+// ttl must fail up front rather than after the loader ran.
+func TestMemory_SubMillisecondTTLRejected(t *testing.T) {
+	t.Parallel()
+	c, _ := memCache(t)
+	_, err := c.Get(t.Context(), 500*time.Microsecond, "k", func(context.Context, string) (int, error) {
+		t.Fatal("loader must not run for a sub-millisecond ttl")
+		return 0, nil
+	})
+	require.ErrorIs(t, err, redcache.ErrInvalidTTL)
+	require.NoError(t, c.ForceSet(t.Context(), time.Millisecond, "k", 1))
+}

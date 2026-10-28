@@ -222,7 +222,7 @@ func (c *Cache) TouchMulti[K comparable](ctx context.Context, ttl time.Duration,
 }
 
 func validateTTL(ttl time.Duration) error {
-	if ttl <= 0 {
+	if ttl < time.Millisecond {
 		return ErrInvalidTTL
 	}
 	return nil
@@ -658,7 +658,8 @@ func (c cache[K, V]) setMultiKeyed(
 
 // ForceSetMulti writes values unconditionally. Encode failures are collected
 // per-key; successfully-encoded entries are still written. Partial failures
-// (encode or write) surface as *BatchKeyError[K].
+// (encode or write) surface as *BatchKeyError[K]. Two keys that encode to the
+// same Redis key fail the whole call before any write, as in SetMulti.
 func (c cache[K, V]) ForceSetMulti(
 	ctx context.Context,
 	ttl time.Duration,
@@ -713,7 +714,6 @@ func (c cache[K, V]) forceSetMultiKeyed(
 	failed := make(map[K]error)
 	seen := make(map[string]K, len(values))
 	byEnc := make(map[string]K, len(values))
-	duplicate := false
 	for k, v := range values {
 		s, err := c.encodeKey(k)
 		if err != nil {
@@ -721,13 +721,7 @@ func (c cache[K, V]) forceSetMultiKeyed(
 			continue
 		}
 		if prev, ok := seen[s]; ok && prev != k {
-			err := duplicateEncodedKeyError(s, prev, k)
-			failed[prev] = err
-			failed[k] = err
-			delete(encVals, s)
-			delete(byEnc, s)
-			duplicate = true
-			continue
+			return duplicateEncodedKeyError(s, prev, k)
 		}
 		seen[s] = k
 		enc, err := c.encodeValue(v)
@@ -737,9 +731,6 @@ func (c cache[K, V]) forceSetMultiKeyed(
 		}
 		encVals[s] = enc
 		byEnc[s] = k
-	}
-	if duplicate {
-		return newBatchKeyError(failed, nil)
 	}
 	if len(encVals) == 0 {
 		return newBatchKeyError(failed, nil)

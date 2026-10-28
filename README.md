@@ -414,7 +414,7 @@ cache over `redcache.OpenMemory()` — a `Conn` backed by an in-process map:
 func TestUserService(t *testing.T) {
     cache := redcache.New(redcache.OpenMemory(), redcache.JSONCodec{})
     svc := NewUserService(cache)
-    // exercise svc; the real codecs run, a miss calls your loader once,
+    // exercise svc; the real codecs run, a miss calls your loader,
     // a present unexpired entry is a hit, and TTLs expire.
 }
 ```

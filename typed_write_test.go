@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 	"uuid"
@@ -407,33 +408,32 @@ func TestTyped_ForceSetMulti_IntKeys_DuplicateEncodedKeyFailure(t *testing.T) {
 	}
 	t.Cleanup(conn.Close)
 	encoded := "typed-collision:" + uuid.New().String()
-	cache := redcache.NewKeyed(conn, redcache.KeyCodecFunc[int](func(int) (string, error) {
+	other := "typed-collision-other:" + uuid.New().String()
+	cache := redcache.NewKeyed(conn, redcache.KeyCodecFunc[int](func(k int) (string, error) {
+		if k == 3 {
+			return other, nil
+		}
 		return encoded, nil
 	}), redcache.StringCodec{})
 
 	err = cache.ForceSetMulti(t.Context(), time.Second, map[int]string{
 		1: "one",
 		2: "two",
+		3: "three",
 	})
-	if err == nil {
-		t.Fatal("expected duplicate encoded key failure")
+	if err == nil || !strings.Contains(err.Error(), "duplicate encoded key") {
+		t.Fatalf("expected duplicate encoded key failure, got %v", err)
 	}
-	var bke *redcache.BatchKeyError[int]
-	if !errors.As(err, &bke) {
-		t.Fatalf("expected *BatchKeyError[int], got %T: %v", err, err)
-	}
-	if !bke.HasFailures() {
-		t.Fatalf("expected duplicate encoded key failure, got %+v", bke)
-	}
-	if !bke.HasError(1) || !bke.HasError(2) {
-		t.Fatalf("both colliding keys should fail; got %+v", bke.Failed)
-	}
-	if len(bke.Succeeded) != 0 {
-		t.Fatalf("duplicate collision should abort before any key succeeds; got %+v", bke.Succeeded)
+	// A collision rejects the whole call, like SetMulti; a BatchKeyError would
+	// wrongly imply the non-colliding key 3 was written.
+	if _, ok := errors.AsType[*redcache.BatchKeyError[int]](err); ok {
+		t.Fatalf("collision should be a plain error, got %T", err)
 	}
 
-	_, err = conn.Client().Do(t.Context(), conn.Client().B().Get().Key(encoded).Build()).ToString()
-	if !rueidis.IsRedisNil(err) {
-		t.Fatalf("colliding Redis key was written; err=%v", err)
+	for _, k := range []string{encoded, other} {
+		_, err = conn.Client().Do(t.Context(), conn.Client().B().Get().Key(k).Build()).ToString()
+		if !rueidis.IsRedisNil(err) {
+			t.Fatalf("Redis key %q was written; err=%v", k, err)
+		}
 	}
 }

@@ -49,6 +49,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refresh-ahead) no longer send `SCRIPT LOAD` to every node, replicas included,
   on every call. They pipeline `EVALSHA` and re-send only `NOSCRIPT` replies as
   `EVAL`, replacing rueidis's `Lua.ExecMulti`.
+- A ttl under 1ms returns `ErrInvalidTTL` up front instead of running the
+  loader and then failing on Redis `PX 0`.
+- `ForceSetMulti` with two keys that encode to the same Redis key returns a
+  plain error and writes nothing, matching `SetMulti`/`GetMulti`. It used to
+  return a `*BatchKeyError` listing only the colliding keys, which implied the
+  rest had been written.
+- `*BatchKeyError` implements `Unwrap() []error`, so `errors.Is(err,
+  context.Canceled)` and `errors.Is(err, ErrLockLost)` work on multi-key
+  writes as they do on single-key ones.
+- `OpenMemory` now matches the Redis engine: it drops loader results for keys
+  that were not requested, dedupes input keys, and copies stored values
+  instead of aliasing the caller's buffer.
 - `GetMulti` retry loop no longer races a still-running lock waiter: the
   internal `WaitForAll` goroutine is joined before the poll fallback returns,
   so the reused channel slice is not rewritten underneath it (found by the race

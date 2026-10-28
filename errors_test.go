@@ -1,6 +1,7 @@
 package redcache_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -98,4 +99,18 @@ func TestBatchKeyError_NilReceiverHasFailuresAndError(t *testing.T) {
 	if got := bke.Error(); got != "" {
 		t.Fatalf("nil receiver Error should be empty, got %q", got)
 	}
+}
+
+func TestBatchKeyError_UnwrapExposesPerKeyErrors(t *testing.T) {
+	t.Parallel()
+	var err error = &redcache.BatchKeyError[int]{
+		Failed: map[int]error{
+			1: fmt.Errorf("write: %w", context.Canceled),
+			2: redcache.ErrLockLost,
+		},
+	}
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, redcache.ErrLockLost)
+	require.NotErrorIs(t, err, redcache.ErrDecode)
+	require.Nil(t, (*redcache.BatchKeyError[int])(nil).Unwrap())
 }
