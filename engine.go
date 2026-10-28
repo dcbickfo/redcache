@@ -265,6 +265,14 @@ func (rca *cacheAside) nextLockPollDelay() time.Duration {
 // register publishes a per-key lockEntry. leader=true means the caller drives
 // Redis-side work (SET NX + fn + setWithLock); followers wait on the returned
 // channel, saving N-1 round trips on a shared miss.
+// release cancels and removes key's entry if it is still the one whose wait
+// channel is wait, waking its followers.
+func (rca *cacheAside) release(key string, wait <-chan struct{}) {
+	if e, ok := rca.locks.Load(key); ok && e.done == wait && rca.locks.CompareAndDelete(key, e) {
+		e.cancel()
+	}
+}
+
 func (rca *cacheAside) register(key string) (<-chan struct{}, bool) {
 retry:
 	if actual, ok := rca.locks.Load(key); ok {

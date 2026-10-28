@@ -59,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DoMulti`. On context cancellation rueidis's writer goroutine could still be
   reading it, and the pooled reset crashed the process with a nil-pointer
   panic.
+- A `Get`/`GetMulti` leader that exits on error (cancelled context, Redis
+  error) releases its local wait entry. Later callers in the same process used
+  to park on it until `LockTTL`, since nothing was written to invalidate it.
 - A ttl under 1ms returns `ErrInvalidTTL` up front instead of running the
   loader and then failing on Redis `PX 0`.
 - `ForceSetMulti` with two keys that encode to the same Redis key returns a

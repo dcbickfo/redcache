@@ -20,8 +20,29 @@ func (rca *cacheAside) get(
 	key string,
 	fn func(ctx context.Context, key string) (val string, err error),
 ) (string, error) {
+	// owned is the wait channel of the entry this call registered as leader.
+	// An error exit wrote nothing, so no invalidation will wake the local
+	// followers parked on it; release it so they retry now, not after lockTTL.
+	var owned <-chan struct{}
+	val, err := rca.getLoop(ctx, ttl, key, fn, &owned)
+	if err != nil && owned != nil {
+		rca.release(key, owned)
+	}
+	return val, err
+}
+
+func (rca *cacheAside) getLoop(
+	ctx context.Context,
+	ttl time.Duration,
+	key string,
+	fn func(ctx context.Context, key string) (val string, err error),
+	owned *<-chan struct{},
+) (string, error) {
 retry:
 	wait, leader := rca.register(key)
+	if leader {
+		*owned = wait
+	}
 	res, err := rca.tryGet(ctx, ttl, key)
 
 	if err == nil {

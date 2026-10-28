@@ -339,3 +339,37 @@ func TestGetMulti_CancelMidPipelineDoesNotCrash(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// A leader that exits on error has written nothing, so no invalidation will
+// arrive; the next caller in the same process must not park on its stale
+// local entry until lockTTL.
+func TestGet_ErroredLeaderDoesNotStallNextCaller(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}, redcache.WithLockTTL(3*time.Second))
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	cache := redcache.New(conn, redcache.StringCodec{})
+	dead, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	key := "errored-leader:" + uuid.New().String()
+	load := func(context.Context, string) (string, error) { return "v", nil }
+	_, err = cache.Get(dead, time.Minute, key, load)
+	require.Error(t, err)
+	start := time.Now()
+	v, err := cache.Get(t.Context(), time.Minute, key, load)
+	require.NoError(t, err)
+	assert.Equal(t, "v", v)
+	assert.Less(t, time.Since(start), time.Second, "Get stalled on the errored leader's entry")
+
+	keys := []string{"errored-leader:" + uuid.New().String()}
+	loadMulti := func(context.Context, []string) (map[string]string, error) { return map[string]string{keys[0]: "v"}, nil }
+	_, err = cache.GetMulti(dead, time.Minute, keys, loadMulti)
+	require.Error(t, err)
+	start = time.Now()
+	m, err := cache.GetMulti(t.Context(), time.Minute, keys, loadMulti)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{keys[0]: "v"}, m)
+	assert.Less(t, time.Since(start), time.Second, "GetMulti stalled on the errored leader's entry")
+}
