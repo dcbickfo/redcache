@@ -45,12 +45,13 @@ func (s *luaScript) ExecMulti(ctx context.Context, c rueidis.Client, multi ...ru
 	if len(noScript) == 0 {
 		return resps
 	}
-	cmds = cmds[:0]
+	// A fresh slice: on ctx cancel rueidis may still be reading cmds.
+	evals := make(rueidis.Commands, 0, len(noScript))
 	for _, i := range noScript {
 		m := multi[i]
-		cmds = append(cmds, c.B().Eval().Script(s.src).Numkeys(int64(len(m.Keys))).Key(m.Keys...).Arg(m.Args...).Build())
+		evals = append(evals, c.B().Eval().Script(s.src).Numkeys(int64(len(m.Keys))).Key(m.Keys...).Arg(m.Args...).Build())
 	}
-	for j, resp := range c.DoMulti(ctx, cmds...) {
+	for j, resp := range c.DoMulti(ctx, evals...) {
 		resps[noScript[j]] = resp
 	}
 	return resps
