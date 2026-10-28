@@ -275,6 +275,9 @@ func (rca *cacheAside) tryGetMulti(
 	multi := *multiP
 	rca.fillCacheableTTLs(multi, ttl, keys)
 	resps := rca.client.DoMultiCache(ctx, multi...)
+	if len(resps) != len(keys) {
+		return needRefresh, nil, fmt.Errorf("tryGetMulti: response/key length mismatch: %d resps vs %d keys", len(resps), len(keys))
+	}
 
 	var needRefreshExpected map[string]string
 	for i, resp := range resps {
