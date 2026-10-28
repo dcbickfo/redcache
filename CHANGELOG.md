@@ -91,7 +91,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `slices` sorting. `internal/syncx` timing tests run in `testing/synctest`
   bubbles instead of racing wall-clock deadlines.
 - golangci-lint is updated to v2.15.0, retaining the full lint and formatting
-  gates with Go 1.27 generic-method support.
+  gates with Go 1.27 generic-method support. The config enables revive's new
+  `use-slices-concat`, `marshal-receiver`, and `multiline-if-init` rules, sets
+  `exclusions.warn-unused`, and drops exclusion rules that no longer matched
+  anything (vendor paths, a stale gosec G115 rule, and the `redefines-builtin-id`
+  waiver, whose one hit was renamed).
 
 ## [v0.3.0] - 2026-06-19
 

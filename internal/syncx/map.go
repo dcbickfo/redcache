@@ -18,9 +18,9 @@ func (sm *Map[K, V]) CompareAndDelete(key K, old V) bool {
 	return sm.m.CompareAndDelete(key, old)
 }
 
-// CompareAndSwap swaps the value for key to new if the stored value equals old.
-func (sm *Map[K, V]) CompareAndSwap(key K, old, new V) bool {
-	return sm.m.CompareAndSwap(key, old, new)
+// CompareAndSwap swaps the value for key to next if the stored value equals old.
+func (sm *Map[K, V]) CompareAndSwap(key K, old, next V) bool {
+	return sm.m.CompareAndSwap(key, old, next)
 }
 
 // Delete deletes the value for key.

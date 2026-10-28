@@ -99,6 +99,9 @@ linters:
         - name: unused-parameter
         - name: unreachable-code
         - name: redefines-builtin-id
+        - name: use-slices-concat
+        - name: marshal-receiver
+        - name: multiline-if-init
 
     nakedret:
       # Make an issue if func has more lines of code than this setting and has naked return.
@@ -113,6 +116,8 @@ linters:
       multi-func: false
 
   exclusions:
+    # Warn when an exclusion rule matches nothing, so stale rules get removed.
+    warn-unused: true
     # Equivalent to v1's exclude-use-default: true.
     presets:
       - comments
@@ -133,22 +138,6 @@ linters:
           - godot
           - whitespace
 
-      # Exclude known issues in vendor.
-      - path: vendor/
-        linters:
-          - all
-
-      # Ignore "new" parameter name shadowing built-in.
-      - text: "redefines-builtin-id"
-        linters:
-          - revive
-
-      # Ignore integer overflow in CRC16 - this is intentional and safe.
-      - text: "G115.*integer overflow"
-        path: internal/cmdx/slot.go
-        linters:
-          - gosec
-
 formatters:
   enable:
     - gofmt
@@ -165,9 +154,6 @@ formatters:
         - standard
         - default
         - prefix(github.com/dcbickfo/redcache)
-  exclusions:
-    paths:
-      - vendor/
 
 issues:
   max-issues-per-linter: 50

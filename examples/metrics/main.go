@@ -55,9 +55,8 @@ func main() {
 		log.Fatalf("get hit: %v", err)
 	}
 
-	if err := cache.Set(ctx, time.Minute, key+":primed", func(_ context.Context, _ string) (string, error) {
-		return "primed value", nil
-	}); err != nil {
+	primed := func(context.Context, string) (string, error) { return "primed value", nil }
+	if err := cache.Set(ctx, time.Minute, key+":primed", primed); err != nil {
 		log.Fatalf("set primed value: %v", err)
 	}
 
