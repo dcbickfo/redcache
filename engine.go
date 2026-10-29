@@ -25,6 +25,7 @@ var (
 	cacheableTTLPool poolx.Slice[rueidis.CacheableTTL]
 	// No pool for []rueidis.Completed: on ctx cancel, DoMulti returns while
 	// rueidis's writer goroutine still reads the slice, so recycling it crashes.
+	// Standalone and sentinel clients pass the slice through; cluster copies it.
 	luaExecPool poolx.Slice[rueidis.LuaExec]
 	stringPool  poolx.Slice[string]
 	chanPool    poolx.Slice[<-chan struct{}]

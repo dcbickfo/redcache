@@ -58,7 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-key operations no longer recycle the command slice passed to rueidis
   `DoMulti`. On context cancellation rueidis's writer goroutine could still be
   reading it, and the pooled reset crashed the process with a nil-pointer
-  panic.
+  panic. Standalone and sentinel clients were affected, because they hand the
+  caller's slice to the connection; the cluster client copies commands into
+  per-node slices first, so cluster deployments were not.
 - A `Get`/`GetMulti` leader that exits on error (cancelled context, Redis
   error) releases its local wait entry. Later callers in the same process used
   to park on it until `LockTTL`, since nothing was written to invalidate it.
