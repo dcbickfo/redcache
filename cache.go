@@ -238,27 +238,45 @@ func (c cache[K, V]) encodeKey(k K) (string, error) {
 	return c.keyCodec.EncodeKey(k)
 }
 
-func (c cache[K, V]) encodeValue(v V) (string, error) {
+// encodeValue encodes v for the Redis key encKey, naming the key on error.
+func (c cache[K, V]) encodeValue(encKey string, v V) (string, error) {
 	if c.valueIsString {
 		return any(v).(string), nil
 	}
 	b, err := c.valCodec.Encode(v)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("redcache: encode value for key %q: %w", encKey, err)
 	}
 	return bytesToString(b), nil
 }
 
-func (c cache[K, V]) decodeValue(payload string) (V, error) {
+// decodeValue decodes the payload stored at encKey. Errors wrap ErrDecode.
+func (c cache[K, V]) decodeValue(encKey, payload string) (V, error) {
 	if c.valueIsString {
 		return any(payload).(V), nil
 	}
 	var v V
 	if err := c.valCodec.Decode(stringToBytes(payload), &v); err != nil {
 		var zero V
-		return zero, err
+		return zero, fmt.Errorf("redcache: decode key %q: %w: %w", encKey, ErrDecode, err)
 	}
 	return v, nil
+}
+
+// encodingLoader adapts fn to the engine's string loader for k, encoding the
+// value fn returns.
+func (c cache[K, V]) encodingLoader(
+	k K,
+	encKey string,
+	fn func(ctx context.Context, k K) (V, error),
+) func(context.Context, string) (string, error) {
+	return func(ctx context.Context, _ string) (string, error) {
+		v, err := fn(ctx, k)
+		if err != nil {
+			return "", err
+		}
+		return c.encodeValue(encKey, v)
+	}
 }
 
 // Get returns the cached value for k, calling fn on a miss. Decode errors on
@@ -278,26 +296,11 @@ func (c cache[K, V]) Get(
 		return zero, encodeKeyError(err)
 	}
 
-	raw, err := c.core.get(ctx, ttl, encKey, func(ctx context.Context, _ string) (string, error) {
-		v, ferr := fn(ctx, k)
-		if ferr != nil {
-			return "", ferr
-		}
-		enc, eerr := c.encodeValue(v)
-		if eerr != nil {
-			return "", fmt.Errorf("redcache: encode value: %w", eerr)
-		}
-		return enc, nil
-	})
+	raw, err := c.core.get(ctx, ttl, encKey, c.encodingLoader(k, encKey, fn))
 	if err != nil {
 		return zero, err
 	}
-
-	v, derr := c.decodeValue(raw)
-	if derr != nil {
-		return zero, fmt.Errorf("redcache: decode key %q: %w: %w", encKey, ErrDecode, derr)
-	}
-	return v, nil
+	return c.decodeValue(encKey, raw)
 }
 
 // Peek is a read-only, client-side-cached lookup with no loader and no lock.
@@ -322,9 +325,9 @@ func (c cache[K, V]) Peek(ctx context.Context, ttl time.Duration, k K) (V, bool,
 		return zero, false, nil
 	}
 
-	v, derr := c.decodeValue(raw)
-	if derr != nil {
-		return zero, false, fmt.Errorf("redcache: decode key %q: %w: %w", encKey, ErrDecode, derr)
+	v, err := c.decodeValue(encKey, raw)
+	if err != nil {
+		return zero, false, err
 	}
 	return v, true, nil
 }
@@ -386,9 +389,9 @@ func (c cache[K, V]) GetMulti(
 		if !ok {
 			continue
 		}
-		v, derr := c.decodeValue(payload)
-		if derr != nil {
-			return nil, fmt.Errorf("redcache: decode key %q: %w: %w", s, ErrDecode, derr)
+		v, err := c.decodeValue(s, payload)
+		if err != nil {
+			return nil, err
 		}
 		dst[k] = v
 	}
@@ -464,9 +467,9 @@ func (c cache[K, V]) encodeMultiResult(result map[K]V) (map[string]string, error
 		if err := byEnc.record(s, k); err != nil {
 			return nil, err
 		}
-		enc, eerr := c.encodeValue(v)
-		if eerr != nil {
-			return nil, fmt.Errorf("redcache: encode value for key %q: %w", s, eerr)
+		enc, err := c.encodeValue(s, v)
+		if err != nil {
+			return nil, err
 		}
 		out[s] = enc
 	}
@@ -487,17 +490,7 @@ func (c cache[K, V]) Set(
 	if err != nil {
 		return encodeKeyError(err)
 	}
-	return c.core.set(ctx, ttl, encKey, func(ctx context.Context, _ string) (string, error) {
-		v, ferr := fn(ctx, k)
-		if ferr != nil {
-			return "", ferr
-		}
-		enc, eerr := c.encodeValue(v)
-		if eerr != nil {
-			return "", fmt.Errorf("redcache: encode value: %w", eerr)
-		}
-		return enc, nil
-	})
+	return c.core.set(ctx, ttl, encKey, c.encodingLoader(k, encKey, fn))
 }
 
 // ForceSet writes v unconditionally.
@@ -509,9 +502,9 @@ func (c cache[K, V]) ForceSet(ctx context.Context, ttl time.Duration, k K, v V) 
 	if err != nil {
 		return encodeKeyError(err)
 	}
-	enc, err := c.encodeValue(v)
+	enc, err := c.encodeValue(encKey, v)
 	if err != nil {
-		return fmt.Errorf("redcache: encode value: %w", err)
+		return err
 	}
 	return c.core.forceSet(ctx, ttl, encKey, enc)
 }
@@ -579,9 +572,9 @@ func (c cache[K, V]) ForceSetMulti(
 		if err := byEnc.record(s, k); err != nil {
 			return err
 		}
-		enc, err := c.encodeValue(v)
+		enc, err := c.encodeValue(s, v)
 		if err != nil {
-			failed[k] = fmt.Errorf("redcache: encode value: %w", err)
+			failed[k] = err
 			continue
 		}
 		encVals[s] = enc
