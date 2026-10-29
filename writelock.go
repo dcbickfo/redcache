@@ -65,7 +65,7 @@ func parseBackup(logger Logger, key string, valMsg, pttlMsg rueidis.RedisMessage
 }
 
 // acquireMultiWriteLocks acquires write locks on all keys in sorted order with
-// rollback. savedValues is lazy-allocated; callers must treat it as nil-safe.
+// rollback. savedValues holds the prior value of every locked key that had one.
 func (rca *cacheAside) acquireMultiWriteLocks(
 	ctx context.Context,
 	keys []string,
@@ -78,10 +78,11 @@ func (rca *cacheAside) acquireMultiWriteLocks(
 	sort.Strings(sorted)
 
 	lockValues = make(map[string]string, len(sorted))
+	savedValues = make(map[string]savedValue)
 	remaining := sorted
 
 	for len(remaining) > 0 {
-		firstFailed, err := rca.tryAcquireRemaining(ctx, remaining, lockValues, &savedValues)
+		firstFailed, err := rca.tryAcquireRemaining(ctx, remaining, lockValues, savedValues)
 		if err != nil {
 			// lockValues holds successes from PRIOR iterations only — the
 			// current iteration's acquires were rolled back inside execAcquire.
@@ -105,13 +106,12 @@ func (rca *cacheAside) acquireMultiWriteLocks(
 
 // tryAcquireRemaining generates lock values and batch-acquires locks for the
 // remaining keys. On partial failure, rolls back locks after the first failed
-// key and returns firstFailed. savedValues is a pointer so the caller's map
-// can be lazy-allocated on first prior-value capture.
+// key and returns firstFailed. Captured prior values are added to savedValues.
 func (rca *cacheAside) tryAcquireRemaining(
 	ctx context.Context,
 	remaining []string,
 	lockValues map[string]string,
-	savedValues *map[string]savedValue,
+	savedValues map[string]savedValue,
 ) (firstFailed string, err error) {
 	// remaining is filtered to exclude already-locked keys, so every entry needs
 	// a freshly-generated lock value.
@@ -128,15 +128,12 @@ func (rca *cacheAside) tryAcquireRemaining(
 	for key, lockVal := range acquired {
 		lockValues[key] = lockVal
 		if backup, ok := backups[key]; ok {
-			if *savedValues == nil {
-				*savedValues = make(map[string]savedValue)
-			}
-			(*savedValues)[key] = backup
+			savedValues[key] = backup
 		}
 	}
 
 	if firstFailed != "" {
-		rca.rollbackAfterFirstFailure(ctx, remaining, firstFailed, lockValues, *savedValues, acquired)
+		rca.rollbackAfterFirstFailure(ctx, remaining, firstFailed, lockValues, savedValues, acquired)
 		rca.touchMultiLocks(ctx, lockValues)
 	}
 
