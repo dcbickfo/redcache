@@ -2,6 +2,7 @@ package redcache
 
 import (
 	"context"
+	"fmt"
 	"math/rand/v2"
 	"strconv"
 	"sync"
@@ -346,4 +347,41 @@ retry:
 	default:
 		return actual.done, false
 	}
+}
+
+// firstKeyErr records the first per-key error of a pipelined batch so every
+// response can still be drained.
+type firstKeyErr struct {
+	key string
+	err error
+}
+
+// add records err for key unless an earlier error was recorded, reporting
+// whether it was the first.
+func (f *firstKeyErr) add(key string, err error) bool {
+	if f.err != nil {
+		return false
+	}
+	f.key, f.err = key, err
+	return true
+}
+
+// wrap returns the recorded error as "<op> key %q: <err>", or nil.
+func (f *firstKeyErr) wrap(op string) error {
+	if f.err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s key %q: %w", op, f.key, f.err)
+}
+
+// mapExecs builds one script call per map entry. keys[i] is the entry behind
+// execs[i], so ExecMulti responses map back to keys by index.
+func mapExecs[V any](m map[string]V, exec func(key string, v V) rueidis.LuaExec) (keys []string, execs []rueidis.LuaExec) {
+	keys = make([]string, 0, len(m))
+	execs = make([]rueidis.LuaExec, 0, len(m))
+	for k, v := range m {
+		keys = append(keys, k)
+		execs = append(execs, exec(k, v))
+	}
+	return keys, execs
 }

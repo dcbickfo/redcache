@@ -27,23 +27,15 @@ func (rca *cacheAside) delMulti(ctx context.Context, keys ...string) error {
 	for _, key := range keys {
 		cmds = append(cmds, rca.client.B().Del().Key(key).Build())
 	}
-	resps := rca.client.DoMulti(ctx, cmds...)
-	var firstErr error
-	var firstErrKey string
-	for i, resp := range resps {
+	var first firstKeyErr
+	for i, resp := range rca.client.DoMulti(ctx, cmds...) {
 		if err := resp.Error(); err != nil {
 			rca.logger.Error("DelMulti key failed", "key", keys[i], "error", err)
 			rca.emitRedisError("del")
-			if firstErr == nil {
-				firstErr = err
-				firstErrKey = keys[i]
-			}
+			first.add(keys[i], err)
 		}
 	}
-	if firstErr != nil {
-		return fmt.Errorf("del key %q: %w", firstErrKey, firstErr)
-	}
-	return nil
+	return first.wrap("del")
 }
 
 // touch extends a cached value's TTL via PEXPIRE. No-ops on missing key or
@@ -72,19 +64,13 @@ func (rca *cacheAside) touchMulti(ctx context.Context, ttl time.Duration, keys .
 	for i, k := range keys {
 		execs[i] = rueidis.LuaExec{Keys: []string{k}, Args: []string{ttlMs, rca.lockPrefix}}
 	}
-	var firstErr error
-	var firstErrKey string
+	var first firstKeyErr
 	for i, resp := range touchScript.ExecMulti(ctx, rca.client, execs...) {
 		if err := resp.Error(); err != nil {
 			rca.logger.Error("TouchMulti key failed", "key", keys[i], "error", err)
 			rca.emitRedisError("touch")
-			if firstErr == nil {
-				firstErr, firstErrKey = err, keys[i]
-			}
+			first.add(keys[i], err)
 		}
 	}
-	if firstErr != nil {
-		return fmt.Errorf("touch key %q: %w", firstErrKey, firstErr)
-	}
-	return nil
+	return first.wrap("touch")
 }

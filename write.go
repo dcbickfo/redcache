@@ -311,8 +311,7 @@ func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string, owne
 	defer chanPool.Put(lockedChansP)
 	lockedKeysP := stringPool.GetCap(len(keys))
 	defer stringPool.Put(lockedKeysP)
-	var firstErr error
-	var firstErrKey string
+	var first firstKeyErr
 	for i := range keys {
 		val, err := resps[i].ToString()
 		if rueidis.IsRedisNil(err) {
@@ -321,10 +320,7 @@ func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string, owne
 		if err != nil {
 			rca.logger.Error("waitForReadLocks read failed", "key", keys[i], "error", err)
 			rca.emitRedisError("read")
-			if firstErr == nil {
-				firstErr = err
-				firstErrKey = keys[i]
-			}
+			first.add(keys[i], err)
 			continue
 		}
 		if strings.HasPrefix(val, rca.lockPrefix) {
@@ -332,8 +328,8 @@ func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string, owne
 			*lockedKeysP = append(*lockedKeysP, keys[i])
 		}
 	}
-	if firstErr != nil {
-		return fmt.Errorf("read key %q: %w", firstErrKey, firstErr)
+	if err := first.wrap("read"); err != nil {
+		return err
 	}
 
 	if len(*lockedChansP) == 0 {

@@ -252,8 +252,7 @@ func (rca *cacheAside) execAcquire(
 	// ExecMulti is a pipeline: every script has already executed in Redis.
 	// Drain all responses so successes can be released before bailing — an
 	// early return would leak later-index acquires for the full lockTTL.
-	firstErrKey, firstErr := rca.drainAcquireResponses(group, resps, acquired, backups)
-	if firstErr != nil {
+	if err := rca.drainAcquireResponses(group, resps, acquired, backups); err != nil {
 		// Restore prior values where the acquire captured one (plain unlock
 		// would DEL and drop a real cached entry the acquire just overwrote).
 		for k, v := range acquired {
@@ -265,28 +264,25 @@ func (rca *cacheAside) execAcquire(
 			}
 			delete(acquired, k)
 		}
-		return fmt.Errorf("lock key %q: %w", firstErrKey, firstErr)
+		return err
 	}
 	return nil
 }
 
-// drainAcquireResponses parses all responses from a pipelined acquire, recording successes and returning the first error. Every response
-// must be inspected so already-applied script side-effects can be reconciled.
+// drainAcquireResponses parses all responses from a pipelined acquire,
+// recording successes and returning the first error. Every response must be
+// inspected so already-applied script side-effects can be reconciled.
 func (rca *cacheAside) drainAcquireResponses(
 	group []lockAcquireEntry,
 	resps []rueidis.RedisResult,
 	acquired map[string]string,
 	backups map[string]savedValue,
-) (string, error) {
-	var firstErrKey string
-	var firstErr error
+) error {
+	var first firstKeyErr
 	capture := func(key string, err error) {
-		if firstErr == nil {
-			firstErr = err
-			firstErrKey = key
-			return
+		if !first.add(key, err) {
+			rca.logger.Error("additional execAcquire error", "key", key, "error", err)
 		}
-		rca.logger.Error("additional execAcquire error", "key", key, "error", err)
 	}
 	for i, resp := range resps {
 		arr, err := resp.ToArray()
@@ -302,7 +298,7 @@ func (rca *cacheAside) drainAcquireResponses(
 			capture(group[i].key, rerr)
 		}
 	}
-	return firstErrKey, firstErr
+	return first.wrap("lock")
 }
 
 // recordAcquireResult parses one acquire response and updates acquired/backups.
@@ -377,12 +373,9 @@ func (rca *cacheAside) rollbackAfterFirstFailure(
 func (rca *cacheAside) touchMultiLocks(ctx context.Context, lockValues map[string]string) {
 	cleanCtx, cancel := rca.cleanupCtx(ctx)
 	defer cancel()
-	keys := make([]string, 0, len(lockValues))
-	execs := make([]rueidis.LuaExec, 0, len(lockValues))
-	for key, lockVal := range lockValues {
-		keys = append(keys, key)
-		execs = append(execs, rueidis.LuaExec{Keys: []string{key}, Args: []string{lockVal, rca.lockTTLMs}})
-	}
+	keys, execs := mapExecs(lockValues, func(key, lockVal string) rueidis.LuaExec {
+		return rueidis.LuaExec{Keys: []string{key}, Args: []string{lockVal, rca.lockTTLMs}}
+	})
 	for i, resp := range refreshLockScript.ExecMulti(cleanCtx, rca.client, execs...) {
 		key := keys[i]
 		result, err := resp.AsInt64()
@@ -490,12 +483,9 @@ func (rca *cacheAside) restoreMultiValues(ctx context.Context, lockValues map[st
 	toCtx, cancel := rca.cleanupCtx(ctx)
 	defer cancel()
 
-	keys := make([]string, 0, len(lockValues))
-	execs := make([]rueidis.LuaExec, 0, len(lockValues))
-	for key, lockVal := range lockValues {
-		keys = append(keys, key)
-		execs = append(execs, rueidis.LuaExec{Keys: []string{key}, Args: restoreArgs(lockVal, savedValues[key])})
-	}
+	keys, execs := mapExecs(lockValues, func(key, lockVal string) rueidis.LuaExec {
+		return rueidis.LuaExec{Keys: []string{key}, Args: restoreArgs(lockVal, savedValues[key])}
+	})
 	for i, resp := range restoreValueOrDeleteScript.ExecMulti(toCtx, rca.client, execs...) {
 		if err := resp.Error(); err != nil {
 			rca.logger.Error("failed to restore value", "key", keys[i], "error", err)

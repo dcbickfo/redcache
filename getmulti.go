@@ -414,33 +414,28 @@ func (rca *cacheAside) tryLockMulti(ctx context.Context, keys []string) (map[str
 	// Drain every response: DoMulti has already executed all SET NXs in the
 	// pipeline, so an early return would leak the later acquires for lockTTL.
 	// IsRedisNil = acquired; nil = NX rejected; other = propagate.
-	var firstErr error
-	var firstErrKey string
+	var first firstKeyErr
 	for i, r := range resps {
 		err := r.Error()
 		if rueidis.IsRedisNil(err) {
 			continue
 		}
+		delete(lockVals, keys[i])
 		if err == nil {
-			delete(lockVals, keys[i])
 			continue
 		}
-		delete(lockVals, keys[i])
 		rca.emitRedisError("lock")
-		if firstErr == nil {
-			firstErr = err
-			firstErrKey = keys[i]
-		} else {
+		if !first.add(keys[i], err) {
 			rca.logger.Error("additional tryLockMulti error", "key", keys[i], "error", err)
 		}
 	}
-	if firstErr != nil {
+	if err := first.wrap("lock"); err != nil {
 		if len(lockVals) > 0 {
 			cleanupCtx, cancel := rca.cleanupCtx(ctx)
 			rca.unlockMulti(cleanupCtx, lockVals)
 			cancel()
 		}
-		return nil, fmt.Errorf("lock key %q: %w", firstErrKey, firstErr)
+		return nil, err
 	}
 	return lockVals, nil
 }
@@ -481,15 +476,9 @@ func (rca *cacheAside) inspectSetResponse(key string, resp rueidis.RedisResult) 
 // lock-lost.
 func (rca *cacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, keyValLock map[string]valAndLock) ([]string, error) {
 	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
-	keys := make([]string, 0, len(keyValLock))
-	execs := make([]rueidis.LuaExec, 0, len(keyValLock))
-	for k, vl := range keyValLock {
-		keys = append(keys, k)
-		execs = append(execs, rueidis.LuaExec{
-			Keys: []string{k},
-			Args: []string{vl.lockVal, vl.val, ttlMs},
-		})
-	}
+	keys, execs := mapExecs(keyValLock, func(k string, vl valAndLock) rueidis.LuaExec {
+		return rueidis.LuaExec{Keys: []string{k}, Args: []string{vl.lockVal, vl.val, ttlMs}}
+	})
 	var succeeded []string
 	var firstErr error
 	for i, resp := range setKeyLua.ExecMulti(ctx, rca.client, execs...) {
@@ -514,15 +503,11 @@ func (rca *cacheAside) unlockMulti(ctx context.Context, lockVals map[string]stri
 	if len(lockVals) == 0 {
 		return
 	}
-	keys := make([]string, 0, len(lockVals))
-	execsP := luaExecPool.GetCap(len(lockVals))
-	defer luaExecPool.Put(execsP)
-	for key, lockVal := range lockVals {
-		keys = append(keys, key)
-		*execsP = append(*execsP, rueidis.LuaExec{Keys: []string{key}, Args: []string{lockVal}})
-	}
+	keys, execs := mapExecs(lockVals, func(key, lockVal string) rueidis.LuaExec {
+		return rueidis.LuaExec{Keys: []string{key}, Args: []string{lockVal}}
+	})
 	// Best effort — locks expire on lockTTL anyway.
-	for i, resp := range delKeyLua.ExecMulti(ctx, rca.client, *execsP...) {
+	for i, resp := range delKeyLua.ExecMulti(ctx, rca.client, execs...) {
 		if err := resp.Error(); err != nil {
 			rca.logger.Error("failed to unlock key in batch", "key", keys[i], "error", err)
 		}
