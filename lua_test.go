@@ -1,6 +1,8 @@
 package redcache
 
 import (
+	"context"
+	"os"
 	"regexp"
 	"strconv"
 	"testing"
@@ -51,4 +53,46 @@ func TestLuaScript_ExecMultiFallsBackToEvalWithoutScriptLoad(t *testing.T) {
 		}
 	}
 	require.Equal(t, before, loads(), "ExecMulti must not send SCRIPT LOAD")
+}
+
+// BenchmarkLuaScript_ExecMulti compares rueidis's Lua.ExecMulti, which sends
+// SCRIPT LOAD to every node and waits for it before each batch, with
+// luaScript.ExecMulti. The cluster cases run when REDCACHE_CLUSTER_ADDRS is set.
+func BenchmarkLuaScript_ExecMulti(b *testing.B) {
+	targets := []struct{ name, addr string }{{"standalone", "127.0.0.1:6379"}}
+	if addr := os.Getenv("REDCACHE_CLUSTER_ADDRS"); addr != "" {
+		targets = append(targets, struct{ name, addr string }{"cluster", addr})
+	}
+	ctx := context.Background()
+	for _, target := range targets {
+		client, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{target.addr}})
+		require.NoError(b, err)
+		b.Cleanup(client.Close)
+		for _, n := range []int{1, 16, 64} {
+			execs := make([]rueidis.LuaExec, n)
+			prefix := "luabench:" + uuid.New().String() + ":"
+			for i := range execs {
+				// The keys never exist, so delKeyLua only does a GET.
+				execs[i] = rueidis.LuaExec{Keys: []string{prefix + strconv.Itoa(i)}, Args: []string{"lock"}}
+			}
+			for _, impl := range []struct {
+				name string
+				exec func(context.Context, rueidis.Client, ...rueidis.LuaExec) []rueidis.RedisResult
+			}{
+				{"rueidis", delKeyLua.Lua.ExecMulti},
+				{"redcache", delKeyLua.ExecMulti},
+			} {
+				b.Run(target.name+"/keys="+strconv.Itoa(n)+"/"+impl.name, func(b *testing.B) {
+					b.ReportAllocs()
+					for b.Loop() {
+						for _, r := range impl.exec(ctx, client, execs...) {
+							if err := r.Error(); err != nil {
+								b.Fatal(err)
+							}
+						}
+					}
+				})
+			}
+		}
+	}
 }
