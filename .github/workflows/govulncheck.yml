@@ -22,7 +22,10 @@ jobs:
       - name: Run govulncheck
         uses: golang/govulncheck-action@v1.0.4
         with:
-          go-version-input: '1.25.x'
+          # Scan with the oldest supported Go release. go.mod keeps the 1.25
+          # minimum, but 1.25 is out of support and has unfixed stdlib CVEs
+          # (GO-2026-6809, GO-2026-6607), so users should build with 1.26.9+.
+          go-version-input: '1.26.x'
           go-package: ./...
           repo-checkout: false
           cache: true
