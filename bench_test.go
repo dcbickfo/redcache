@@ -316,21 +316,13 @@ func BenchmarkCache_GetMulti_Refresh(b *testing.B) {
 	for i := range keys {
 		keys[i] = fmt.Sprintf("bench:getmulti:refresh:%d:%s", i, uuid.New().String())
 	}
-	cb := func(ctx context.Context, ks []string) (map[string]string, error) {
-		out := make(map[string]string, len(ks))
-		for _, k := range ks {
-			out[k] = "bench-value"
-		}
-		return out, nil
-	}
-
-	if _, err := client.GetMulti(ctx, time.Minute, keys, cb); err != nil {
+	if _, err := client.GetMulti(ctx, time.Minute, keys, benchPrimeMultiFn); err != nil {
 		b.Fatal(err)
 	}
 
 	b.ResetTimer()
 	for range b.N {
-		if _, err := client.GetMulti(ctx, time.Minute, keys, cb); err != nil {
+		if _, err := client.GetMulti(ctx, time.Minute, keys, benchPrimeMultiFn); err != nil {
 			b.Fatal(err)
 		}
 	}

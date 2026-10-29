@@ -192,13 +192,7 @@ func TestCache_SetMulti_Basic(t *testing.T) {
 		keys = append(keys, k)
 	}
 
-	err := client.SetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {
-		res := make(map[string]string, len(ks))
-		for _, k := range ks {
-			res[k] = keyAndVals[k]
-		}
-		return res, nil
-	})
+	err := client.SetMulti(ctx, time.Second*10, keys, mapLoader(keyAndVals))
 	require.NoError(t, err)
 
 	res, err := client.GetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {

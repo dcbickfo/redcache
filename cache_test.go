@@ -51,6 +51,17 @@ func makeClient(t *testing.T, addr []string) (*redcache.Cache, *redcache.Conn) {
 	return redcache.New(conn, redcache.StringCodec{}), conn
 }
 
+// mapLoader returns a multi-key loader that serves each requested key from vals.
+func mapLoader(vals map[string]string) func(context.Context, []string) (map[string]string, error) {
+	return func(_ context.Context, keys []string) (map[string]string, error) {
+		res := make(map[string]string, len(keys))
+		for _, k := range keys {
+			res[k] = vals[k]
+		}
+		return res, nil
+	}
+}
+
 func TestCache_Get(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
@@ -95,13 +106,10 @@ func TestCache_GetMulti(t *testing.T) {
 	}
 	called := false
 
+	load := mapLoader(keyAndVals)
 	cb := func(ctx context.Context, keys []string) (map[string]string, error) {
 		called = true
-		res := make(map[string]string, len(keys))
-		for _, key := range keys {
-			res[key] = keyAndVals[key]
-		}
-		return res, nil
+		return load(ctx, keys)
 	}
 
 	res, err := client.GetMulti(ctx, time.Second*10, keys, cb)
@@ -228,13 +236,10 @@ func TestCache_GetMulti_PartLock(t *testing.T) {
 	}
 	called := false
 
+	load := mapLoader(keyAndVals)
 	cb := func(ctx context.Context, keys []string) (map[string]string, error) {
 		called = true
-		res := make(map[string]string, len(keys))
-		for _, key := range keys {
-			res[key] = keyAndVals[key]
-		}
-		return res, nil
+		return load(ctx, keys)
 	}
 
 	innerClient := conn.Client()
@@ -296,13 +301,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 		keys = append(keys, k)
 	}
 
-	cb := func(ctx context.Context, keys []string) (map[string]string, error) {
-		res := make(map[string]string, len(keys))
-		for _, key := range keys {
-			res[key] = keyAndVals[key]
-		}
-		return res, nil
-	}
+	cb := mapLoader(keyAndVals)
 
 	wg := sync.WaitGroup{}
 
@@ -374,265 +373,72 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
-func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) {
-	t.Parallel()
-
-	client1, _ := makeClient(t, addr)
-	client2, _ := makeClient(t, addr)
-	client3, _ := makeClient(t, addr)
-	client4, _ := makeClient(t, addr)
-
-	ctx := t.Context()
-	keyAndVals := make(map[string]string)
-	for i := range 6 {
-		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
-	}
-	keys := make([]string, 0, len(keyAndVals))
-	for k := range keyAndVals {
-		keys = append(keys, k)
-	}
-
-	cb := func(ctx context.Context, keys []string) (map[string]string, error) {
-		res := make(map[string]string, len(keys))
-		for _, key := range keys {
-			res[key] = keyAndVals[key]
-		}
-		return res, nil
-	}
-
-	wg := sync.WaitGroup{}
-
-	keys1 := []string{keys[0], keys[1], keys[3]}
-	expected1 := map[string]string{
-		keys[0]: keyAndVals[keys[0]],
-		keys[1]: keyAndVals[keys[1]],
-		keys[3]: keyAndVals[keys[3]],
-	}
-
-	keys2 := []string{keys[2], keys[4], keys[5]}
-	expected2 := map[string]string{
-		keys[2]: keyAndVals[keys[2]],
-		keys[4]: keyAndVals[keys[4]],
-		keys[5]: keyAndVals[keys[5]],
-	}
-
-	keys3 := []string{keys[0], keys[2], keys[4]}
-	expected3 := map[string]string{
-		keys[0]: keyAndVals[keys[0]],
-		keys[2]: keyAndVals[keys[2]],
-		keys[4]: keyAndVals[keys[4]],
-	}
-
-	keys4 := []string{keys[1], keys[3], keys[5]}
-	expected4 := map[string]string{
-		keys[1]: keyAndVals[keys[1]],
-		keys[3]: keyAndVals[keys[3]],
-		keys[5]: keyAndVals[keys[5]],
-	}
-
-	for range 100 {
-		wg.Add(4)
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys1)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client1.GetMulti(
-				ctx,
-				time.Second*10,
-				localKeys,
-				cb,
-			)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected1, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 1 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys2)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client2.GetMulti(
-				ctx,
-				time.Second*10,
-				localKeys,
-				cb,
-			)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected2, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 2 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys3)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client3.GetMulti(
-				t.Context(),
-				time.Second*10,
-				localKeys,
-				cb)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected3, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 3 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys4)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client4.GetMulti(
-				t.Context(),
-				time.Second*10,
-				localKeys,
-				cb)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected4, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 4 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
-			}
-		}()
-	}
-	wg.Wait()
-}
-
+// TestCBWrapper_GetMultiCheckConcurrentOverlap hammers overlapping GetMulti key
+// sets, spread across separate clients or all on one client.
 func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 	t.Parallel()
 
-	client, _ := makeClient(t, addr)
+	for _, tt := range []struct {
+		name    string
+		clients int
+	}{
+		{"DifferentClients", 4},
+		{"SingleClient", 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	ctx := t.Context()
-	keyAndVals := make(map[string]string)
-	for i := range 6 {
-		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
-	}
-	keys := make([]string, 0, len(keyAndVals))
-	for k := range keyAndVals {
-		keys = append(keys, k)
-	}
-
-	cb := func(ctx context.Context, keys []string) (map[string]string, error) {
-		res := make(map[string]string, len(keys))
-		for _, key := range keys {
-			res[key] = keyAndVals[key]
-		}
-		return res, nil
-	}
-
-	wg := sync.WaitGroup{}
-
-	keys1 := []string{keys[0], keys[1], keys[3]}
-	expected1 := map[string]string{
-		keys[0]: keyAndVals[keys[0]],
-		keys[1]: keyAndVals[keys[1]],
-		keys[3]: keyAndVals[keys[3]],
-	}
-
-	keys2 := []string{keys[2], keys[4], keys[5]}
-	expected2 := map[string]string{
-		keys[2]: keyAndVals[keys[2]],
-		keys[4]: keyAndVals[keys[4]],
-		keys[5]: keyAndVals[keys[5]],
-	}
-
-	keys3 := []string{keys[0], keys[2], keys[4]}
-	expected3 := map[string]string{
-		keys[0]: keyAndVals[keys[0]],
-		keys[2]: keyAndVals[keys[2]],
-		keys[4]: keyAndVals[keys[4]],
-	}
-
-	keys4 := []string{keys[1], keys[3], keys[5]}
-	expected4 := map[string]string{
-		keys[1]: keyAndVals[keys[1]],
-		keys[3]: keyAndVals[keys[3]],
-		keys[5]: keyAndVals[keys[5]],
-	}
-
-	for range 100 {
-		wg.Add(4)
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys1)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client.GetMulti(
-				ctx,
-				time.Second*10,
-				localKeys,
-				cb,
-			)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected1, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 1 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
+			clients := make([]*redcache.Cache, tt.clients)
+			for i := range clients {
+				clients[i], _ = makeClient(t, addr)
 			}
-		}()
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys2)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client.GetMulti(
-				ctx,
-				time.Second*10,
-				localKeys,
-				cb,
-			)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected2, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 2 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
+
+			ctx := t.Context()
+			keyAndVals := make(map[string]string)
+			for i := range 6 {
+				keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
 			}
-		}()
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys3)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client.GetMulti(
-				t.Context(),
-				time.Second*10,
-				localKeys,
-				cb)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected3, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 3 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
+			keys := make([]string, 0, len(keyAndVals))
+			for k := range keyAndVals {
+				keys = append(keys, k)
 			}
-		}()
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys4)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client.GetMulti(
-				t.Context(),
-				time.Second*10,
-				localKeys,
-				cb)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected4, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 4 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
+
+			cb := mapLoader(keyAndVals)
+
+			// Each group of key indexes overlaps the others pairwise.
+			groups := [][]int{{0, 1, 3}, {2, 4, 5}, {0, 2, 4}, {1, 3, 5}}
+
+			wg := sync.WaitGroup{}
+			for range 100 {
+				for g, idxs := range groups {
+					groupKeys := make([]string, len(idxs))
+					expected := make(map[string]string, len(idxs))
+					for i, idx := range idxs {
+						groupKeys[i] = keys[idx]
+						expected[keys[idx]] = keyAndVals[keys[idx]]
+					}
+					client := clients[g%len(clients)]
+
+					wg.Go(func() {
+						localKeys := slices.Clone(groupKeys)
+						rand.Shuffle(len(localKeys), func(i, j int) {
+							localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
+						})
+						out, err := client.GetMulti(ctx, time.Second*10, localKeys, cb)
+						if err != nil {
+							t.Errorf("GetMulti() error in %d: %v", g+1, err)
+							return
+						}
+						if diff := cmp.Diff(expected, out); diff != "" {
+							t.Errorf("GetMulti() mismatch in %d (-want +got):\n%s", g+1, diff)
+							t.Errorf("got: %v", out)
+						}
+					})
+				}
 			}
-		}()
+			wg.Wait()
+		})
 	}
-	wg.Wait()
 }
 
 func TestCache_DelMulti(t *testing.T) {
@@ -1055,13 +861,7 @@ func TestCache_GetMulti_CallbackError(t *testing.T) {
 		keys[0]: "val:0:" + uuid.New().String(),
 		keys[1]: "val:1:" + uuid.New().String(),
 	}
-	res, err := client.GetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {
-		out := make(map[string]string, len(ks))
-		for _, k := range ks {
-			out[k] = vals[k]
-		}
-		return out, nil
-	})
+	res, err := client.GetMulti(ctx, time.Second*10, keys, mapLoader(vals))
 	require.NoError(t, err)
 	if diff := cmp.Diff(vals, res); diff != "" {
 		t.Errorf("GetMulti() mismatch (-want +got):\n%s", diff)
