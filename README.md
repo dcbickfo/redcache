@@ -18,7 +18,7 @@ A typed cache-aside for Redis, built on the [rueidis](https://github.com/redis/r
 - **Per-operation key and value types** — one JSON-backed `Cache` stores different Go types under keys of different Go types; `K` and `V` are inferred per call.
 - **Stampede protection** — in-process leader/follower coordination plus a distributed `SET NX` lock-and-wait, so a single caller runs your loader per key and the rest wait on the invalidation rather than piling onto the origin.
 - **Client-side caching** — rueidis client-side cache with Redis invalidation messages cuts round trips and unblocks waiters the moment the value lands.
-- **Multi-key batching** — `GetMulti` groups operations by Redis cluster slot and executes the per-slot groups concurrently.
+- **Multi-key batching** — `GetMulti` and the other multi-key calls send each phase as one pipeline; in cluster mode rueidis splits it per node and runs the nodes in parallel.
 - **Refresh-ahead + XFetch** — optional background refresh of stale-but-valid entries, with XFetch-style probabilistic early expiration to smear reload moments across the keyspace.
 - **Write-through priming** — `Set` / `ForceSet` / `Touch` (and their multi variants) populate or extend entries on every subscribed client without a read-through miss.
 - **Typed keys and values** — pluggable `Codec` and `KeyCodec`; per-key partial failures surface as `*BatchKeyError[K]`.
@@ -318,7 +318,7 @@ rueidis already ships [`rueidisaside`](https://github.com/redis/rueidis/tree/mai
 
 redcache adds, on top of that shared foundation:
 
-- **`GetMulti` with cluster-slot batching** — multi-key reads and writes grouped by Redis cluster slot and executed concurrently per slot.
+- **`GetMulti` with cluster-aware batching** — multi-key reads and writes pipelined, split per cluster node by rueidis.
 - **Refresh-ahead + XFetch** — probabilistic early refresh of stale-but-valid entries, decoupling reload latency from request latency.
 - **Typed keys, not just values** — a `KeyCodec` maps a domain key type to the Redis key, and multi-key write failures come back as a typed, per-key `*BatchKeyError[K]`.
 - **Write-through priming** — `Set` / `ForceSet` / `Touch` (and multi variants) populate or extend entries without a read-through miss. This is the hardest piece for `rueidisaside` to absorb rather than just a missing feature: `rueidisaside` claims only *missing* keys, with a single per-client placeholder and no value backup, whereas `Set` overwrites an already-live value under a per-call lock token and restores the prior value if the write fails. In-place locking, per-call lock identity, and a backup/restore path are structural to redcache's model, not a flag on the read-miss-only one.

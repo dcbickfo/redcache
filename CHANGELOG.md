@@ -99,6 +99,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `exclusions.warn-unused`, and drops exclusion rules that no longer matched
   anything (vendor paths, a stale gosec G115 rule, and the `redefines-builtin-id`
   waiver, whose one hit was renamed).
+- Multi-key paths (`GetMulti`, `SetMulti`, `TouchMulti`, lock acquire,
+  CAS-set and unlock) send each phase as one pipeline instead of one pipeline
+  and goroutine per cluster slot. Every script touches a single key, and
+  rueidis's cluster client already splits a pipeline per node, runs the nodes
+  in parallel and follows redirects, so a batch now costs one round trip per
+  node rather than per slot. `internal/cmdx` is deleted. A 3-primary Redis
+  Cluster (`docker compose` service `redis-cluster`) runs the new
+  `cluster_test.go` suite locally and in CI.
 
 ## [v0.3.0] - 2026-06-19
 

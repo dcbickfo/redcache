@@ -109,7 +109,7 @@ func TestCache_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 }
 
 // TestCache_GetMulti_CleanMissEmitsNoFalseLockLost is the multi-key
-// counterpart: catches runSlotSet CAS-interpretation regressions.
+// counterpart: catches setMultiWithLock CAS-interpretation regressions.
 func TestCache_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
@@ -230,7 +230,7 @@ func TestCache_Set_RollbackPreservesPTTL(t *testing.T) {
 	assert.Equal(t, "__redcache:v1:0:v", val, "rollback should restore the original captured (envelope-wrapped) value")
 }
 
-// TestCache_GetMulti_CASMismatchDropsKey verifies runSlotSet drops keys
+// TestCache_GetMulti_CASMismatchDropsKey verifies setMultiWithLock drops keys
 // with a stolen lock (CAS Lua returned 0) and emits LockLost.
 func TestCache_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	t.Parallel()

@@ -4,12 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/redis/rueidis"
-
-	"github.com/dcbickfo/redcache/internal/cmdx"
 )
 
 // del removes a key, triggering invalidation on all subscribed clients.
@@ -62,89 +59,32 @@ func (rca *cacheAside) touch(ctx context.Context, ttl time.Duration, key string)
 	return nil
 }
 
-// touchMulti is touch over many keys. Per-key errors are logged; the first
-// is returned.
+// touchMulti is touch over many keys in one pipeline. Per-key errors are
+// logged; the first is returned.
 func (rca *cacheAside) touchMulti(ctx context.Context, ttl time.Duration, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	stmtsBySlot := rca.groupTouchExecs(ttl, keys)
-	if firstErrKey, firstErr := rca.runTouchSlots(ctx, stmtsBySlot); firstErr != nil {
+	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
+	execsP := luaExecPool.Get(len(keys))
+	defer luaExecPool.Put(execsP)
+	execs := *execsP
+	for i, k := range keys {
+		execs[i] = rueidis.LuaExec{Keys: []string{k}, Args: []string{ttlMs, rca.lockPrefix}}
+	}
+	var firstErr error
+	var firstErrKey string
+	for i, resp := range touchScript.ExecMulti(ctx, rca.client, execs...) {
+		if err := resp.Error(); err != nil {
+			rca.logger.Error("TouchMulti key failed", "key", keys[i], "error", err)
+			rca.emitRedisError("touch")
+			if firstErr == nil {
+				firstErr, firstErrKey = err, keys[i]
+			}
+		}
+	}
+	if firstErr != nil {
 		return fmt.Errorf("touch key %q: %w", firstErrKey, firstErr)
 	}
 	return nil
-}
-
-type touchExec struct {
-	key  string
-	exec rueidis.LuaExec
-}
-
-func (rca *cacheAside) groupTouchExecs(ttl time.Duration, keys []string) map[uint16][]touchExec {
-	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
-	stmtsBySlot := make(map[uint16][]touchExec)
-	for _, k := range keys {
-		slot := cmdx.Slot(k)
-		stmtsBySlot[slot] = append(stmtsBySlot[slot], touchExec{
-			key: k,
-			exec: rueidis.LuaExec{
-				Keys: []string{k},
-				Args: []string{ttlMs, rca.lockPrefix},
-			},
-		})
-	}
-	return stmtsBySlot
-}
-
-func (rca *cacheAside) runTouchSlots(ctx context.Context, slots map[uint16][]touchExec) (string, error) {
-	// Single-slot fast path: skip the goroutine fan-out (mirrors runSlotSets).
-	if len(slots) <= 1 {
-		for _, stmts := range slots {
-			return rca.touchSlot(ctx, stmts)
-		}
-		return "", nil
-	}
-	var (
-		mu          sync.Mutex
-		wg          sync.WaitGroup
-		firstErr    error
-		firstErrKey string
-	)
-	for _, stmts := range slots {
-		wg.Go(func() {
-			key, err := rca.touchSlot(ctx, stmts)
-			if err == nil {
-				return
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			if firstErr == nil {
-				firstErr, firstErrKey = err, key
-			}
-		})
-	}
-	wg.Wait()
-	return firstErrKey, firstErr
-}
-
-func (rca *cacheAside) touchSlot(ctx context.Context, stmts []touchExec) (string, error) {
-	execsP := luaExecPool.Get(len(stmts))
-	defer luaExecPool.Put(execsP)
-	execs := *execsP
-	for i, s := range stmts {
-		execs[i] = s.exec
-	}
-	resps := touchScript.ExecMulti(ctx, rca.client, execs...)
-	var firstErr error
-	var firstErrKey string
-	for i, resp := range resps {
-		if err := resp.Error(); err != nil {
-			rca.logger.Error("TouchMulti key failed", "key", stmts[i].key, "error", err)
-			rca.emitRedisError("touch")
-			if firstErr == nil {
-				firstErr, firstErrKey = err, stmts[i].key
-			}
-		}
-	}
-	return firstErrKey, firstErr
 }

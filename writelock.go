@@ -6,12 +6,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/redis/rueidis"
-
-	"github.com/dcbickfo/redcache/internal/cmdx"
 )
 
 // savedValue captures a key's previous value for rollback after a set callback
@@ -87,7 +84,7 @@ func (rca *cacheAside) acquireMultiWriteLocks(
 		firstFailed, err := rca.tryAcquireRemaining(ctx, remaining, lockValues, &savedValues)
 		if err != nil {
 			// lockValues holds successes from PRIOR iterations only — the
-			// current iteration's acquires were rolled back inside execSlotAcquire.
+			// current iteration's acquires were rolled back inside execAcquire.
 			rca.restoreMultiValues(ctx, lockValues, savedValues)
 			return nil, nil, err
 		}
@@ -197,8 +194,8 @@ type lockAcquireEntry struct {
 	lockVal string
 }
 
-// batchAcquireWithBackup attempts to acquire write locks on entries, grouped
-// by slot. Returns acquired locks, saved backups, the first failed key (in
+// batchAcquireWithBackup attempts to acquire write locks on entries in one
+// pipeline. Returns acquired locks, saved backups, the first failed key (in
 // entry order), and any error.
 func (rca *cacheAside) batchAcquireWithBackup(
 	ctx context.Context,
@@ -207,12 +204,8 @@ func (rca *cacheAside) batchAcquireWithBackup(
 	acquired = make(map[string]string, len(entries))
 	backups = make(map[string]savedValue, len(entries))
 
-	slotGroups := cmdx.GroupBySlot(entries, func(e lockAcquireEntry) string { return e.key })
-
-	for _, group := range slotGroups {
-		if slotErr := rca.execSlotAcquire(ctx, group, acquired, backups); slotErr != nil {
-			return nil, nil, "", slotErr
-		}
+	if err := rca.execAcquire(ctx, entries, acquired, backups); err != nil {
+		return nil, nil, "", err
 	}
 
 	for _, e := range entries {
@@ -224,9 +217,10 @@ func (rca *cacheAside) batchAcquireWithBackup(
 	return acquired, backups, "", nil
 }
 
-// execSlotAcquire executes lock acquisitions for a single slot group, recording
-// successes in acquired and any prior values in backups (both mutated in place).
-func (rca *cacheAside) execSlotAcquire(
+// execAcquire pipelines the lock-acquire script for every entry; the client
+// routes each single-key script to its slot's node. It records successes in
+// acquired and any prior values in backups (both mutated in place).
+func (rca *cacheAside) execAcquire(
 	ctx context.Context,
 	group []lockAcquireEntry,
 	acquired map[string]string,
@@ -237,7 +231,7 @@ func (rca *cacheAside) execSlotAcquire(
 	defer luaExecPool.Put(stmtsP)
 	stmts := *stmtsP
 	// Shared backing arrays for per-entry Keys/Args slices: 2 pool gets per
-	// group instead of 2N small allocs.
+	// batch instead of 2N small allocs.
 	keysBufP := stringPool.Get(n)
 	defer stringPool.Put(keysBufP)
 	keysBuf := *keysBufP
@@ -258,12 +252,10 @@ func (rca *cacheAside) execSlotAcquire(
 	// ExecMulti is a pipeline: every script has already executed in Redis.
 	// Drain all responses so successes can be released before bailing — an
 	// early return would leak later-index acquires for the full lockTTL.
-	firstErrKey, firstErr := rca.drainSlotAcquireResponses(group, resps, acquired, backups)
+	firstErrKey, firstErr := rca.drainAcquireResponses(group, resps, acquired, backups)
 	if firstErr != nil {
 		// Restore prior values where the acquire captured one (plain unlock
 		// would DEL and drop a real cached entry the acquire just overwrote).
-		// Iterates ALL of `acquired` (not just this slot's): earlier slots in
-		// this batch have already populated the shared map.
 		for k, v := range acquired {
 			if saved, ok := backups[k]; ok {
 				rca.bestEffortRestore(ctx, k, v, saved)
@@ -278,10 +270,9 @@ func (rca *cacheAside) execSlotAcquire(
 	return nil
 }
 
-// drainSlotAcquireResponses parses all responses from a pipelined slot
-// acquire, recording successes and returning the first error. Every response
+// drainAcquireResponses parses all responses from a pipelined acquire, recording successes and returning the first error. Every response
 // must be inspected so already-applied script side-effects can be reconciled.
-func (rca *cacheAside) drainSlotAcquireResponses(
+func (rca *cacheAside) drainAcquireResponses(
 	group []lockAcquireEntry,
 	resps []rueidis.RedisResult,
 	acquired map[string]string,
@@ -295,7 +286,7 @@ func (rca *cacheAside) drainSlotAcquireResponses(
 			firstErrKey = key
 			return
 		}
-		rca.logger.Error("additional execSlotAcquire error", "key", key, "error", err)
+		rca.logger.Error("additional execAcquire error", "key", key, "error", err)
 	}
 	for i, resp := range resps {
 		arr, err := resp.ToArray()
@@ -307,18 +298,18 @@ func (rca *cacheAside) drainSlotAcquireResponses(
 			capture(group[i].key, fmt.Errorf("malformed response (len=%d)", len(arr)))
 			continue
 		}
-		if rerr := rca.recordSlotAcquireResult(group[i], arr, acquired, backups); rerr != nil {
+		if rerr := rca.recordAcquireResult(group[i], arr, acquired, backups); rerr != nil {
 			capture(group[i].key, rerr)
 		}
 	}
 	return firstErrKey, firstErr
 }
 
-// recordSlotAcquireResult parses one acquire response and updates acquired/backups.
+// recordAcquireResult parses one acquire response and updates acquired/backups.
 // Returns an error on parse failure so the caller surfaces it via firstErr —
 // otherwise a script drift would silently make acquireMultiWriteLocks loop
 // forever against the same broken response.
-func (rca *cacheAside) recordSlotAcquireResult(
+func (rca *cacheAside) recordAcquireResult(
 	entry lockAcquireEntry,
 	arr []rueidis.RedisMessage,
 	acquired map[string]string,
@@ -412,13 +403,7 @@ type casSetEntry struct {
 	lockVal string
 }
 
-// casSlotResult pairs a slot's entries with the per-entry script responses.
-type casSlotResult struct {
-	entries []casSetEntry
-	resps   []rueidis.RedisResult
-}
-
-// setMultiValuesWithCAS batch-sets values using CAS, grouped by cluster slot.
+// setMultiValuesWithCAS batch-sets values using CAS in one pipeline.
 // Returns succeeded keys and a (lazily-allocated) map of failed keys to errors.
 func (rca *cacheAside) setMultiValuesWithCAS(
 	ctx context.Context,
@@ -436,43 +421,13 @@ func (rca *cacheAside) setMultiValuesWithCAS(
 		entries = append(entries, casSetEntry{key: key, val: val, lockVal: lockVal})
 	}
 	succeeded = make([]string, 0, len(entries))
-	slotGroups := cmdx.GroupBySlot(entries, func(e casSetEntry) string { return e.key })
-
-	for _, sr := range rca.runCASSlots(ctx, slotGroups, ttlMs) {
-		rca.collectCASResults(sr.entries, sr.resps, &succeeded, &failed)
-	}
+	rca.collectCASResults(entries, rca.execCASSet(ctx, entries, ttlMs), &succeeded, &failed)
 	return succeeded, failed
 }
 
-// runCASSlots executes each slot's CAS-set script, fanning out to goroutines
-// only when there's real parallelism. Mirrors cacheAside.runSlotSets.
-func (rca *cacheAside) runCASSlots(ctx context.Context, slotGroups map[uint16][]casSetEntry, ttlMs string) []casSlotResult {
-	results := make([]casSlotResult, 0, len(slotGroups))
-	if len(slotGroups) <= 1 {
-		for _, group := range slotGroups {
-			results = append(results, casSlotResult{entries: group, resps: rca.execSlotGroup(ctx, group, ttlMs)})
-		}
-		return results
-	}
-	var (
-		mu sync.Mutex
-		wg sync.WaitGroup
-	)
-	for _, group := range slotGroups {
-		wg.Go(func() {
-			sr := casSlotResult{entries: group, resps: rca.execSlotGroup(ctx, group, ttlMs)}
-			mu.Lock()
-			results = append(results, sr)
-			mu.Unlock()
-		})
-	}
-	wg.Wait()
-	return results
-}
-
-// execSlotGroup pipelines the CAS-set Lua script for one slot's entries.
-// Per-entry Keys/Args share two pooled backing arrays.
-func (rca *cacheAside) execSlotGroup(ctx context.Context, group []casSetEntry, ttlMs string) []rueidis.RedisResult {
+// execCASSet pipelines the CAS-set Lua script for entries. Per-entry Keys/Args
+// share two pooled backing arrays.
+func (rca *cacheAside) execCASSet(ctx context.Context, group []casSetEntry, ttlMs string) []rueidis.RedisResult {
 	n := len(group)
 	stmtsP := luaExecPool.Get(n)
 	defer luaExecPool.Put(stmtsP)
