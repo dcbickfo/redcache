@@ -7,6 +7,8 @@ GO            ?= $(ASDF) exec go
 GOLANGCI_LINT ?= $(ASDF) exec golangci-lint
 PKG           ?= ./...
 COVERAGE_PROFILE ?= coverage.out
+# Cluster tests (cluster_test.go) run against docker-compose's redis-cluster.
+export REDCACHE_CLUSTER_ADDRS ?= 127.0.0.1:30001
 MIN_COVERAGE ?= 83.0
 
 .DEFAULT_GOAL := help
@@ -29,7 +31,7 @@ build: ## Compile all packages
 	$(GO) build $(PKG)
 
 .PHONY: test
-test: ## Run all tests (needs Redis on localhost:6379 — see redis-up)
+test: ## Run all tests (needs Redis and Redis Cluster — see redis-up)
 	$(GO) test $(PKG)
 
 .PHONY: test-short
@@ -79,8 +81,8 @@ tidy: ## Tidy and verify go.mod / go.sum
 	$(GO) mod verify
 
 .PHONY: redis-up
-redis-up: ## Start Redis for integration tests (docker compose)
-	docker compose up -d
+redis-up: ## Start Redis and Redis Cluster for integration tests (docker compose)
+	docker compose up -d --wait
 
 .PHONY: redis-down
 redis-down: ## Stop Redis

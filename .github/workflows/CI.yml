@@ -11,6 +11,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Cluster tests in cluster_test.go run against docker-compose's redis-cluster.
+  REDCACHE_CLUSTER_ADDRS: 127.0.0.1:30001
+
 jobs:
   test:
     timeout-minutes: 20
@@ -30,6 +34,8 @@ jobs:
           go-version-file: .tool-versions
           cache: true
           cache-dependency-path: go.sum
+      - name: Start Redis Cluster
+        run: docker compose up -d --wait redis-cluster
       - name: Run race tests
         run: |
           set -o pipefail
@@ -60,6 +66,8 @@ jobs:
           go-version-file: .tool-versions
           cache: true
           cache-dependency-path: go.sum
+      - name: Start Redis Cluster
+        run: docker compose up -d --wait redis-cluster
       - name: Check coverage
         run: make cover-check GO=go
       - name: Coverage summary
