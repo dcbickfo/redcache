@@ -890,14 +890,16 @@ func TestCache_CloseCancelsRefreshCallback(t *testing.T) {
 
 	ctx := t.Context()
 	key := "close-refresh:" + uuid.New().String()
-	ttl := time.Second
+	// Wide TTL: the second Get must land past the refresh threshold (half the
+	// TTL) and well before expiry, or it takes the miss path instead.
+	ttl := 3 * time.Second
 
 	_, err = client.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
 		return "initial", nil
 	})
 	require.NoError(t, err)
 
-	time.Sleep(600 * time.Millisecond)
+	time.Sleep(1600 * time.Millisecond)
 
 	refreshStarted := make(chan struct{})
 	_, err = client.Get(ctx, ttl, key, func(ctx context.Context, _ string) (string, error) {
