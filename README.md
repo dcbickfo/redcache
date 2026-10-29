@@ -26,7 +26,7 @@ A typed cache-aside for Redis, built on the [rueidis](https://github.com/redis/r
 
 ## Requirements
 
-- Go 1.25+
+- Go 1.26.10+
 - Redis 7+ with RESP3 and client-side caching (tracking) enabled
 
 RESP3 client-side caching is load-bearing, not optional: redcache wakes waiters
@@ -162,7 +162,9 @@ err = cache.Set(ctx, time.Minute, "config:greeting", func(ctx context.Context, k
   `var be *redcache.BatchKeyError[string]`.
 - TTL-bearing methods now reject `ttl <= 0` with `ErrInvalidTTL` before touching
   Redis. Use `Del` / `DelMulti` to remove entries.
-- The Go floor is now 1.25.
+- The Go floor is now 1.26.10 (v0.3.0 required 1.25; v0.3.1 raised it to the
+  first release without the GO-2026-6607 and GO-2026-6809 standard-library
+  vulnerabilities).
 
 Once the string-key migration compiles, you can opt into typed values by
 choosing a value codec, for example `NewString[User](conn,

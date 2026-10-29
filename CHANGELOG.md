@@ -7,11 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.3.1] - 2026-10-29
 
-A patch release for the v0.3 line, backported from the v0.4 work. Go and
-rueidis versions are unchanged. Go 1.25 is out of support and has unfixed
-standard-library vulnerabilities in `crypto/tls` and `crypto/x509`
-(GO-2026-6607, GO-2026-6809), so build with Go 1.26.9 or later; govulncheck
-now scans with Go 1.26.
+A patch release for the v0.3 line, backported from the v0.4 work. The rueidis
+version is unchanged.
+
+### Changed
+- The Go floor is now 1.26.10 (`go 1.26.10` in `go.mod`), up from 1.25. Go
+  1.25 is out of support and has unfixed standard-library vulnerabilities in
+  `crypto/tls` and `crypto/x509` (GO-2026-6607, GO-2026-6809); 1.26.10 is the
+  first release with both fixes. CI tests on Go 1.26 and 1.27.
 
 ### Added
 - `ErrMissingValue`, returned (wrapped, naming the keys) when a `GetMulti` or
