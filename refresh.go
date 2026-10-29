@@ -27,9 +27,7 @@ type refreshJob struct {
 // even with recover.
 func (rca *cacheAside) startRefreshWorkers(n int) {
 	for range n {
-		rca.refreshWg.Add(1)
-		go func() {
-			defer rca.refreshWg.Done()
+		rca.refreshWg.Go(func() {
 			for {
 				select {
 				case <-rca.refreshDone:
@@ -41,7 +39,7 @@ func (rca *cacheAside) startRefreshWorkers(n int) {
 					rca.runRefreshJob(job)
 				}
 			}
-		}()
+		})
 	}
 }
 

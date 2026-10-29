@@ -245,13 +245,7 @@ func (rca *cacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 }
 
 func (rca *cacheAside) nextLockPollDelay() time.Duration {
-	maxDelay := rca.lockTTL / 10
-	if maxDelay < minLockPollDelay {
-		maxDelay = minLockPollDelay
-	}
-	if maxDelay > maxLockPollDelay {
-		maxDelay = maxLockPollDelay
-	}
+	maxDelay := min(max(rca.lockTTL/10, minLockPollDelay), maxLockPollDelay)
 	if maxDelay >= rca.lockTTL && rca.lockTTL > 0 {
 		maxDelay = rca.lockTTL / 2
 		if maxDelay <= 0 {

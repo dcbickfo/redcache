@@ -318,7 +318,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 		keys[5]: keyAndVals[keys[5]],
 	}
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -430,7 +430,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 		keys[5]: keyAndVals[keys[5]],
 	}
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -559,7 +559,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 		keys[5]: keyAndVals[keys[5]],
 	}
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -809,7 +809,7 @@ func TestConcurrentRegisterRace(t *testing.T) {
 	}
 
 	wg := sync.WaitGroup{}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -866,7 +866,7 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 	}
 
 	wg := sync.WaitGroup{}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -982,7 +982,7 @@ func TestConcurrentInvalidation(t *testing.T) {
 	require.NoError(t, err)
 
 	wg := sync.WaitGroup{}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -1259,14 +1259,15 @@ func TestRefreshAhead_Dedup(t *testing.T) {
 	time.Sleep(1200 * time.Millisecond)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 20 {
+		wg.Go(func() {
 			res, err := client.Get(ctx, ttl, key, cb)
-			assert.NoError(t, err)
+			if err != nil {
+				t.Errorf("Get() error: %v", err)
+				return
+			}
 			assert.Equal(t, "initial", res)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -1733,13 +1734,14 @@ func TestRefreshAhead_Backpressure(t *testing.T) {
 	var wg sync.WaitGroup
 	for _, key := range keys {
 		k := key
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			res, err := client.Get(ctx, ttl, k, refreshCb)
-			assert.NoError(t, err)
+			if err != nil {
+				t.Errorf("Get() error: %v", err)
+				return
+			}
 			assert.Equal(t, "initial", res)
-		}()
+		})
 	}
 	wg.Wait()
 

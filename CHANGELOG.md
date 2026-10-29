@@ -15,6 +15,8 @@ version is unchanged.
   1.25 is out of support and has unfixed standard-library vulnerabilities in
   `crypto/tls` and `crypto/x509` (GO-2026-6607, GO-2026-6809); 1.26.10 is the
   first release with both fixes. CI tests on Go 1.26 and 1.27.
+- `go fix` modernizers for Go 1.26 are applied (`wg.Go`, `range` over ints,
+  `min`/`max`), with no behavior change.
 
 ### Added
 - `ErrMissingValue`, returned (wrapped, naming the keys) when a `GetMulti` or

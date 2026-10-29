@@ -111,9 +111,7 @@ func (rca *cacheAside) runTouchSlots(ctx context.Context, slots map[uint16][]tou
 		firstErrKey string
 	)
 	for _, stmts := range slots {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			key, err := rca.touchSlot(ctx, stmts)
 			if err == nil {
 				return
@@ -123,7 +121,7 @@ func (rca *cacheAside) runTouchSlots(ctx context.Context, slots map[uint16][]tou
 			if firstErr == nil {
 				firstErr, firstErrKey = err, key
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return firstErrKey, firstErr

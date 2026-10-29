@@ -525,14 +525,12 @@ func (rca *cacheAside) runSlotSets(ctx context.Context, stmts map[uint16]keyOrde
 		wg sync.WaitGroup
 	)
 	for _, kos := range stmts {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			sr := rca.runSlotSet(ctx, kos)
 			mu.Lock()
 			results = append(results, sr)
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 	return results
@@ -584,9 +582,7 @@ func (rca *cacheAside) unlockMulti(ctx context.Context, lockVals map[string]stri
 	}
 	var wg sync.WaitGroup
 	for slot, stmts := range delStmts {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			execsP := luaExecPool.Get(len(stmts))
 			defer luaExecPool.Put(execsP)
 			execs := *execsP
@@ -600,7 +596,7 @@ func (rca *cacheAside) unlockMulti(ctx context.Context, lockVals map[string]stri
 					rca.logger.Error("failed to unlock key in batch", "key", stmts[i].key, "slot", slot, "error", err)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

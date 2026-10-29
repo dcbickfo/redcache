@@ -269,11 +269,9 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 	var wg sync.WaitGroup
 	for _, key := range keys {
 		k := key
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = client.Get(ctx, ttl, k, refreshCb)
-		}()
+		})
 	}
 	wg.Wait()
 

@@ -33,7 +33,7 @@ func TestGet_MissCallsFnOnce(t *testing.T) {
 	f := redcachetest.New[string, int]()
 	fn, calls := countingLoader(42)
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		got, err := f.Get(context.Background(), time.Minute, "k", fn)
 		require.NoError(t, err)
 		assert.Equal(t, 42, got)
