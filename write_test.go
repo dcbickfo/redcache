@@ -227,13 +227,13 @@ func TestCache_SetMulti_NoDeadlock(t *testing.T) {
 	errs := make(chan error, 10)
 	wg.Add(2)
 
-	go func() {
+	setRepeatedly := func(keys []string, valPrefix string) {
 		defer wg.Done()
 		for range 5 {
-			err := client.SetMulti(ctx, time.Second*10, keys1, func(ctx context.Context, ks []string) (map[string]string, error) {
+			err := client.SetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {
 				res := make(map[string]string, len(ks))
 				for _, k := range ks {
-					res[k] = "val-1:" + uuid.New().String()
+					res[k] = valPrefix + uuid.New().String()
 				}
 				return res, nil
 			})
@@ -241,23 +241,9 @@ func TestCache_SetMulti_NoDeadlock(t *testing.T) {
 				errs <- err
 			}
 		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		for range 5 {
-			err := client.SetMulti(ctx, time.Second*10, keys2, func(ctx context.Context, ks []string) (map[string]string, error) {
-				res := make(map[string]string, len(ks))
-				for _, k := range ks {
-					res[k] = "val-2:" + uuid.New().String()
-				}
-				return res, nil
-			})
-			if err != nil {
-				errs <- err
-			}
-		}
-	}()
+	}
+	go setRepeatedly(keys1, "val-1:")
+	go setRepeatedly(keys2, "val-2:")
 
 	wg.Wait()
 	close(errs)

@@ -10,6 +10,54 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// keyOpCase is one cache operation expected to fail before reaching the core.
+type keyOpCase struct {
+	name string
+	run  func(t *testing.T) error
+}
+
+// multiKeyCases returns the multi-key operations over keys 1 and 2, each of
+// which fails the test if its callback runs after the stop described by reason.
+func multiKeyCases(ctx context.Context, c *cache[int, string], reason string) []keyOpCase {
+	return []keyOpCase{
+		{
+			name: "get multi",
+			run: func(t *testing.T) error {
+				t.Helper()
+				_, err := c.GetMulti(ctx, time.Second, []int{1, 2}, func(context.Context, []int) (map[int]string, error) {
+					t.Fatal("loader should not run after " + reason)
+					return nil, nil
+				})
+				return err
+			},
+		},
+		{
+			name: "set multi",
+			run: func(t *testing.T) error {
+				t.Helper()
+				return c.SetMulti(ctx, time.Second, []int{1, 2}, func(context.Context, []int) (map[int]string, error) {
+					t.Fatal("setter should not run after " + reason)
+					return nil, nil
+				})
+			},
+		},
+		{
+			name: "del multi",
+			run: func(t *testing.T) error {
+				t.Helper()
+				return c.DelMulti(ctx, []int{1, 2})
+			},
+		},
+		{
+			name: "touch multi",
+			run: func(t *testing.T) error {
+				t.Helper()
+				return c.TouchMulti(ctx, time.Second, []int{1, 2})
+			},
+		},
+	}
+}
+
 func TestCache_KeyEncodeErrorStopsBeforeCore(t *testing.T) {
 	t.Parallel()
 
@@ -25,10 +73,7 @@ func TestCache_KeyEncodeErrorStopsBeforeCore(t *testing.T) {
 	}
 	ctx := t.Context()
 
-	tests := []struct {
-		name string
-		run  func(t *testing.T) error
-	}{
+	tests := append(multiKeyCases(ctx, cache, "key encode failure"), []keyOpCase{
 		{
 			name: "get",
 			run: func(t *testing.T) error {
@@ -41,33 +86,12 @@ func TestCache_KeyEncodeErrorStopsBeforeCore(t *testing.T) {
 			},
 		},
 		{
-			name: "get multi",
-			run: func(t *testing.T) error {
-				t.Helper()
-				_, err := cache.GetMulti(ctx, time.Second, []int{1, 2}, func(context.Context, []int) (map[int]string, error) {
-					t.Fatal("loader should not run after key encode failure")
-					return nil, nil
-				})
-				return err
-			},
-		},
-		{
 			name: "set",
 			run: func(t *testing.T) error {
 				t.Helper()
 				return cache.Set(ctx, time.Second, 2, func(context.Context, int) (string, error) {
 					t.Fatal("setter should not run after key encode failure")
 					return "", nil
-				})
-			},
-		},
-		{
-			name: "set multi",
-			run: func(t *testing.T) error {
-				t.Helper()
-				return cache.SetMulti(ctx, time.Second, []int{1, 2}, func(context.Context, []int) (map[int]string, error) {
-					t.Fatal("setter should not run after key encode failure")
-					return nil, nil
 				})
 			},
 		},
@@ -87,27 +111,13 @@ func TestCache_KeyEncodeErrorStopsBeforeCore(t *testing.T) {
 			},
 		},
 		{
-			name: "del multi",
-			run: func(t *testing.T) error {
-				t.Helper()
-				return cache.DelMulti(ctx, []int{1, 2})
-			},
-		},
-		{
 			name: "touch",
 			run: func(t *testing.T) error {
 				t.Helper()
 				return cache.Touch(ctx, time.Second, 2)
 			},
 		},
-		{
-			name: "touch multi",
-			run: func(t *testing.T) error {
-				t.Helper()
-				return cache.TouchMulti(ctx, time.Second, []int{1, 2})
-			},
-		},
-	}
+	}...)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -128,46 +138,7 @@ func TestCache_DuplicateEncodedKeysStopBeforeCore(t *testing.T) {
 	}
 	ctx := t.Context()
 
-	tests := []struct {
-		name string
-		run  func(t *testing.T) error
-	}{
-		{
-			name: "get multi",
-			run: func(t *testing.T) error {
-				t.Helper()
-				_, err := cache.GetMulti(ctx, time.Second, []int{1, 2}, func(context.Context, []int) (map[int]string, error) {
-					t.Fatal("loader should not run after duplicate key encoding")
-					return nil, nil
-				})
-				return err
-			},
-		},
-		{
-			name: "set multi",
-			run: func(t *testing.T) error {
-				t.Helper()
-				return cache.SetMulti(ctx, time.Second, []int{1, 2}, func(context.Context, []int) (map[int]string, error) {
-					t.Fatal("setter should not run after duplicate key encoding")
-					return nil, nil
-				})
-			},
-		},
-		{
-			name: "del multi",
-			run: func(t *testing.T) error {
-				t.Helper()
-				return cache.DelMulti(ctx, []int{1, 2})
-			},
-		},
-		{
-			name: "touch multi",
-			run: func(t *testing.T) error {
-				t.Helper()
-				return cache.TouchMulti(ctx, time.Second, []int{1, 2})
-			},
-		},
-	}
+	tests := multiKeyCases(ctx, cache, "duplicate key encoding")
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

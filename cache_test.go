@@ -584,6 +584,29 @@ func TestCache_GetParentContextCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+// getConcurrently runs 400 concurrent Gets of key and asserts each returns want.
+func getConcurrently(
+	ctx context.Context,
+	t *testing.T,
+	client *redcache.Cache,
+	key, want string,
+	cb func(context.Context, string) (string, error),
+) {
+	t.Helper()
+	var wg sync.WaitGroup
+	for range 400 {
+		wg.Go(func() {
+			res, err := client.Get(ctx, time.Second*10, key, cb)
+			if err != nil {
+				t.Errorf("Get() error: %v", err)
+				return
+			}
+			assert.Equal(t, want, res)
+		})
+	}
+	wg.Wait()
+}
+
 // TestConcurrentRegisterRace stresses register() to guard the CompareAndDelete race.
 func TestConcurrentRegisterRace(t *testing.T) {
 	t.Parallel()
@@ -614,35 +637,7 @@ func TestConcurrentRegisterRace(t *testing.T) {
 		return val, nil
 	}
 
-	wg := sync.WaitGroup{}
-	for range 100 {
-		wg.Add(4)
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-	}
-	wg.Wait()
+	getConcurrently(ctx, t, client, key, val, cb)
 
 	// Cap above: a register-race regression would let every Get re-fire the callback unboundedly.
 	mu.Lock()
@@ -671,36 +666,7 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 		return val, nil
 	}
 
-	wg := sync.WaitGroup{}
-	for range 100 {
-		wg.Add(4)
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-	}
-
-	wg.Wait()
+	getConcurrently(ctx, t, client, key, val, cb)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -1564,33 +1530,33 @@ func TestRefreshAhead_Backpressure(t *testing.T) {
 
 func TestRefreshAhead_FractionValidation(t *testing.T) {
 	t.Parallel()
-	t.Run("negative fraction", func(t *testing.T) {
-		t.Parallel()
-		_, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithRefreshAfterFraction(-0.1),
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "RefreshAfterFraction")
-	})
-	t.Run("fraction equals 1", func(t *testing.T) {
-		t.Parallel()
-		_, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithRefreshAfterFraction(1.0),
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "RefreshAfterFraction")
-	})
-	t.Run("fraction greater than 1", func(t *testing.T) {
-		t.Parallel()
-		_, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithRefreshAfterFraction(1.5),
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "RefreshAfterFraction")
-	})
+	invalid := []struct {
+		name string
+		opts []redcache.Option
+		want string
+	}{
+		{"negative fraction", []redcache.Option{redcache.WithRefreshAfterFraction(-0.1)}, "RefreshAfterFraction"},
+		{"fraction equals 1", []redcache.Option{redcache.WithRefreshAfterFraction(1.0)}, "RefreshAfterFraction"},
+		{"fraction greater than 1", []redcache.Option{redcache.WithRefreshAfterFraction(1.5)}, "RefreshAfterFraction"},
+		{
+			"negative RefreshWorkers",
+			[]redcache.Option{redcache.WithRefreshAfterFraction(0.8), redcache.WithRefreshWorkers(-1)},
+			"RefreshWorkers",
+		},
+		{
+			"negative RefreshQueueSize",
+			[]redcache.Option{redcache.WithRefreshAfterFraction(0.8), redcache.WithRefreshQueueSize(-1)},
+			"RefreshQueueSize",
+		},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := redcache.Open(rueidis.ClientOption{InitAddress: addr}, tc.opts...)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
 	t.Run("valid fraction", func(t *testing.T) {
 		t.Parallel()
 		skipIfNoRedis(t)
@@ -1600,26 +1566,6 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 		)
 		require.NoError(t, err)
 		t.Cleanup(conn.Close)
-	})
-	t.Run("negative RefreshWorkers", func(t *testing.T) {
-		t.Parallel()
-		_, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithRefreshAfterFraction(0.8),
-			redcache.WithRefreshWorkers(-1),
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "RefreshWorkers")
-	})
-	t.Run("negative RefreshQueueSize", func(t *testing.T) {
-		t.Parallel()
-		_, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithRefreshAfterFraction(0.8),
-			redcache.WithRefreshQueueSize(-1),
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "RefreshQueueSize")
 	})
 	t.Run("custom workers and queue", func(t *testing.T) {
 		t.Parallel()

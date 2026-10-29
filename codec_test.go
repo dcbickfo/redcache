@@ -8,12 +8,13 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-func TestJSONCodec_RoundTripStruct(t *testing.T) {
+// assertStructRoundTrip checks that c decodes what it encoded for a struct value.
+func assertStructRoundTrip(t *testing.T, c redcache.Codec) {
+	t.Helper()
 	type user struct {
 		ID   int    `json:"id"`
 		Name string `json:"name"`
 	}
-	c := redcache.JSONCodec{}
 	in := user{ID: 7, Name: "alice"}
 
 	b, err := c.Encode(in)
@@ -27,6 +28,10 @@ func TestJSONCodec_RoundTripStruct(t *testing.T) {
 	if out != in {
 		t.Fatalf("got %+v, want %+v", out, in)
 	}
+}
+
+func TestJSONCodec_RoundTripStruct(t *testing.T) {
+	assertStructRoundTrip(t, redcache.JSONCodec{})
 }
 
 func TestJSONCodec_DecodeInvalidJSON(t *testing.T) {
@@ -51,23 +56,7 @@ func TestJSONCodec_NilContainersEncodeAsNull(t *testing.T) {
 }
 
 func TestJSONV2Codec_RoundTripStruct(t *testing.T) {
-	type user struct {
-		ID   int    `json:"id"`
-		Name string `json:"name"`
-	}
-	c := redcache.JSONV2Codec{}
-	in := user{ID: 7, Name: "alice"}
-	b, err := c.Encode(in)
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	var out user
-	if err := c.Decode(b, &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if out != in {
-		t.Fatalf("got %+v, want %+v", out, in)
-	}
+	assertStructRoundTrip(t, redcache.JSONV2Codec{})
 }
 
 func TestJSONV2Codec_NilContainerDefaults(t *testing.T) {

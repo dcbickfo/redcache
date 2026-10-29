@@ -120,18 +120,26 @@ func BenchmarkTypedGetMulti_Parallel(b *testing.B) {
 	})
 }
 
-func BenchmarkTypedSet(b *testing.B) {
+// benchTypedWriteKey runs write against one fresh key per benchmark.
+func benchTypedWriteKey(b *testing.B, keyPrefix string, write func(ctx context.Context, users *redcache.Cache, key string) error) {
+	b.Helper()
 	b.ReportAllocs()
 	users := newBenchTypedJSON(b)
 	ctx := b.Context()
-	key := "bench:typed:set:" + uuid.New().String()
+	key := keyPrefix + uuid.New().String()
 
 	b.ResetTimer()
 	for range b.N {
-		if err := users.Set(ctx, time.Minute, key, benchTypedPrimeFn); err != nil {
+		if err := write(ctx, users, key); err != nil {
 			b.Fatal(err)
 		}
 	}
+}
+
+func BenchmarkTypedSet(b *testing.B) {
+	benchTypedWriteKey(b, "bench:typed:set:", func(ctx context.Context, users *redcache.Cache, key string) error {
+		return users.Set(ctx, time.Minute, key, benchTypedPrimeFn)
+	})
 }
 
 func BenchmarkTypedSetMulti(b *testing.B) {
@@ -153,17 +161,9 @@ func BenchmarkTypedSetMulti(b *testing.B) {
 }
 
 func BenchmarkTypedForceSet(b *testing.B) {
-	b.ReportAllocs()
-	users := newBenchTypedJSON(b)
-	ctx := b.Context()
-	key := "bench:typed:forceset:" + uuid.New().String()
-
-	b.ResetTimer()
-	for range b.N {
-		if err := users.ForceSet(ctx, time.Minute, key, benchTUser); err != nil {
-			b.Fatal(err)
-		}
-	}
+	benchTypedWriteKey(b, "bench:typed:forceset:", func(ctx context.Context, users *redcache.Cache, key string) error {
+		return users.ForceSet(ctx, time.Minute, key, benchTUser)
+	})
 }
 
 func BenchmarkTypedForceSetMulti(b *testing.B) {

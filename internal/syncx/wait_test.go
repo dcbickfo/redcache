@@ -60,17 +60,19 @@ func TestWaitForAll_SuccessClosed(t *testing.T) {
 	})
 }
 
-func TestWaitForAll_ContextCancelled(t *testing.T) {
-	t.Parallel()
+// assertDeadlineExceeded waits on two delayed senders under a context that
+// times out first, and asserts WaitForAll reports context.DeadlineExceeded.
+func assertDeadlineExceeded(t *testing.T, timeout, delay1, delay2 time.Duration) {
+	t.Helper()
 	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), timeout)
 		defer cancel()
 
 		ch1 := make(chan int)
 		ch2 := make(chan int)
 
-		delayedSend(ch1, 1, 200*time.Millisecond)
-		delayedSend(ch2, 2, 300*time.Millisecond)
+		delayedSend(ch1, 1, delay1)
+		delayedSend(ch2, 2, delay2)
 
 		waitLock := []<-chan int{ch1, ch2}
 
@@ -82,26 +84,14 @@ func TestWaitForAll_ContextCancelled(t *testing.T) {
 	})
 }
 
+func TestWaitForAll_ContextCancelled(t *testing.T) {
+	t.Parallel()
+	assertDeadlineExceeded(t, 150*time.Millisecond, 200*time.Millisecond, 300*time.Millisecond)
+}
+
 func TestWaitForAll_PartialCompleteContextCancelled(t *testing.T) {
 	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-		defer cancel()
-
-		ch1 := make(chan int)
-		ch2 := make(chan int)
-
-		delayedSend(ch1, 1, 100*time.Millisecond)
-		delayedSend(ch2, 2, 300*time.Millisecond)
-
-		waitLock := []<-chan int{ch1, ch2}
-
-		err := syncx.WaitForAll(ctx, waitLock)
-		assert.ErrorIsf(t, err, context.DeadlineExceeded, "expected context.DeadlineExceeded, got %v", err)
-		// Drain so the late senders exit inside the bubble.
-		<-ch1
-		<-ch2
-	})
+	assertDeadlineExceeded(t, 200*time.Millisecond, 100*time.Millisecond, 300*time.Millisecond)
 }
 
 func TestWaitForAll_NoChannels(t *testing.T) {
