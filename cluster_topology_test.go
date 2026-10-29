@@ -209,6 +209,20 @@ func role(t *testing.T, addr string) string {
 	return s
 }
 
+// replicaSynced reports whether addr is a replica whose link to its primary
+// is up. ROLE says "slave" before the link is up, and a CLUSTER FAILOVER
+// issued then aborts silently.
+func replicaSynced(t *testing.T, addr string) bool {
+	t.Helper()
+	r, err := do(t, adminClient(t, addr), "ROLE").ToArray()
+	if err != nil || len(r) < 4 {
+		return false
+	}
+	s, _ := r[0].ToString()
+	state, _ := r[3].ToString()
+	return s == "slave" && state == "connected"
+}
+
 func taggedKeys(tag string, n int) []string {
 	keys := make([]string, n)
 	for i := range keys {
@@ -351,9 +365,20 @@ func TestCluster_PrimaryFailover(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		<-slept
-		eventually(t, 20*time.Second, victim.addr+" to rejoin as a replica", func() bool { return role(t, victim.addr) == "slave" })
-		require.NoError(t, do(t, adminClient(t, victim.addr), "CLUSTER", "FAILOVER").Error())
-		eventually(t, 20*time.Second, victim.addr+" to be primary again", func() bool { return role(t, victim.addr) == "master" })
+		eventually(t, 20*time.Second, victim.addr+" to sync as a replica", func() bool { return replicaSynced(t, victim.addr) })
+		// A manual failover that cannot complete aborts after 5s without an
+		// error, so reissue it until the promotion lands.
+		var issued time.Time
+		eventually(t, 30*time.Second, victim.addr+" to be primary again", func() bool {
+			if role(t, victim.addr) == "master" {
+				return true
+			}
+			if time.Since(issued) > 6*time.Second {
+				require.NoError(t, do(t, adminClient(t, victim.addr), "CLUSTER", "FAILOVER").Error())
+				issued = time.Now()
+			}
+			return false
+		})
 		// Later tests read the topology from 30001, so wait for its view too.
 		eventually(t, 20*time.Second, "30001 to see the failback", func() bool {
 			var victimPrimary, replicaPrimary bool
