@@ -61,7 +61,7 @@ The key insight: because `tryGet` uses `DoCache`, any client that reads a lock v
 
 **Lock mechanism:** Lock values are prefixed UUIDv7 strings (default prefix `__redcache:lock:`). `tryGet` recognizes these by prefix and treats them as cache misses. Lua scripts (`delKeyLua`, `setKeyLua`) atomically verify lock ownership before deleting or overwriting values. Lock entries are tracked locally via `syncx.ShardedMap` with context-based auto-expiration via `context.AfterFunc`.
 
-**Multi-key operations:** `GetMulti` follows the same pattern but batches operations. `tryGetMulti` uses `DoMultiCache` for batch reads. `tryLockMulti` acquires locks in batch. `setMultiWithLock` pipelines the CAS-set Lua scripts. Every script touches one key, so multi-key paths never group by slot: rueidis's cluster `DoMulti` splits a pipeline per node, runs the nodes in parallel, and follows MOVED/ASK (`cluster_test.go` covers each path against a real cluster). `syncx.WaitForAll` waits on each channel in turn (no goroutines), returning the context error on cancellation.
+**Multi-key operations:** `GetMulti` follows the same pattern but batches operations. `tryGetMulti` uses `DoMultiCache` for batch reads. `tryLockMulti` acquires locks in batch. `setMultiWithLock` pipelines the CAS-set Lua scripts. Every script touches one key, so multi-key paths never group by slot: rueidis's cluster `DoMulti` splits a pipeline per node, runs the nodes in parallel, and follows MOVED/ASK. `cluster_test.go` covers each path against a real cluster, and `cluster_topology_test.go` covers a completed slot migration (MOVED), a half-finished one (ASK), a primary failover, and no `SCRIPT LOAD` on any node. `syncx.WaitForAll` waits on each channel in turn (no goroutines), returning the context error on cancellation.
 
 **Internal packages:**
 - `internal/lockpool` — fast lock-value generation: a per-instance UUIDv7 prefix plus an atomic counter, avoiding a per-lock `uuid.NewV7()` call
@@ -71,7 +71,7 @@ The key insight: because `tryGet` uses `DoCache`, any client that reads a lock v
 ## Code Conventions
 
 - **Import ordering** (enforced by `gci`): standard library, third-party, then `github.com/dcbickfo/redcache` internal packages
-- Tests are integration tests requiring a running Redis instance at `127.0.0.1:6379`; `cluster_test.go` runs against the `redis-cluster` compose service (skipped locally when `REDCACHE_CLUSTER_ADDRS` is unset, required under CI)
+- Tests are integration tests requiring a running Redis instance at `127.0.0.1:6379`; `cluster_test.go` and `cluster_topology_test.go` run against the `redis-cluster` compose service (the topology tests move slots and fail over a primary, so they are not parallel) (skipped locally when `REDCACHE_CLUSTER_ADDRS` is unset, required under CI)
 - Tests use UUID-based keys to avoid collisions between test runs
 - Linting config is in `.golangci.yml` (v2 format); `make lint` runs the pinned
   golangci-lint v2.15.0 with Go 1.27 generic-method support.

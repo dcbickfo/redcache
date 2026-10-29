@@ -311,7 +311,9 @@ func TestCache_Set_RollbackSurvivesContextCancel(t *testing.T) {
 // Multi-key paths must not recycle the []rueidis.Completed they pass to
 // DoMulti: on ctx cancel DoMulti returns while rueidis's writer goroutine still
 // reads the slice, and a cleared entry panics in that goroutine, killing the
-// process. Short deadlines with large pipelined writes hit that window.
+// process. Short deadlines with large pipelined writes hit that window. Only a
+// standalone (or sentinel) client reproduces it: the cluster client copies
+// commands into per-node slices before writing.
 func TestGetMulti_CancelMidPipelineDoesNotCrash(t *testing.T) {
 	t.Parallel()
 	cache, _ := makeClient(t, []string{"127.0.0.1:6379"})
