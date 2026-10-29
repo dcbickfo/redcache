@@ -1548,7 +1548,11 @@ func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
 
 	ctx := context.Background()
 	key := "refresh-lock:" + uuid.New().String()
-	ttl := time.Second
+	// Both refreshes must start while the value is still cached: after half
+	// the TTL, and (for the second) after client1's 150ms refresh lock lapses.
+	// With a 1s TTL that window was ~350ms, which CI load could miss; once the
+	// value expires, Get runs the blocking loader as a plain miss instead.
+	ttl := 3 * time.Second
 
 	_, err := client1.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
 		return "initial", nil
@@ -1575,7 +1579,7 @@ func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
 			default:
 				return false
 			}
-		}, 3*time.Second, 20*time.Millisecond, failureMsg)
+		}, 5*time.Second, 20*time.Millisecond, failureMsg)
 		require.NoError(t, lastErr)
 		select {
 		case <-started:
