@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
-	"uuid"
 
+	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/require"
 )
