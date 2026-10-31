@@ -450,14 +450,12 @@ func (rca *cacheAside) runCASSlots(ctx context.Context, slotGroups map[uint16][]
 		wg sync.WaitGroup
 	)
 	for _, group := range slotGroups {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			sr := casSlotResult{entries: group, resps: rca.execSlotGroup(ctx, group, ttlMs)}
 			mu.Lock()
 			results = append(results, sr)
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 	return results

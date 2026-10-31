@@ -318,7 +318,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 		keys[5]: keyAndVals[keys[5]],
 	}
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -430,7 +430,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) 
 		keys[5]: keyAndVals[keys[5]],
 	}
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -559,7 +559,7 @@ func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 		keys[5]: keyAndVals[keys[5]],
 	}
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -809,7 +809,7 @@ func TestConcurrentRegisterRace(t *testing.T) {
 	}
 
 	wg := sync.WaitGroup{}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -866,7 +866,7 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 	}
 
 	wg := sync.WaitGroup{}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -982,7 +982,7 @@ func TestConcurrentInvalidation(t *testing.T) {
 	require.NoError(t, err)
 
 	wg := sync.WaitGroup{}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
@@ -1125,14 +1125,16 @@ func TestCache_CloseCancelsRefreshCallback(t *testing.T) {
 
 	ctx := context.Background()
 	key := "close-refresh:" + uuid.New().String()
-	ttl := time.Second
+	// Wide TTL: the second Get must land past the refresh threshold (half the
+	// TTL) and well before expiry, or it takes the miss path instead.
+	ttl := 3 * time.Second
 
 	_, err = client.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
 		return "initial", nil
 	})
 	require.NoError(t, err)
 
-	time.Sleep(600 * time.Millisecond)
+	time.Sleep(1600 * time.Millisecond)
 
 	refreshStarted := make(chan struct{})
 	_, err = client.Get(ctx, ttl, key, func(ctx context.Context, _ string) (string, error) {
@@ -1259,14 +1261,15 @@ func TestRefreshAhead_Dedup(t *testing.T) {
 	time.Sleep(1200 * time.Millisecond)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 20 {
+		wg.Go(func() {
 			res, err := client.Get(ctx, ttl, key, cb)
-			assert.NoError(t, err)
+			if err != nil {
+				t.Errorf("Get() error: %v", err)
+				return
+			}
 			assert.Equal(t, "initial", res)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -1547,7 +1550,11 @@ func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
 
 	ctx := context.Background()
 	key := "refresh-lock:" + uuid.New().String()
-	ttl := time.Second
+	// Both refreshes must start while the value is still cached: after half
+	// the TTL, and (for the second) after client1's 150ms refresh lock lapses.
+	// With a 1s TTL that window was ~350ms, which CI load could miss; once the
+	// value expires, Get runs the blocking loader as a plain miss instead.
+	ttl := 3 * time.Second
 
 	_, err := client1.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
 		return "initial", nil
@@ -1574,7 +1581,7 @@ func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
 			default:
 				return false
 			}
-		}, 3*time.Second, 20*time.Millisecond, failureMsg)
+		}, 5*time.Second, 20*time.Millisecond, failureMsg)
 		require.NoError(t, lastErr)
 		select {
 		case <-started:
@@ -1733,13 +1740,14 @@ func TestRefreshAhead_Backpressure(t *testing.T) {
 	var wg sync.WaitGroup
 	for _, key := range keys {
 		k := key
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			res, err := client.Get(ctx, ttl, k, refreshCb)
-			assert.NoError(t, err)
+			if err != nil {
+				t.Errorf("Get() error: %v", err)
+				return
+			}
 			assert.Equal(t, "initial", res)
-		}()
+		})
 	}
 	wg.Wait()
 

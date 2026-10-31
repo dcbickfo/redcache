@@ -26,12 +26,11 @@ func (rca *cacheAside) delMulti(ctx context.Context, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	cmdsP := commandsPool.GetCap(len(keys))
-	defer commandsPool.Put(cmdsP)
+	cmds := make(rueidis.Commands, 0, len(keys))
 	for _, key := range keys {
-		*cmdsP = append(*cmdsP, rca.client.B().Del().Key(key).Build())
+		cmds = append(cmds, rca.client.B().Del().Key(key).Build())
 	}
-	resps := rca.client.DoMulti(ctx, *cmdsP...)
+	resps := rca.client.DoMulti(ctx, cmds...)
 	var firstErr error
 	var firstErrKey string
 	for i, resp := range resps {
@@ -112,9 +111,7 @@ func (rca *cacheAside) runTouchSlots(ctx context.Context, slots map[uint16][]tou
 		firstErrKey string
 	)
 	for _, stmts := range slots {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			key, err := rca.touchSlot(ctx, stmts)
 			if err == nil {
 				return
@@ -124,7 +121,7 @@ func (rca *cacheAside) runTouchSlots(ctx context.Context, slots map[uint16][]tou
 			if firstErr == nil {
 				firstErr, firstErrKey = err, key
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return firstErrKey, firstErr

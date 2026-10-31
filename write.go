@@ -185,6 +185,12 @@ func (rca *cacheAside) setMulti(
 			toRestore[key] = lockVal
 		}
 	}
+	for _, key := range missingKeys(lockValues, vals) {
+		if failed == nil {
+			failed = make(map[string]error)
+		}
+		failed[key] = fmt.Errorf("%w: %q", ErrMissingValue, key)
+	}
 	if len(toRestore) > 0 {
 		rca.restoreMultiValues(ctx, toRestore, savedValues)
 	}
@@ -216,14 +222,13 @@ func (rca *cacheAside) forceSetMulti(ctx context.Context, ttl time.Duration, val
 	if len(values) == 0 {
 		return nil
 	}
-	cmdsP := commandsPool.GetCap(len(values))
-	defer commandsPool.Put(cmdsP)
+	cmds := make(rueidis.Commands, 0, len(values))
 	keyOrder := make([]string, 0, len(values))
 	for key, val := range values {
 		keyOrder = append(keyOrder, key)
-		*cmdsP = append(*cmdsP, rca.client.B().Set().Key(key).Value(wrapEnvelope(val, 0)).Px(ttl).Build())
+		cmds = append(cmds, rca.client.B().Set().Key(key).Value(wrapEnvelope(val, 0)).Px(ttl).Build())
 	}
-	resps := rca.client.DoMulti(ctx, *cmdsP...)
+	resps := rca.client.DoMulti(ctx, cmds...)
 	var failed map[string]error
 	succeeded := make([]string, 0, len(resps))
 	for i, resp := range resps {

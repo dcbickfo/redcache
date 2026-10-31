@@ -155,9 +155,7 @@ func TestCache_Set_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, 10)
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			err := client.Set(ctx, time.Second*10, key, func(ctx context.Context, k string) (string, error) {
 				callCount.Add(1)
 				return "val-from-" + uuid.New().String(), nil
@@ -167,7 +165,7 @@ func TestCache_Set_Concurrent(t *testing.T) {
 				return
 			}
 			errs <- err
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)

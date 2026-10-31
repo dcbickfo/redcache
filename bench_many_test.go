@@ -23,7 +23,7 @@ func BenchmarkCache_Get_ManyKeys(b *testing.B) {
 
 	// Prime 100,000 keys
 	b.Log("Priming keys...")
-	for i := 0; i < 100000; i++ {
+	for i := range 100000 {
 		if err := cache.ForceSet(ctx, time.Minute, fmt.Sprintf("k:%d", i), "v"); err != nil {
 			b.Fatal(err)
 		}

@@ -6,8 +6,8 @@ non-trivial before sending a large PR.
 
 ## Prerequisites
 
-- Go 1.25+ (the module targets `go 1.25.0`; `.tool-versions` pins the local
-  toolchain to Go 1.25.11).
+- Go 1.26.10+ (the module targets `go 1.26.10`; `.tool-versions` pins the
+  local toolchain to Go 1.26.10).
 - Docker, to run a local Redis. The tests are integration tests that need a
   real Redis at `127.0.0.1:6379` — they exercise RESP3 client-side
   invalidation, which can't be faked.
@@ -21,10 +21,12 @@ the `Makefile`; run
 ## Running Redis
 
 ```bash
-docker compose up -d
+docker compose up -d --wait
 ```
 
-This starts the Redis defined in `docker-compose.yml` on port 6379. Stop it with
+This starts the Redis defined in `docker-compose.yml` on port 6379 and a Redis
+Cluster on ports 30001-30006. `make` points the cluster tests at it; without
+`REDCACHE_CLUSTER_ADDRS=127.0.0.1:30001`, `go test` skips them. Stop both with
 `docker compose down`. (`make redis-up` / `make redis-down` wrap these.)
 
 ## Tests, lint, format, bench

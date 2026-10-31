@@ -27,9 +27,7 @@ type refreshJob struct {
 // even with recover.
 func (rca *cacheAside) startRefreshWorkers(n int) {
 	for range n {
-		rca.refreshWg.Add(1)
-		go func() {
-			defer rca.refreshWg.Done()
+		rca.refreshWg.Go(func() {
 			for {
 				select {
 				case <-rca.refreshDone:
@@ -41,7 +39,7 @@ func (rca *cacheAside) startRefreshWorkers(n int) {
 					rca.runRefreshJob(job)
 				}
 			}
-		}()
+		})
 	}
 }
 
@@ -341,9 +339,7 @@ func (rca *cacheAside) doMultiRefresh(
 // acquireRefreshLocks batch-acquires distributed SET NX locks for refresh keys,
 // distinguishing IsRedisNil (healthy dedup) from real Redis errors.
 func (rca *cacheAside) acquireRefreshLocks(ctx context.Context, keys []string) ([]string, map[string]string) {
-	cmdsP := commandsPool.Get(len(keys))
-	defer commandsPool.Put(cmdsP)
-	cmds := *cmdsP
+	cmds := make(rueidis.Commands, len(keys))
 	refreshLocks := make(map[string]string, len(keys))
 	for i, key := range keys {
 		refreshLock := rca.lockPool.Generate()

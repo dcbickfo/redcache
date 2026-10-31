@@ -21,9 +21,10 @@ type Cache[K comparable, V any] interface {
 	// across all processes runs fn for a given key; the rest wait on the
 	// resulting invalidation. Decode errors on read are wrapped with ErrDecode.
 	Get(ctx context.Context, ttl time.Duration, k K, fn func(context.Context, K) (V, error)) (V, error)
-	// GetMulti returns cached values for keys, calling fn for misses. SETs are
-	// grouped by Redis cluster slot. A decode error aborts the batch (wrapped
-	// with ErrDecode).
+	// GetMulti returns cached values for keys, calling fn for misses. fn must
+	// return a value for every key it is given; an omitted key fails the call
+	// with ErrMissingValue. SETs are grouped by Redis cluster slot. A decode
+	// error aborts the batch (wrapped with ErrDecode).
 	GetMulti(ctx context.Context, ttl time.Duration, keys []K, fn func(context.Context, []K) (map[K]V, error)) (map[K]V, error)
 	// Peek is a read-only, client-side-cached lookup with no loader and no lock.
 	// It returns (value, true, nil) on a cached hit, (zero, false, nil) on a miss
@@ -35,7 +36,8 @@ type Cache[K comparable, V any] interface {
 	// subscribed client. On callback error the prior value is restored.
 	Set(ctx context.Context, ttl time.Duration, k K, fn func(context.Context, K) (V, error)) error
 	// SetMulti populates keys via fn under write locks. Partial failures surface
-	// as *BatchKeyError[K] via errors.As.
+	// as *BatchKeyError[K] via errors.As; a key fn omits is restored to its prior
+	// value and fails with ErrMissingValue.
 	SetMulti(ctx context.Context, ttl time.Duration, keys []K, fn func(context.Context, []K) (map[K]V, error)) error
 	// ForceSet writes v unconditionally, bypassing locks. In-progress Get
 	// callers on the same key retry transparently and observe the force-set

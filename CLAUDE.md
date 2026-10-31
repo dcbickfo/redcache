@@ -26,8 +26,8 @@ golangci-lint run
 # Format (v2 formatters section)
 golangci-lint fmt
 
-# Start Redis for local development
-docker compose up -d
+# Start Redis and a Redis Cluster for local development
+docker compose up -d --wait
 ```
 
 ## Architecture
@@ -67,7 +67,7 @@ The key insight: because `tryGet` uses `DoCache`, any client that reads a lock v
 ## Code Conventions
 
 - **Import ordering** (enforced by `gci`): standard library, third-party, then `github.com/dcbickfo/redcache` internal packages
-- Tests are integration tests requiring a running Redis instance at `127.0.0.1:6379`
+- Tests are integration tests requiring a running Redis instance at `127.0.0.1:6379`; `cluster_test.go` and `cluster_topology_test.go` run against the `redis-cluster` compose service (skipped locally when `REDCACHE_CLUSTER_ADDRS` is unset, required under CI)
 - Tests use UUID-based keys to avoid collisions between test runs
 - Linting config is in `.golangci.yml` (v2 format) — comments must end in a period (`godot`), naked returns limited to functions under 30 lines
 - **Claude Code hooks** (`.claude/settings.json`): auto-lint/format `.go` files after Edit/Write; tests run automatically before Claude stops

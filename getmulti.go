@@ -303,6 +303,21 @@ func (rca *cacheAside) collectGetMultiResponse(
 	return needRefresh, needRefreshExpected, nil
 }
 
+// unlockUnset releases the locks in lockVals whose keys never landed in res.
+func (rca *cacheAside) unlockUnset(ctx context.Context, lockVals, res map[string]string) {
+	toUnlock := make(map[string]string)
+	for key, lockVal := range lockVals {
+		if _, ok := res[key]; !ok {
+			toUnlock[key] = lockVal
+		}
+	}
+	if len(toUnlock) > 0 {
+		toCtx, cancel := rca.cleanupCtx(ctx)
+		defer cancel()
+		rca.unlockMulti(toCtx, toUnlock)
+	}
+}
+
 // trySetMultiKeyFn locks each pending key, calls fn, writes the values, and
 // records successes in res.
 func (rca *cacheAside) trySetMultiKeyFn(
@@ -317,19 +332,7 @@ func (rca *cacheAside) trySetMultiKeyFn(
 		return err
 	}
 
-	defer func() {
-		toUnlock := make(map[string]string)
-		for key, lockVal := range lockVals {
-			if _, ok := res[key]; !ok {
-				toUnlock[key] = lockVal
-			}
-		}
-		if len(toUnlock) > 0 {
-			toCtx, cancel := rca.cleanupCtx(ctx)
-			defer cancel()
-			rca.unlockMulti(toCtx, toUnlock)
-		}
-	}()
+	defer rca.unlockUnset(ctx, lockVals, res)
 
 	if len(lockVals) == 0 {
 		return nil
@@ -342,6 +345,12 @@ func (rca *cacheAside) trySetMultiKeyFn(
 	if err != nil {
 		rca.emitLoaderErrors(len(fnKeys))
 		return err
+	}
+	// A key the loader omits would never land in res, so the retry loop would
+	// re-lock it and re-run fn until ctx ends. Fail fast; the deferred unlock
+	// releases every lock.
+	if missing := missingKeys(lockVals, vals); len(missing) > 0 {
+		return fmt.Errorf("%w: %q", ErrMissingValue, missing)
 	}
 	// Amortise fn time across returned values for XFetch sampling. Skewed but
 	// better than 0 — slow batches get proportionally more refresh headroom.
@@ -379,13 +388,12 @@ func perValueDelta(total time.Duration, n int) time.Duration {
 
 func (rca *cacheAside) tryLockMulti(ctx context.Context, keys []string) (map[string]string, error) {
 	lockVals := make(map[string]string, len(keys))
-	cmdsP := commandsPool.GetCap(len(keys))
-	defer commandsPool.Put(cmdsP)
+	cmds := make(rueidis.Commands, 0, len(keys))
 	for _, k := range keys {
 		lockVals[k] = rca.lockPool.Generate()
-		*cmdsP = append(*cmdsP, rca.client.B().Set().Key(k).Value(lockVals[k]).Nx().Get().Px(rca.lockTTL).Build())
+		cmds = append(cmds, rca.client.B().Set().Key(k).Value(lockVals[k]).Nx().Get().Px(rca.lockTTL).Build())
 	}
-	resps := rca.client.DoMulti(ctx, *cmdsP...)
+	resps := rca.client.DoMulti(ctx, cmds...)
 	// Drain every response: DoMulti has already executed all SET NXs in the
 	// pipeline, so an early return would leak the later acquires for lockTTL.
 	// IsRedisNil = acquired; nil = NX rejected; other = propagate.
@@ -517,14 +525,12 @@ func (rca *cacheAside) runSlotSets(ctx context.Context, stmts map[uint16]keyOrde
 		wg sync.WaitGroup
 	)
 	for _, kos := range stmts {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			sr := rca.runSlotSet(ctx, kos)
 			mu.Lock()
 			results = append(results, sr)
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 	return results
@@ -576,9 +582,7 @@ func (rca *cacheAside) unlockMulti(ctx context.Context, lockVals map[string]stri
 	}
 	var wg sync.WaitGroup
 	for slot, stmts := range delStmts {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			execsP := luaExecPool.Get(len(stmts))
 			defer luaExecPool.Put(execsP)
 			execs := *execsP
@@ -592,7 +596,7 @@ func (rca *cacheAside) unlockMulti(ctx context.Context, lockVals map[string]stri
 					rca.logger.Error("failed to unlock key in batch", "key", stmts[i].key, "slot", slot, "error", err)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

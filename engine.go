@@ -23,10 +23,11 @@ const (
 
 var (
 	cacheableTTLPool = poolx.NewSlice(func() []rueidis.CacheableTTL { return make([]rueidis.CacheableTTL, 0, 16) })
-	commandsPool     = poolx.NewSlice(func() []rueidis.Completed { return make([]rueidis.Completed, 0, 16) })
-	luaExecPool      = poolx.NewSlice(func() []rueidis.LuaExec { return make([]rueidis.LuaExec, 0, 16) })
-	stringPool       = poolx.NewSlice(func() []string { return make([]string, 0, 16) })
-	chanPool         = poolx.NewSlice(func() []<-chan struct{} { return make([]<-chan struct{}, 0, 16) })
+	// No pool for []rueidis.Completed: on ctx cancel, DoMulti returns while
+	// rueidis's writer goroutine still reads the slice, so recycling it crashes.
+	luaExecPool = poolx.NewSlice(func() []rueidis.LuaExec { return make([]rueidis.LuaExec, 0, 16) })
+	stringPool  = poolx.NewSlice(func() []string { return make([]string, 0, 16) })
+	chanPool    = poolx.NewSlice(func() []<-chan struct{} { return make([]<-chan struct{}, 0, 16) })
 )
 
 // lockEntry tracks a key's wait channel and its TTL timer. cancel and
@@ -244,13 +245,7 @@ func (rca *cacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 }
 
 func (rca *cacheAside) nextLockPollDelay() time.Duration {
-	maxDelay := rca.lockTTL / 10
-	if maxDelay < minLockPollDelay {
-		maxDelay = minLockPollDelay
-	}
-	if maxDelay > maxLockPollDelay {
-		maxDelay = maxLockPollDelay
-	}
+	maxDelay := min(max(rca.lockTTL/10, minLockPollDelay), maxLockPollDelay)
 	if maxDelay >= rca.lockTTL && rca.lockTTL > 0 {
 		maxDelay = rca.lockTTL / 2
 		if maxDelay <= 0 {
