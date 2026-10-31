@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,9 +32,9 @@ func TestCache_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "close-stress:" + uuid.New().String()
 
 	_, err = client.Get(ctx, time.Second, key, func(_ context.Context, _ string) (string, error) {
@@ -92,9 +92,9 @@ func TestCache_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "clean-miss:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
@@ -109,7 +109,7 @@ func TestCache_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 }
 
 // TestCache_GetMulti_CleanMissEmitsNoFalseLockLost is the multi-key
-// counterpart: catches runSlotSet CAS-interpretation regressions.
+// counterpart: catches setMultiWithLock CAS-interpretation regressions.
 func TestCache_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	t.Parallel()
 	skipIfNoRedis(t)
@@ -121,9 +121,9 @@ func TestCache_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	suffix := uuid.New().String()
 	keys := []string{"multi-clean:1:" + suffix, "multi-clean:2:" + suffix}
 	want := map[string]string{keys[0]: "v1", keys[1]: "v2"}
@@ -154,9 +154,9 @@ func TestCache_EmptyValueIsCacheHit(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	pca := redcache.NewString[string](conn, redcache.StringCodec{})
+	pca := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "empty-hit:" + uuid.New().String()
 
 	require.NoError(t, pca.ForceSet(ctx, 10*time.Second, key, ""))
@@ -176,7 +176,7 @@ func TestCache_EmptyValueIsCacheHit(t *testing.T) {
 func TestCache_Set_RollbackPreservesEmptyValue(t *testing.T) {
 	t.Parallel()
 	pca, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "rollback-empty:" + uuid.New().String()
 
@@ -204,7 +204,7 @@ func TestCache_Set_RollbackPreservesEmptyValue(t *testing.T) {
 func TestCache_Set_RollbackPreservesPTTL(t *testing.T) {
 	t.Parallel()
 	pca, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "rollback-pttl:" + uuid.New().String()
 
@@ -230,7 +230,7 @@ func TestCache_Set_RollbackPreservesPTTL(t *testing.T) {
 	assert.Equal(t, "__redcache:v1:0:v", val, "rollback should restore the original captured (envelope-wrapped) value")
 }
 
-// TestCache_GetMulti_CASMismatchDropsKey verifies runSlotSet drops keys
+// TestCache_GetMulti_CASMismatchDropsKey verifies setMultiWithLock drops keys
 // with a stolen lock (CAS Lua returned 0) and emits LockLost.
 func TestCache_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	t.Parallel()
@@ -243,9 +243,9 @@ func TestCache_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	pca := redcache.NewString[string](conn, redcache.StringCodec{})
+	pca := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key1 := "cas:1:" + uuid.New().String()
 	key2 := "cas:2:" + uuid.New().String()
 	forcedVal := "forced:" + uuid.New().String()
@@ -279,9 +279,9 @@ func TestCache_Set_RollbackSurvivesContextCancel(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	bg := context.Background()
+	bg := t.Context()
 	key := "rollback-cancel:" + uuid.New().String()
 	originalVal := "original:" + uuid.New().String()
 
@@ -340,4 +340,124 @@ func TestGetMulti_CancelMidPipelineDoesNotCrash(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// A leader that exits on error has written nothing, so no invalidation will
+// arrive; the next caller in the same process must not park on its stale
+// local entry until lockTTL.
+func TestGet_ErroredLeaderDoesNotStallNextCaller(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}, redcache.WithLockTTL(3*time.Second))
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	cache := redcache.New(conn, redcache.StringCodec{})
+	dead, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	key := "errored-leader:" + uuid.New().String()
+	load := func(context.Context, string) (string, error) { return "v", nil }
+	_, err = cache.Get(dead, time.Minute, key, load)
+	require.Error(t, err)
+	start := time.Now()
+	v, err := cache.Get(t.Context(), time.Minute, key, load)
+	require.NoError(t, err)
+	assert.Equal(t, "v", v)
+	assert.Less(t, time.Since(start), time.Second, "Get stalled on the errored leader's entry")
+
+	keys := []string{"errored-leader:" + uuid.New().String()}
+	loadMulti := func(context.Context, []string) (map[string]string, error) {
+		return map[string]string{keys[0]: "v"}, nil
+	}
+	_, err = cache.GetMulti(dead, time.Minute, keys, loadMulti)
+	require.Error(t, err)
+	start = time.Now()
+	m, err := cache.GetMulti(t.Context(), time.Minute, keys, loadMulti)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{keys[0]: "v"}, m)
+	assert.Less(t, time.Since(start), time.Second, "GetMulti stalled on the errored leader's entry")
+}
+
+// After a disconnect rueidis invalidates everything with a nil message; local
+// entries from before it must not make the next miss wait out lockTTL.
+func TestGet_DisconnectInvalidatesLocalEntries(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}, redcache.WithLockTTL(3*time.Second))
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	other, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}, DisableCache: true})
+	require.NoError(t, err)
+	t.Cleanup(other.Close)
+	cache := redcache.New(conn, redcache.StringCodec{})
+	ctx := t.Context()
+	key := "disconnect:" + uuid.New().String()
+	load := func(context.Context, string) (string, error) { return "v", nil }
+
+	_, err = cache.Get(ctx, time.Minute, key, load)
+	require.NoError(t, err)
+	_, err = cache.Get(ctx, time.Minute, key, load) // a hit leaves a local entry alive
+	require.NoError(t, err)
+
+	id, err := conn.Client().Do(ctx, conn.Client().B().ClientId().Build()).AsInt64()
+	require.NoError(t, err)
+	_ = other.Do(ctx, other.B().ClientKill().Id(id).Build()).Error()
+	require.NoError(t, other.Do(ctx, other.B().Del().Key(key).Build()).Error())
+
+	require.Eventually(t, func() bool {
+		start := time.Now()
+		v, err := cache.Get(ctx, time.Minute, key, load)
+		return err == nil && v == "v" && time.Since(start) < time.Second
+	}, 2*time.Second, 50*time.Millisecond)
+}
+
+// Set/SetMulti register local wait entries too. A writer that fails before any
+// Redis write (here: cancelled ctx on the first read) must release the entries
+// it created, or the next Get on the key parks on one until lockTTL.
+func TestSet_ErroredWriterDoesNotStallNextGet(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}, redcache.WithLockTTL(3*time.Second))
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	cache := redcache.New(conn, redcache.StringCodec{})
+	dead, cancel := context.WithCancel(t.Context())
+	cancel()
+	load := func(context.Context, string) (string, error) { return "v", nil }
+	loadMulti := func(_ context.Context, ks []string) (map[string]string, error) {
+		m := make(map[string]string, len(ks))
+		for _, k := range ks {
+			m[k] = "v"
+		}
+		return m, nil
+	}
+
+	tests := []struct {
+		name  string
+		write func(key string) error
+		read  func(key string) error
+	}{
+		{"set then get", func(k string) error { return cache.Set(dead, time.Minute, k, load) }, func(k string) error {
+			_, err := cache.Get(t.Context(), time.Minute, k, load)
+			return err
+		}},
+		{"setmulti then get", func(k string) error { return cache.SetMulti(dead, time.Minute, []string{k}, loadMulti) }, func(k string) error {
+			_, err := cache.Get(t.Context(), time.Minute, k, load)
+			return err
+		}},
+		{"setmulti then getmulti", func(k string) error { return cache.SetMulti(dead, time.Minute, []string{k}, loadMulti) }, func(k string) error {
+			_, err := cache.GetMulti(t.Context(), time.Minute, []string{k}, loadMulti)
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			key := "errored-writer:" + uuid.New().String()
+			require.Error(t, tt.write(key))
+			start := time.Now()
+			require.NoError(t, tt.read(key))
+			assert.Less(t, time.Since(start), time.Second, "read stalled on the errored writer's entry")
+		})
+	}
 }

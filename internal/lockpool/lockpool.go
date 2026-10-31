@@ -5,8 +5,7 @@ package lockpool
 import (
 	"strconv"
 	"sync/atomic"
-
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // Pool generates unique lock values by combining a fixed instance UUID with an
@@ -18,15 +17,11 @@ type Pool struct {
 }
 
 // New creates a Pool with the given lock prefix (e.g., "__redcache:lock:").
-func New(prefix string) (*Pool, error) {
-	id, err := uuid.NewV7()
-	if err != nil {
-		return nil, err
-	}
+func New(prefix string) *Pool {
 	return &Pool{
 		prefix:     prefix,
-		instanceID: id.String(),
-	}, nil
+		instanceID: uuid.NewV7().String(),
+	}
 }
 
 // Generate returns a unique lock value: prefix + instanceID + ":" + counter.

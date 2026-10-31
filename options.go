@@ -35,7 +35,7 @@ type config struct {
 	refreshQueueSize     int
 }
 
-// Option configures a cache. Options are applied in order; later wins.
+// Option configures a Conn. Options are applied in order; later wins.
 type Option func(*config)
 
 // WithLockTTL bounds both how long a Redis lock survives and how long callers

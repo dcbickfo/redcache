@@ -22,7 +22,7 @@ func TestNew_NilCodecPanics(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
 
-	require.Panics(t, func() { redcache.New[string, int](conn, nil, redcache.JSONCodec[int]{}) },
+	require.Panics(t, func() { redcache.NewKeyed(conn, nil, redcache.JSONCodec{}) },
 		"New must panic on a nil keyCodec")
 }
 
@@ -31,7 +31,7 @@ func TestNew_NilCodecPanics(t *testing.T) {
 func TestWrite_InvalidTTLRejected(t *testing.T) {
 	t.Parallel()
 	cache, _ := makeClient(t, []string{"127.0.0.1:6379"})
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_, err := cache.Get(ctx, 0, "k", func(context.Context, string) (string, error) {
 		t.Fatal("Get loader must not run for invalid ttl")
@@ -43,7 +43,7 @@ func TestWrite_InvalidTTLRejected(t *testing.T) {
 		return nil, nil
 	})
 	require.ErrorIs(t, err, redcache.ErrInvalidTTL)
-	_, _, err = cache.Peek(ctx, 0, "k")
+	_, _, err = cache.Peek[string, string](ctx, 0, "k")
 	require.ErrorIs(t, err, redcache.ErrInvalidTTL)
 	require.ErrorIs(t, cache.ForceSet(ctx, 0, "k", "v"), redcache.ErrInvalidTTL)
 	require.ErrorIs(t, cache.Set(ctx, -1, "k",

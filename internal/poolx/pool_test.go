@@ -4,7 +4,7 @@ import "testing"
 
 func TestSliceGetReusesUnderlyingArray(t *testing.T) {
 	t.Parallel()
-	pool := NewSlice(func() []int { return make([]int, 0, 8) })
+	var pool Slice[int]
 
 	h := pool.Get(4)
 	if len(*h) != 4 || cap(*h) < 4 {
@@ -25,7 +25,7 @@ func TestSliceGetReusesUnderlyingArray(t *testing.T) {
 
 func TestSliceGetCapStartsEmpty(t *testing.T) {
 	t.Parallel()
-	pool := NewSlice(func() []string { return make([]string, 0, 4) })
+	var pool Slice[string]
 	h := pool.GetCap(8)
 	if len(*h) != 0 {
 		t.Fatalf("GetCap len=%d, want 0", len(*h))
@@ -37,10 +37,9 @@ func TestSliceGetCapStartsEmpty(t *testing.T) {
 
 func TestSlicePutDropsOversized(t *testing.T) {
 	t.Parallel()
-	pool := NewSlice(func() []byte { return make([]byte, 0, 4) })
+	var pool Slice[byte]
 
-	huge := make([]byte, maxCap+1)
-	pool.Put(&huge)
+	pool.Put(new(make([]byte, maxCap+1)))
 
 	h := pool.Get(2)
 	if cap(*h) > maxCap {
@@ -50,7 +49,7 @@ func TestSlicePutDropsOversized(t *testing.T) {
 
 func TestSliceGetGrowsWhenInsufficient(t *testing.T) {
 	t.Parallel()
-	pool := NewSlice(func() []int { return make([]int, 0, 2) })
+	var pool Slice[int]
 	h := pool.Get(16)
 	if cap(*h) < 16 {
 		t.Fatalf("Get should grow, got cap=%d", cap(*h))
@@ -59,7 +58,7 @@ func TestSliceGetGrowsWhenInsufficient(t *testing.T) {
 
 func TestSliceGetCapAppendUpdates(t *testing.T) {
 	t.Parallel()
-	pool := NewSlice(func() []int { return make([]int, 0, 4) })
+	var pool Slice[int]
 	h := pool.GetCap(4)
 	*h = append(*h, 1, 2, 3, 4)
 	if len(*h) != 4 {

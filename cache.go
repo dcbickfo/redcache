@@ -4,74 +4,41 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 	"unsafe"
 
 	"github.com/redis/rueidis"
 )
 
-// Cache is the typed cache-aside surface: a generic interface over a key type K
-// and value type V, and a pure operational handle. Read methods run the
-// stampede-protected lock loop; write methods populate every subscribed client's
-// cache. It carries no lifecycle or raw-client access — those live on the owning
-// Conn (see Open/New) — so a Cache is safe to inject into code that should not be
-// able to close the shared connection, and trivial to fake in tests.
-type Cache[K comparable, V any] interface {
-	// Get returns the cached value for k, calling fn on a miss. Only one caller
-	// across all processes runs fn for a given key; the rest wait on the
-	// resulting invalidation. Decode errors on read are wrapped with ErrDecode.
-	Get(ctx context.Context, ttl time.Duration, k K, fn func(context.Context, K) (V, error)) (V, error)
-	// GetMulti returns cached values for keys, calling fn for misses. fn must
-	// return a value for every key it is given; an omitted key fails the call
-	// with ErrMissingValue. SETs are grouped by Redis cluster slot. A decode
-	// error aborts the batch (wrapped with ErrDecode).
-	GetMulti(ctx context.Context, ttl time.Duration, keys []K, fn func(context.Context, []K) (map[K]V, error)) (map[K]V, error)
-	// Peek is a read-only, client-side-cached lookup with no loader and no lock.
-	// It returns (value, true, nil) on a cached hit, (zero, false, nil) on a miss
-	// or when the key currently holds a lock value, and (zero, false, err) on a
-	// real Redis or decode error. ttl is the client-side-cache subscription TTL,
-	// like Get.
-	Peek(ctx context.Context, ttl time.Duration, k K) (V, bool, error)
-	// Set populates k via fn under a write lock, writing the value to every
-	// subscribed client. On callback error the prior value is restored.
-	Set(ctx context.Context, ttl time.Duration, k K, fn func(context.Context, K) (V, error)) error
-	// SetMulti populates keys via fn under write locks. Partial failures surface
-	// as *BatchKeyError[K] via errors.As; a key fn omits is restored to its prior
-	// value and fails with ErrMissingValue.
-	SetMulti(ctx context.Context, ttl time.Duration, keys []K, fn func(context.Context, []K) (map[K]V, error)) error
-	// ForceSet writes v unconditionally, bypassing locks. In-progress Get
-	// callers on the same key retry transparently and observe the force-set
-	// value; in-progress Set callers receive ErrLockLost and their pending set
-	// is abandoned (not retried).
-	ForceSet(ctx context.Context, ttl time.Duration, k K, v V) error
-	// ForceSetMulti writes values unconditionally. Encode failures are collected
-	// per-key; successfully-encoded entries are still written. Partial failures
-	// surface as *BatchKeyError[K].
-	ForceSetMulti(ctx context.Context, ttl time.Duration, values map[K]V) error
-	// Del removes a key, triggering invalidation on all subscribed clients.
-	Del(ctx context.Context, k K) error
-	// DelMulti removes keys, triggering invalidation.
-	DelMulti(ctx context.Context, keys []K) error
-	// Touch sets the TTL of a cached value. No-ops on a missing key or lock
-	// value. Clients caching the key are invalidated and re-fetch it (with the
-	// new TTL) on their next read.
-	Touch(ctx context.Context, ttl time.Duration, k K) error
-	// TouchMulti extends the TTL of cached values, with the same invalidation
-	// behavior as Touch.
-	TouchMulti(ctx context.Context, ttl time.Duration, keys []K) error
+// Conn owns one rueidis client, its invalidation stream, and a lock namespace.
+// Every Cache derived from it shares the single client and invalidation
+// subscription. Lifecycle stays on the Conn: open it once and close it when
+// done with all derived caches.
+type Conn struct {
+	core engine
 }
 
-// Conn owns one rueidis client, its invalidation stream, and a lock namespace.
-// Derive typed cache views over it with New, NewString, or NewBytes — they all
-// share the single client and invalidation subscription. Lifecycle stays on the
-// Conn: open it once, derive all the views you need, and close the Conn when
-// done with all of them.
-type Conn struct {
-	core *cacheAside
+// engine is the string-typed cache-aside backend. cacheAside implements it over
+// Redis; memEngine (OpenMemory) implements it in-process for tests.
+type engine interface {
+	Client() rueidis.Client
+	Close()
+	get(ctx context.Context, ttl time.Duration, key string, fn func(context.Context, string) (string, error)) (string, error)
+	getMulti(ctx context.Context, ttl time.Duration, keys []string, fn func(context.Context, []string) (map[string]string, error)) (map[string]string, error)
+	peek(ctx context.Context, ttl time.Duration, key string) (string, bool, error)
+	set(ctx context.Context, ttl time.Duration, key string, fn func(context.Context, string) (string, error)) error
+	setMulti(ctx context.Context, ttl time.Duration, keys []string, fn func(context.Context, []string) (map[string]string, error)) error
+	forceSet(ctx context.Context, ttl time.Duration, key, value string) error
+	forceSetMulti(ctx context.Context, ttl time.Duration, values map[string]string) error
+	del(ctx context.Context, key string) error
+	delMulti(ctx context.Context, keys ...string) error
+	touch(ctx context.Context, ttl time.Duration, key string) error
+	touchMulti(ctx context.Context, ttl time.Duration, keys ...string) error
 }
 
 // Open builds a Conn with its own rueidis.Client (wired for invalidation).
-// Derive typed views with New/NewString/NewBytes.
+// Construct caches over it with New, NewKeyed, or NewBytes.
 func Open(clientOption rueidis.ClientOption, opts ...Option) (*Conn, error) {
 	cfg := newConfig(opts...)
 	core, err := newCacheAside(clientOption, cfg)
@@ -81,102 +48,240 @@ func Open(clientOption rueidis.ClientOption, opts ...Option) (*Conn, error) {
 	return &Conn{core: core}, nil
 }
 
-// Close closes the underlying engine and client. Idempotent. Closes every view
-// derived from this Conn too, since they share the client.
+// Close closes the underlying engine and client. Idempotent. It also closes
+// every cache constructed over this Conn because they share the client.
 func (c *Conn) Close() { c.core.Close() }
 
-// Client returns the underlying rueidis.Client, shared by every view.
+// Client returns the underlying rueidis.Client, shared by every cache. It is
+// nil for a Conn from OpenMemory.
 func (c *Conn) Client() rueidis.Client { return c.core.Client() }
 
-// New derives a typed Cache[K, V] view over c with its own key/value codecs. The
-// view shares c's client and invalidation stream and is a pure operational
-// handle — lifecycle (Close) and the raw-client escape hatch live on the Conn,
-// not on the view, so a view is safe to hand to code that should not be able to
-// tear the connection down. Deriving a view does no I/O and cannot fail;
-// keyCodec and valCodec must be non-nil (passing nil panics — a programmer error).
-func New[K comparable, V any](c *Conn, keyCodec KeyCodec[K], valCodec Codec[V]) Cache[K, V] {
+// Cache is a cache-aside handle. It owns one KeyCodec and one value Codec;
+// every operation infers its key and value types independently, so a single
+// Cache can store different Go types under keys of different Go types. Codec
+// compatibility with each operation's K and V is checked by the codecs at call
+// time. Lifecycle and raw-client access remain on the owning Conn.
+type Cache struct {
+	core     engine
+	keyCodec KeyCodec
+	valCodec Codec
+	// keyCodecIsString is set when keyCodec is StringKeyCodec; operations whose
+	// K has underlying type string then alias keys instead of encoding them.
+	keyCodecIsString bool
+	// valCodecIsString is set when valCodec is StringCodec; operations whose V
+	// is string then skip the codec and pass the immutable payload through.
+	valCodecIsString bool
+}
+
+// New constructs a Cache over c with StringKeyCodec and the given value codec.
+// It does no I/O. Passing a nil codec panics because it is a programmer error.
+func New(c *Conn, valCodec Codec) *Cache {
+	return NewKeyed(c, StringKeyCodec{}, valCodec)
+}
+
+// NewKeyed is New with an explicit KeyCodec, for key types StringKeyCodec does
+// not handle.
+func NewKeyed(c *Conn, keyCodec KeyCodec, valCodec Codec) *Cache {
 	if keyCodec == nil || valCodec == nil {
 		panic("redcache: keyCodec and valCodec must not be nil")
 	}
-	return &cache[K, V]{
-		core:          c.core,
-		keyCodec:      keyCodec,
-		valCodec:      valCodec,
-		keyIsString:   isStringKeyCodec[K](keyCodec),
-		valueIsString: isStringValueCodec[V](valCodec),
+	_, keyCodecIsString := keyCodec.(StringKeyCodec)
+	_, valCodecIsString := valCodec.(StringCodec)
+	return &Cache{
+		core:             c.core,
+		keyCodec:         keyCodec,
+		valCodec:         valCodec,
+		keyCodecIsString: keyCodecIsString,
+		valCodecIsString: valCodecIsString,
 	}
 }
 
-// NewString is New with StringKeyCodec preset (enabling the K=string fast path).
-func NewString[V any](c *Conn, valCodec Codec[V]) Cache[string, V] {
-	return New[string, V](c, StringKeyCodec{}, valCodec)
+// NewBytes is New with UnsafeBytesCodec preset. Decoded byte slices alias
+// borrowed cache memory and must not be mutated or retained after the call.
+func NewBytes(c *Conn) *Cache {
+	return New(c, UnsafeBytesCodec{})
 }
 
-// NewBytes is NewString with UnsafeBytesCodec — a zero-copy raw []byte view. The
-// decoded slice aliases borrowed memory; do not mutate or retain it.
-func NewBytes(c *Conn) Cache[string, []byte] {
-	return NewString[[]byte](c, UnsafeBytesCodec{})
-}
-
-// cache is the concrete generic implementation of Cache[K, V]. It encodes K/V
-// and delegates to the unexported string-typed engine (*cacheAside). One engine
-// may back many cache views with different K/V and codecs (see Conn/New).
+// cache is an operation-scoped typed view over Cache. It encodes K/V and
+// delegates to the unexported string-typed engine (*cacheAside).
 type cache[K comparable, V any] struct {
-	core     *cacheAside
-	keyCodec KeyCodec[K]
-	valCodec Codec[V]
-	// keyIsString is set when keyCodec is StringKeyCodec; multi-key paths then
-	// alias []K↔[]string instead of building a reverse-lookup map.
+	core     engine
+	keyCodec KeyCodec
+	valCodec Codec
+	// keyIsString is set when keyCodec is StringKeyCodec and K's underlying
+	// type is string; key paths then alias K↔string instead of encoding.
 	keyIsString bool
-	// valueIsString is set when valCodec is StringCodec; value encode/decode
-	// can then return the immutable string payload directly without byte copies.
+	// valueIsString is set when valCodec is StringCodec and V is string; value
+	// encode/decode then return the immutable string payload without copies.
 	valueIsString bool
 }
 
-var _ Cache[string, []byte] = (*cache[string, []byte])(nil)
+func viewFor[K comparable, V any](c *Cache) cache[K, V] {
+	var zero V
+	_, vIsString := any(zero).(string)
+	return cache[K, V]{
+		core:          c.core,
+		keyCodec:      c.keyCodec,
+		valCodec:      c.valCodec,
+		keyIsString:   c.keyCodecIsString && reflect.TypeFor[K]().Kind() == reflect.String,
+		valueIsString: c.valCodecIsString && vIsString,
+	}
+}
+
+// Get returns the cached value for k, calling fn on a miss. Only one caller
+// across all processes runs fn for a given key; the rest wait on invalidation.
+// V is inferred from fn. Decode errors are wrapped with ErrDecode.
+func (c *Cache) Get[K comparable, V any](
+	ctx context.Context,
+	ttl time.Duration,
+	k K,
+	fn func(context.Context, K) (V, error),
+) (V, error) {
+	return viewFor[K, V](c).Get(ctx, ttl, k, fn)
+}
+
+// GetMulti returns cached values for keys, calling fn for misses. V is inferred
+// from fn. fn must return a value for every key it is given; an omitted key
+// fails the call with ErrMissingValue. Each phase is one pipeline, which the
+// cluster client splits per node; a decode error aborts the batch and is
+// wrapped with ErrDecode.
+func (c *Cache) GetMulti[K comparable, V any](
+	ctx context.Context,
+	ttl time.Duration,
+	keys []K,
+	fn func(context.Context, []K) (map[K]V, error),
+) (map[K]V, error) {
+	return viewFor[K, V](c).GetMulti(ctx, ttl, keys, fn)
+}
+
+// Peek is a read-only, client-side-cached lookup with no loader and no lock.
+// The caller must supply both K and V (as Peek[K, V]) because Peek has no
+// value argument from which Go can infer V. It returns (value, true, nil) on a hit, (zero, false, nil) on a miss
+// or lock value, and (zero, false, err) on a Redis or decode error. ttl is the
+// client-side-cache subscription TTL, like Get.
+func (c *Cache) Peek[K comparable, V any](ctx context.Context, ttl time.Duration, k K) (V, bool, error) {
+	return viewFor[K, V](c).Peek(ctx, ttl, k)
+}
+
+// Set populates k via fn under a write lock, writing the value to every
+// subscribed client. V is inferred from fn. On callback error the prior value
+// is restored.
+func (c *Cache) Set[K comparable, V any](
+	ctx context.Context,
+	ttl time.Duration,
+	k K,
+	fn func(context.Context, K) (V, error),
+) error {
+	return viewFor[K, V](c).Set(ctx, ttl, k, fn)
+}
+
+// SetMulti populates keys via fn under write locks. V is inferred from fn.
+// Partial failures surface as *BatchKeyError[K] via errors.As; a key fn omits
+// is restored to its prior value and fails with ErrMissingValue.
+func (c *Cache) SetMulti[K comparable, V any](
+	ctx context.Context,
+	ttl time.Duration,
+	keys []K,
+	fn func(context.Context, []K) (map[K]V, error),
+) error {
+	return viewFor[K, V](c).SetMulti(ctx, ttl, keys, fn)
+}
+
+// ForceSet writes v unconditionally, bypassing locks. V is inferred from v.
+// In-progress Get callers on the same key retry and observe the new value;
+// in-progress Set callers receive ErrLockLost and abandon their pending write.
+func (c *Cache) ForceSet[K comparable, V any](ctx context.Context, ttl time.Duration, k K, v V) error {
+	return viewFor[K, V](c).ForceSet(ctx, ttl, k, v)
+}
+
+// ForceSetMulti writes values unconditionally. K and V are inferred from
+// values; pass them explicitly when values is an untyped nil map.
+// Encode failures are collected per key and successful entries are still
+// written; partial failures surface as *BatchKeyError[K].
+func (c *Cache) ForceSetMulti[K comparable, V any](ctx context.Context, ttl time.Duration, values map[K]V) error {
+	return viewFor[K, V](c).ForceSetMulti(ctx, ttl, values)
+}
+
+// Del removes k and triggers invalidation on subscribed clients.
+func (c *Cache) Del[K comparable](ctx context.Context, k K) error {
+	return viewFor[K, struct{}](c).Del(ctx, k)
+}
+
+// DelMulti removes keys and triggers invalidation on subscribed clients.
+func (c *Cache) DelMulti[K comparable](ctx context.Context, keys []K) error {
+	return viewFor[K, struct{}](c).DelMulti(ctx, keys)
+}
+
+// Touch updates the TTL of a cached value. It is a no-op for a missing key or
+// lock value. Clients caching the key are invalidated and re-fetch it with the
+// new TTL on their next read.
+func (c *Cache) Touch[K comparable](ctx context.Context, ttl time.Duration, k K) error {
+	return viewFor[K, struct{}](c).Touch(ctx, ttl, k)
+}
+
+// TouchMulti updates the TTL of cached values, with the same behavior as Touch.
+func (c *Cache) TouchMulti[K comparable](ctx context.Context, ttl time.Duration, keys []K) error {
+	return viewFor[K, struct{}](c).TouchMulti(ctx, ttl, keys)
+}
 
 func validateTTL(ttl time.Duration) error {
-	if ttl <= 0 {
+	if ttl < time.Millisecond {
 		return ErrInvalidTTL
 	}
 	return nil
 }
 
-// isStringKeyCodec reports whether keyCodec is StringKeyCodec, which guarantees
-// K=string and so gates the unsafe []K↔[]string fast path.
-func isStringKeyCodec[K comparable](keyCodec KeyCodec[K]) bool {
-	_, ok := any(keyCodec).(StringKeyCodec)
-	return ok
+func (c cache[K, V]) encodeKey(k K) (string, error) {
+	if c.keyIsString {
+		return asString(k), nil
+	}
+	return c.keyCodec.EncodeKey(k)
 }
 
-func isStringValueCodec[V any](valCodec Codec[V]) bool {
-	_, codecOK := any(valCodec).(StringCodec)
-	var zero V
-	_, valueOK := any(zero).(string)
-	return codecOK && valueOK
-}
-
-func (c *cache[K, V]) encodeValue(v V) (string, error) {
+// encodeValue encodes v for the Redis key encKey, naming the key on error.
+func (c cache[K, V]) encodeValue(encKey string, v V) (string, error) {
 	if c.valueIsString {
 		return any(v).(string), nil
 	}
 	b, err := c.valCodec.Encode(v)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("redcache: encode value for key %q: %w", encKey, err)
 	}
 	return bytesToString(b), nil
 }
 
-func (c *cache[K, V]) decodeValue(payload string) (V, error) {
+// decodeValue decodes the payload stored at encKey. Errors wrap ErrDecode.
+func (c cache[K, V]) decodeValue(encKey, payload string) (V, error) {
 	if c.valueIsString {
 		return any(payload).(V), nil
 	}
-	return c.valCodec.Decode(stringToBytes(payload))
+	var v V
+	if err := c.valCodec.Decode(stringToBytes(payload), &v); err != nil {
+		var zero V
+		return zero, fmt.Errorf("redcache: decode key %q: %w: %w", encKey, ErrDecode, err)
+	}
+	return v, nil
+}
+
+// encodingLoader adapts fn to the engine's string loader for k, encoding the
+// value fn returns.
+func (c cache[K, V]) encodingLoader(
+	k K,
+	encKey string,
+	fn func(ctx context.Context, k K) (V, error),
+) func(context.Context, string) (string, error) {
+	return func(ctx context.Context, _ string) (string, error) {
+		v, err := fn(ctx, k)
+		if err != nil {
+			return "", err
+		}
+		return c.encodeValue(encKey, v)
+	}
 }
 
 // Get returns the cached value for k, calling fn on a miss. Decode errors on
 // read are wrapped with ErrDecode and leave the cached entry intact.
-func (c *cache[K, V]) Get(
+func (c cache[K, V]) Get(
 	ctx context.Context,
 	ttl time.Duration,
 	k K,
@@ -186,45 +291,30 @@ func (c *cache[K, V]) Get(
 	if err := validateTTL(ttl); err != nil {
 		return zero, err
 	}
-	encKey, err := c.keyCodec.EncodeKey(k)
+	encKey, err := c.encodeKey(k)
 	if err != nil {
-		return zero, fmt.Errorf("redcache: encode key: %w", err)
+		return zero, encodeKeyError(err)
 	}
 
-	raw, err := c.core.get(ctx, ttl, encKey, func(ctx context.Context, _ string) (string, error) {
-		v, ferr := fn(ctx, k)
-		if ferr != nil {
-			return "", ferr
-		}
-		enc, eerr := c.encodeValue(v)
-		if eerr != nil {
-			return "", fmt.Errorf("redcache: encode value: %w", eerr)
-		}
-		return enc, nil
-	})
+	raw, err := c.core.get(ctx, ttl, encKey, c.encodingLoader(k, encKey, fn))
 	if err != nil {
 		return zero, err
 	}
-
-	v, derr := c.decodeValue(raw)
-	if derr != nil {
-		return zero, fmt.Errorf("redcache: decode key %q: %w: %w", encKey, ErrDecode, derr)
-	}
-	return v, nil
+	return c.decodeValue(encKey, raw)
 }
 
 // Peek is a read-only, client-side-cached lookup with no loader and no lock.
 // Returns (value, true, nil) on a cached hit, (zero, false, nil) on a miss or a
 // lock value, and (zero, false, err) on a real Redis or decode error. Decode
 // errors are wrapped with ErrDecode like Get.
-func (c *cache[K, V]) Peek(ctx context.Context, ttl time.Duration, k K) (V, bool, error) {
+func (c cache[K, V]) Peek(ctx context.Context, ttl time.Duration, k K) (V, bool, error) {
 	var zero V
 	if err := validateTTL(ttl); err != nil {
 		return zero, false, err
 	}
-	encKey, err := c.keyCodec.EncodeKey(k)
+	encKey, err := c.encodeKey(k)
 	if err != nil {
-		return zero, false, fmt.Errorf("redcache: encode key: %w", err)
+		return zero, false, encodeKeyError(err)
 	}
 
 	raw, ok, err := c.core.peek(ctx, ttl, encKey)
@@ -235,37 +325,37 @@ func (c *cache[K, V]) Peek(ctx context.Context, ttl time.Duration, k K) (V, bool
 		return zero, false, nil
 	}
 
-	v, derr := c.decodeValue(raw)
-	if derr != nil {
-		return zero, false, fmt.Errorf("redcache: decode key %q: %w: %w", encKey, ErrDecode, derr)
+	v, err := c.decodeValue(encKey, raw)
+	if err != nil {
+		return zero, false, err
 	}
 	return v, true, nil
 }
 
 // Del removes a key, triggering invalidation on all subscribed clients.
-func (c *cache[K, V]) Del(ctx context.Context, k K) error {
-	encKey, err := c.keyCodec.EncodeKey(k)
+func (c cache[K, V]) Del(ctx context.Context, k K) error {
+	encKey, err := c.encodeKey(k)
 	if err != nil {
-		return fmt.Errorf("redcache: encode key: %w", err)
+		return encodeKeyError(err)
 	}
 	return c.core.del(ctx, encKey)
 }
 
 // Touch sets the TTL of a cached value.
-func (c *cache[K, V]) Touch(ctx context.Context, ttl time.Duration, k K) error {
+func (c cache[K, V]) Touch(ctx context.Context, ttl time.Duration, k K) error {
 	if err := validateTTL(ttl); err != nil {
 		return err
 	}
-	encKey, err := c.keyCodec.EncodeKey(k)
+	encKey, err := c.encodeKey(k)
 	if err != nil {
-		return fmt.Errorf("redcache: encode key: %w", err)
+		return encodeKeyError(err)
 	}
 	return c.core.touch(ctx, ttl, encKey)
 }
 
 // GetMulti returns cached values for keys, calling fn for misses. A decode
 // error on any read returns wrapped with ErrDecode and aborts the batch.
-func (c *cache[K, V]) GetMulti(
+func (c cache[K, V]) GetMulti(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []K,
@@ -277,75 +367,13 @@ func (c *cache[K, V]) GetMulti(
 	if len(keys) == 0 {
 		return map[K]V{}, nil
 	}
-	dst := make(map[K]V, len(keys))
-	if c.keyIsString {
-		return c.getMultiStringInto(ctx, ttl, keys, nil, dst, fn)
-	}
-	return c.getMultiKeyedInto(ctx, ttl, keys, dst, fn)
-}
-
-// K=string fast path: aliases keys to []string, skips the reverse-lookup map.
-func (c *cache[K, V]) getMultiStringInto(
-	ctx context.Context,
-	ttl time.Duration,
-	keys []K,
-	encKeys []string,
-	dst map[K]V,
-	fn func(ctx context.Context, missing []K) (map[K]V, error),
-) (map[K]V, error) {
-	if encKeys == nil {
-		encKeys = asStringSlice(keys)
-	}
-
-	raw, err := c.core.getMulti(ctx, ttl, encKeys, func(ctx context.Context, missingEnc []string) (map[string]string, error) {
-		result, ferr := fn(ctx, asKSlice[K](missingEnc))
-		if ferr != nil {
-			return nil, ferr
-		}
-		return c.encodeMultiResult(result)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	for s, payload := range raw {
-		v, derr := c.decodeValue(payload)
-		if derr != nil {
-			return nil, fmt.Errorf("redcache: decode key %q: %w: %w", s, ErrDecode, derr)
-		}
-		dst[asK[K](s)] = v
-	}
-	return dst, nil
-}
-
-func (c *cache[K, V]) getMultiKeyedInto(
-	ctx context.Context,
-	ttl time.Duration,
-	keys []K,
-	dst map[K]V,
-	fn func(ctx context.Context, missing []K) (map[K]V, error),
-) (map[K]V, error) {
 	encKeys, byEnc, err := c.encodeKeysWithLookup(keys)
 	if err != nil {
 		return nil, err
 	}
-	return c.getMultiEncodedInto(ctx, ttl, encKeys, byEnc, dst, fn)
-}
 
-func (c *cache[K, V]) getMultiEncodedInto(
-	ctx context.Context,
-	ttl time.Duration,
-	encKeys []string,
-	byEnc map[string]K,
-	dst map[K]V,
-	fn func(ctx context.Context, missing []K) (map[K]V, error),
-) (map[K]V, error) {
 	raw, err := c.core.getMulti(ctx, ttl, encKeys, func(ctx context.Context, missingEnc []string) (map[string]string, error) {
-		missingK := make([]K, len(missingEnc))
-		for i, s := range missingEnc {
-			missingK[i] = byEnc[s]
-		}
-		result, ferr := fn(ctx, missingK)
+		result, ferr := fn(ctx, byEnc.keys(missingEnc))
 		if ferr != nil {
 			return nil, ferr
 		}
@@ -355,14 +383,15 @@ func (c *cache[K, V]) getMultiEncodedInto(
 		return nil, err
 	}
 
+	dst := make(map[K]V, len(keys))
 	for s, payload := range raw {
-		k, ok := byEnc[s]
+		k, ok := byEnc.key(s)
 		if !ok {
 			continue
 		}
-		v, derr := c.decodeValue(payload)
-		if derr != nil {
-			return nil, fmt.Errorf("redcache: decode key %q: %w: %w", s, ErrDecode, derr)
+		v, err := c.decodeValue(s, payload)
+		if err != nil {
+			return nil, err
 		}
 		dst[k] = v
 	}
@@ -370,11 +399,11 @@ func (c *cache[K, V]) getMultiEncodedInto(
 }
 
 // DelMulti removes keys, triggering invalidation.
-func (c *cache[K, V]) DelMulti(ctx context.Context, keys []K) error {
+func (c cache[K, V]) DelMulti(ctx context.Context, keys []K) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	encKeys, err := c.encodeKeys(keys)
+	encKeys, _, err := c.encodeKeysWithLookup(keys)
 	if err != nil {
 		return err
 	}
@@ -382,69 +411,65 @@ func (c *cache[K, V]) DelMulti(ctx context.Context, keys []K) error {
 }
 
 // TouchMulti extends the TTL of cached values.
-func (c *cache[K, V]) TouchMulti(ctx context.Context, ttl time.Duration, keys []K) error {
+func (c cache[K, V]) TouchMulti(ctx context.Context, ttl time.Duration, keys []K) error {
 	if err := validateTTL(ttl); err != nil {
 		return err
 	}
 	if len(keys) == 0 {
 		return nil
 	}
-	encKeys, err := c.encodeKeys(keys)
+	encKeys, _, err := c.encodeKeysWithLookup(keys)
 	if err != nil {
 		return err
 	}
 	return c.core.touchMulti(ctx, ttl, encKeys...)
 }
 
-func (c *cache[K, V]) encodeKeys(keys []K) ([]string, error) {
+// encodeKeysWithLookup encodes keys and returns the lookup that maps encoded
+// keys back to K. The lookup is nil when K is string, in which case keys are
+// aliased as []string without copying.
+func (c cache[K, V]) encodeKeysWithLookup(keys []K) ([]string, keyLookup[K], error) {
 	if c.keyIsString {
-		return asStringSlice(keys), nil
+		return asStringSlice(keys), nil, nil
 	}
-	encKeys, _, err := c.encodeKeysWithLookup(keys)
-	return encKeys, err
-}
-
-func (c *cache[K, V]) encodeKeysWithLookup(keys []K) ([]string, map[string]K, error) {
 	encKeys := make([]string, len(keys))
-	byEnc := make(map[string]K, len(keys))
+	byEnc := make(keyLookup[K], len(keys))
 	for i, k := range keys {
-		s, err := c.keyCodec.EncodeKey(k)
+		s, err := c.encodeKey(k)
 		if err != nil {
-			return nil, nil, fmt.Errorf("redcache: encode key: %w", err)
+			return nil, nil, encodeKeyError(err)
 		}
-		if prev, ok := byEnc[s]; ok && prev != k {
-			return nil, nil, duplicateEncodedKeyError(s, prev, k)
+		if err := byEnc.record(s, k); err != nil {
+			return nil, nil, err
 		}
 		encKeys[i] = s
-		byEnc[s] = k
 	}
 	return encKeys, byEnc, nil
 }
 
-func (c *cache[K, V]) encodeMultiResult(result map[K]V) (map[string]string, error) {
-	out := make(map[string]string, len(result))
-	var byEnc map[string]K
-	if !c.keyIsString {
-		byEnc = make(map[string]K, len(result))
+// newKeyLookup returns an empty lookup sized for n keys, or nil when K is
+// string.
+func (c cache[K, V]) newKeyLookup(n int) keyLookup[K] {
+	if c.keyIsString {
+		return nil
 	}
+	return make(keyLookup[K], n)
+}
+
+func (c cache[K, V]) encodeMultiResult(result map[K]V) (map[string]string, error) {
+	out := make(map[string]string, len(result))
+	byEnc := c.newKeyLookup(len(result))
 	for k, v := range result {
-		var s string
-		if c.keyIsString {
-			s = asString(k)
-		} else {
-			ks, kerr := c.keyCodec.EncodeKey(k)
-			if kerr != nil {
-				return nil, fmt.Errorf("redcache: encode key: %w", kerr)
-			}
-			s = ks
-			if prev, ok := byEnc[s]; ok && prev != k {
-				return nil, duplicateEncodedKeyError(s, prev, k)
-			}
-			byEnc[s] = k
+		s, err := c.encodeKey(k)
+		if err != nil {
+			return nil, encodeKeyError(err)
 		}
-		enc, eerr := c.encodeValue(v)
-		if eerr != nil {
-			return nil, fmt.Errorf("redcache: encode value for key %q: %w", s, eerr)
+		if err := byEnc.record(s, k); err != nil {
+			return nil, err
+		}
+		enc, err := c.encodeValue(s, v)
+		if err != nil {
+			return nil, err
 		}
 		out[s] = enc
 	}
@@ -452,7 +477,7 @@ func (c *cache[K, V]) encodeMultiResult(result map[K]V) (map[string]string, erro
 }
 
 // Set populates the cache via fn under a write lock.
-func (c *cache[K, V]) Set(
+func (c cache[K, V]) Set(
 	ctx context.Context,
 	ttl time.Duration,
 	k K,
@@ -461,42 +486,32 @@ func (c *cache[K, V]) Set(
 	if err := validateTTL(ttl); err != nil {
 		return err
 	}
-	encKey, err := c.keyCodec.EncodeKey(k)
+	encKey, err := c.encodeKey(k)
 	if err != nil {
-		return fmt.Errorf("redcache: encode key: %w", err)
+		return encodeKeyError(err)
 	}
-	return c.core.set(ctx, ttl, encKey, func(ctx context.Context, _ string) (string, error) {
-		v, ferr := fn(ctx, k)
-		if ferr != nil {
-			return "", ferr
-		}
-		enc, eerr := c.encodeValue(v)
-		if eerr != nil {
-			return "", fmt.Errorf("redcache: encode value: %w", eerr)
-		}
-		return enc, nil
-	})
+	return c.core.set(ctx, ttl, encKey, c.encodingLoader(k, encKey, fn))
 }
 
 // ForceSet writes v unconditionally.
-func (c *cache[K, V]) ForceSet(ctx context.Context, ttl time.Duration, k K, v V) error {
+func (c cache[K, V]) ForceSet(ctx context.Context, ttl time.Duration, k K, v V) error {
 	if err := validateTTL(ttl); err != nil {
 		return err
 	}
-	encKey, err := c.keyCodec.EncodeKey(k)
+	encKey, err := c.encodeKey(k)
 	if err != nil {
-		return fmt.Errorf("redcache: encode key: %w", err)
+		return encodeKeyError(err)
 	}
-	enc, err := c.encodeValue(v)
+	enc, err := c.encodeValue(encKey, v)
 	if err != nil {
-		return fmt.Errorf("redcache: encode value: %w", err)
+		return err
 	}
 	return c.core.forceSet(ctx, ttl, encKey, enc)
 }
 
 // SetMulti populates the cache via fn under write locks. Partial failures
 // surface as *BatchKeyError[K].
-func (c *cache[K, V]) SetMulti(
+func (c cache[K, V]) SetMulti(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []K,
@@ -508,55 +523,13 @@ func (c *cache[K, V]) SetMulti(
 	if len(keys) == 0 {
 		return nil
 	}
-	if c.keyIsString {
-		return c.setMultiString(ctx, ttl, keys, fn)
-	}
-	return c.setMultiKeyed(ctx, ttl, keys, fn)
-}
-
-// K=string fast path: aliases keys to []string, skips the reverse-lookup map.
-func (c *cache[K, V]) setMultiString(
-	ctx context.Context,
-	ttl time.Duration,
-	keys []K,
-	fn func(ctx context.Context, keys []K) (map[K]V, error),
-) error {
-	encKeys := asStringSlice(keys)
-
-	err := c.core.setMulti(ctx, ttl, encKeys, func(ctx context.Context, encArg []string) (map[string]string, error) {
-		result, ferr := fn(ctx, asKSlice[K](encArg))
-		if ferr != nil {
-			return nil, ferr
-		}
-		return c.encodeMultiResult(result)
-	})
-	if err == nil {
-		return nil
-	}
-	var be *batchError
-	if !errors.As(err, &be) {
-		return err
-	}
-	return convertBatchErrorToTypedString[K](be)
-}
-
-func (c *cache[K, V]) setMultiKeyed(
-	ctx context.Context,
-	ttl time.Duration,
-	keys []K,
-	fn func(ctx context.Context, keys []K) (map[K]V, error),
-) error {
 	encKeys, byEnc, err := c.encodeKeysWithLookup(keys)
 	if err != nil {
 		return err
 	}
 
 	err = c.core.setMulti(ctx, ttl, encKeys, func(ctx context.Context, encArg []string) (map[string]string, error) {
-		argK := make([]K, len(encArg))
-		for i, s := range encArg {
-			argK[i] = byEnc[s]
-		}
-		result, ferr := fn(ctx, argK)
+		result, ferr := fn(ctx, byEnc.keys(encArg))
 		if ferr != nil {
 			return nil, ferr
 		}
@@ -565,8 +538,8 @@ func (c *cache[K, V]) setMultiKeyed(
 	if err == nil {
 		return nil
 	}
-	var be *batchError
-	if !errors.As(err, &be) {
+	be, ok := errors.AsType[*batchError](err)
+	if !ok {
 		return err
 	}
 	return convertBatchErrorToTyped(be, byEnc)
@@ -574,8 +547,9 @@ func (c *cache[K, V]) setMultiKeyed(
 
 // ForceSetMulti writes values unconditionally. Encode failures are collected
 // per-key; successfully-encoded entries are still written. Partial failures
-// (encode or write) surface as *BatchKeyError[K].
-func (c *cache[K, V]) ForceSetMulti(
+// (encode or write) surface as *BatchKeyError[K]. Two keys that encode to the
+// same Redis key fail the whole call before any write, as in SetMulti.
+func (c cache[K, V]) ForceSetMulti(
 	ctx context.Context,
 	ttl time.Duration,
 	values map[K]V,
@@ -586,76 +560,24 @@ func (c *cache[K, V]) ForceSetMulti(
 	if len(values) == 0 {
 		return nil
 	}
-	if c.keyIsString {
-		return c.forceSetMultiString(ctx, ttl, values)
-	}
-	return c.forceSetMultiKeyed(ctx, ttl, values)
-}
-
-// K=string fast path: aliases each K to string, skips the reverse-lookup map.
-func (c *cache[K, V]) forceSetMultiString(
-	ctx context.Context,
-	ttl time.Duration,
-	values map[K]V,
-) error {
 	encVals := make(map[string]string, len(values))
 	failed := make(map[K]error)
+	byEnc := c.newKeyLookup(len(values))
 	for k, v := range values {
-		s := asString(k)
-		enc, err := c.encodeValue(v)
+		s, err := c.encodeKey(k)
 		if err != nil {
-			failed[k] = fmt.Errorf("redcache: encode value: %w", err)
+			failed[k] = encodeKeyError(err)
 			continue
 		}
-		encVals[s] = enc
-	}
-	if len(encVals) == 0 {
-		return newBatchKeyError(failed, nil)
-	}
-	err := c.core.forceSetMulti(ctx, ttl, encVals)
-	if err == nil && len(failed) == 0 {
-		return nil
-	}
-	succeeded := mergeForceSetResultString[K](err, encVals, failed)
-	return newBatchKeyError(failed, succeeded)
-}
-
-func (c *cache[K, V]) forceSetMultiKeyed(
-	ctx context.Context,
-	ttl time.Duration,
-	values map[K]V,
-) error {
-	encVals := make(map[string]string, len(values))
-	failed := make(map[K]error)
-	seen := make(map[string]K, len(values))
-	byEnc := make(map[string]K, len(values))
-	duplicate := false
-	for k, v := range values {
-		s, err := c.keyCodec.EncodeKey(k)
-		if err != nil {
-			failed[k] = fmt.Errorf("redcache: encode key: %w", err)
-			continue
+		if err := byEnc.record(s, k); err != nil {
+			return err
 		}
-		if prev, ok := seen[s]; ok && prev != k {
-			err := duplicateEncodedKeyError(s, prev, k)
-			failed[prev] = err
+		enc, err := c.encodeValue(s, v)
+		if err != nil {
 			failed[k] = err
-			delete(encVals, s)
-			delete(byEnc, s)
-			duplicate = true
-			continue
-		}
-		seen[s] = k
-		enc, err := c.encodeValue(v)
-		if err != nil {
-			failed[k] = fmt.Errorf("redcache: encode value: %w", err)
 			continue
 		}
 		encVals[s] = enc
-		byEnc[s] = k
-	}
-	if duplicate {
-		return newBatchKeyError(failed, nil)
 	}
 	if len(encVals) == 0 {
 		return newBatchKeyError(failed, nil)
@@ -664,103 +586,108 @@ func (c *cache[K, V]) forceSetMultiKeyed(
 	if err == nil && len(failed) == 0 {
 		return nil
 	}
-	succeeded := mergeForceSetResult(err, byEnc, failed)
+	succeeded := mergeForceSetResult(err, encVals, byEnc, failed)
 	return newBatchKeyError(failed, succeeded)
 }
 
 // mergeForceSetResult merges per-key outcomes from forceSetMulti into failed
-// (encode errors are preserved) and returns the succeeded slice. A non-*batchError
-// err is treated as a total failure.
-func mergeForceSetResult[K comparable](err error, byEnc map[string]K, failed map[K]error) []K {
-	succeeded := make([]K, 0, len(byEnc))
+// (encode errors are preserved) and returns the succeeded slice. encVals holds
+// the entries that were sent to Redis. A non-*batchError err is treated as a
+// total failure.
+func mergeForceSetResult[K comparable](err error, encVals map[string]string, byEnc keyLookup[K], failed map[K]error) []K {
+	succeeded := make([]K, 0, len(encVals))
 	if err == nil {
-		for _, k := range byEnc {
+		for s := range encVals {
+			k, _ := byEnc.key(s)
 			succeeded = append(succeeded, k)
 		}
 		return succeeded
 	}
-	var be *batchError
-	if !errors.As(err, &be) {
-		for _, k := range byEnc {
+	be, ok := errors.AsType[*batchError](err)
+	if !ok {
+		for s := range encVals {
+			k, _ := byEnc.key(s)
 			failed[k] = err
 		}
 		return succeeded
 	}
 	for s, ferr := range be.Failed {
-		if k, ok := byEnc[s]; ok {
+		if k, ok := byEnc.key(s); ok {
 			failed[k] = ferr
 		}
 	}
 	for _, s := range be.Succeeded {
-		if k, ok := byEnc[s]; ok {
+		if k, ok := byEnc.key(s); ok {
 			succeeded = append(succeeded, k)
 		}
 	}
 	return succeeded
 }
 
-func duplicateEncodedKeyError[K comparable](encoded string, first K, second K) error {
-	return fmt.Errorf("redcache: encode key: duplicate encoded key %q for keys %v and %v", encoded, first, second)
-}
-
 // convertBatchErrorToTyped maps a *batchError's string keys back to typed K
 // using byEnc. Keys not in byEnc are silently skipped — surfacing a partial
 // BatchKeyError is safer than panicking on an invariant violation.
-func convertBatchErrorToTyped[K comparable](be *batchError, byEnc map[string]K) error {
+func convertBatchErrorToTyped[K comparable](be *batchError, byEnc keyLookup[K]) error {
 	failedK := make(map[K]error, len(be.Failed))
 	for s, ferr := range be.Failed {
-		if k, ok := byEnc[s]; ok {
+		if k, ok := byEnc.key(s); ok {
 			failedK[k] = ferr
 		}
 	}
 	succeededK := make([]K, 0, len(be.Succeeded))
 	for _, s := range be.Succeeded {
-		if k, ok := byEnc[s]; ok {
+		if k, ok := byEnc.key(s); ok {
 			succeededK = append(succeededK, k)
 		}
 	}
 	return newBatchKeyError(failedK, succeededK)
 }
 
-// convertBatchErrorToTypedString is the K=string fast path: cast each encoded
-// key directly to K via asK.
-func convertBatchErrorToTypedString[K comparable](be *batchError) error {
-	failedK := make(map[K]error, len(be.Failed))
-	for s, ferr := range be.Failed {
-		failedK[asK[K](s)] = ferr
+// keyLookup maps encoded Redis keys back to the caller's K. A nil keyLookup
+// means K is string, so an encoded key already is the caller's key.
+type keyLookup[K comparable] map[string]K
+
+// key returns the caller's key for the encoded key enc.
+func (m keyLookup[K]) key(enc string) (K, bool) {
+	if m == nil {
+		return asK[K](enc), true
 	}
-	succeededK := make([]K, 0, len(be.Succeeded))
-	for _, s := range be.Succeeded {
-		succeededK = append(succeededK, asK[K](s))
-	}
-	return newBatchKeyError(failedK, succeededK)
+	k, ok := m[enc]
+	return k, ok
 }
 
-// mergeForceSetResultString is the K=string fast path of mergeForceSetResult.
-// encVals provides the successfully-encoded set (its keys are encoded keys, K
-// is the same string).
-func mergeForceSetResultString[K comparable](err error, encVals map[string]string, failed map[K]error) []K {
-	succeeded := make([]K, 0, len(encVals))
-	if err == nil {
-		for s := range encVals {
-			succeeded = append(succeeded, asK[K](s))
-		}
-		return succeeded
+// keys returns the caller's keys for encs, aliasing encs when K is string.
+func (m keyLookup[K]) keys(encs []string) []K {
+	if m == nil {
+		return asKSlice[K](encs)
 	}
-	var be *batchError
-	if !errors.As(err, &be) {
-		for s := range encVals {
-			failed[asK[K](s)] = err
-		}
-		return succeeded
+	out := make([]K, len(encs))
+	for i, s := range encs {
+		out[i] = m[s]
 	}
-	for s, ferr := range be.Failed {
-		failed[asK[K](s)] = ferr
+	return out
+}
+
+// record registers enc as the encoding of k. It fails when a different key
+// already encodes to enc. It is a no-op on a nil keyLookup, where encoding is
+// the identity and collisions are impossible.
+func (m keyLookup[K]) record(enc string, k K) error {
+	if m == nil {
+		return nil
 	}
-	for _, s := range be.Succeeded {
-		succeeded = append(succeeded, asK[K](s))
+	if prev, ok := m[enc]; ok && prev != k {
+		return duplicateEncodedKeyError(enc, prev, k)
 	}
-	return succeeded
+	m[enc] = k
+	return nil
+}
+
+func encodeKeyError(err error) error {
+	return fmt.Errorf("redcache: encode key: %w", err)
+}
+
+func duplicateEncodedKeyError[K comparable](encoded string, first K, second K) error {
+	return fmt.Errorf("redcache: encode key: duplicate encoded key %q for keys %v and %v", encoded, first, second)
 }
 
 // The asK / asString family aliases between K and string under the invariant

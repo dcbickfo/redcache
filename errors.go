@@ -3,8 +3,8 @@ package redcache
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -12,9 +12,10 @@ import (
 // before the value could be written.
 var ErrLockLost = errors.New("lock was lost or expired before value could be set")
 
-// ErrInvalidTTL is returned by TTL-bearing methods when ttl is not positive.
-// Redis rejects PX 0; use Del to remove an entry.
-var ErrInvalidTTL = errors.New("redcache: ttl must be positive; use Del to remove")
+// ErrInvalidTTL is returned by TTL-bearing methods when ttl is under one
+// millisecond, the resolution of Redis PX (which rejects PX 0); use Del to
+// remove an entry.
+var ErrInvalidTTL = errors.New("redcache: ttl must be at least 1ms; use Del to remove")
 
 // batchError carries per-key results of a multi-key engine operation, keyed by
 // the encoded Redis key. It is engine-internal: the typed layer converts it to
@@ -35,7 +36,7 @@ func (e *batchError) Error() string {
 	for key := range e.Failed {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	for _, key := range keys {
 		fmt.Fprintf(&b, "; key %q: %s", key, e.Failed[key])
 	}
@@ -103,7 +104,10 @@ var ErrDecode = errors.New("decode failed")
 
 // BatchKeyError is the typed, key-preserving error returned via errors.As from
 // the multi-key write methods (SetMulti, ForceSetMulti) on partial failure. K
-// is the cache's key type. All accessors are nil-safe.
+// is the operation's key type (the element type of its keys, or the key type of
+// its values map), not a property of the Cache: match it with that same K.
+// Unwrap exposes every per-key error to errors.Is and errors.As. All accessors
+// are nil-safe.
 type BatchKeyError[K comparable] struct {
 	Failed    map[K]error
 	Succeeded []K
@@ -127,11 +131,20 @@ func (e *BatchKeyError[K]) Error() string {
 	for k := range e.Failed {
 		pairs = append(pairs, kv{k: k, s: fmt.Sprintf("%v", k)})
 	}
-	sort.SliceStable(pairs, func(i, j int) bool { return pairs[i].s < pairs[j].s })
+	slices.SortStableFunc(pairs, func(a, b kv) int { return strings.Compare(a.s, b.s) })
 	for _, p := range pairs {
 		fmt.Fprintf(&b, "; key %q: %s", p.s, e.Failed[p.k])
 	}
 	return b.String()
+}
+
+// Unwrap returns the per-key errors, so errors.Is(err, context.Canceled) or
+// errors.Is(err, ErrLockLost) matches when any key failed that way.
+func (e *BatchKeyError[K]) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	return slices.Collect(maps.Values(e.Failed))
 }
 
 // HasFailures reports whether any key failed.

@@ -8,12 +8,11 @@ import (
 	"math/rand/v2"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,7 +34,7 @@ func skipIfNoRedis(tb testing.TB) {
 // makeClient opens a Conn and derives a string view over it. The Conn is closed
 // via t.Cleanup, so callers need no teardown of their own. The Conn is returned
 // too for tests that inspect Redis directly (conn.Client()).
-func makeClient(t *testing.T, addr []string) (redcache.Cache[string, string], *redcache.Conn) {
+func makeClient(t *testing.T, addr []string) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
 	skipIfNoRedis(t)
 	conn, err := redcache.Open(
@@ -48,13 +47,24 @@ func makeClient(t *testing.T, addr []string) (redcache.Cache[string, string], *r
 		t.Fatal(err)
 	}
 	t.Cleanup(conn.Close)
-	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
+	return redcache.New(conn, redcache.StringCodec{}), conn
+}
+
+// mapLoader returns a multi-key loader that serves each requested key from vals.
+func mapLoader(vals map[string]string) func(context.Context, []string) (map[string]string, error) {
+	return func(_ context.Context, keys []string) (map[string]string, error) {
+		res := make(map[string]string, len(keys))
+		for _, k := range keys {
+			res[k] = vals[k]
+		}
+		return res, nil
+	}
 }
 
 func TestCache_Get(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 	called := false
@@ -84,7 +94,7 @@ func TestCache_Get(t *testing.T) {
 func TestCache_GetMulti(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -95,13 +105,10 @@ func TestCache_GetMulti(t *testing.T) {
 	}
 	called := false
 
+	load := mapLoader(keyAndVals)
 	cb := func(ctx context.Context, keys []string) (map[string]string, error) {
 		called = true
-		res := make(map[string]string, len(keys))
-		for _, key := range keys {
-			res[key] = keyAndVals[key]
-		}
-		return res, nil
+		return load(ctx, keys)
 	}
 
 	res, err := client.GetMulti(ctx, time.Second*10, keys, cb)
@@ -123,7 +130,7 @@ func TestCache_GetMulti(t *testing.T) {
 func TestCache_GetMulti_Partial(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -194,9 +201,9 @@ func TestCache_GetMulti_IgnoresLoaderExtraKeys(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	extra := "extra:" + uuid.New().String()
 
@@ -217,7 +224,7 @@ func TestCache_GetMulti_IgnoresLoaderExtraKeys(t *testing.T) {
 func TestCache_GetMulti_PartLock(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -228,13 +235,10 @@ func TestCache_GetMulti_PartLock(t *testing.T) {
 	}
 	called := false
 
+	load := mapLoader(keyAndVals)
 	cb := func(ctx context.Context, keys []string) (map[string]string, error) {
 		called = true
-		res := make(map[string]string, len(keys))
-		for _, key := range keys {
-			res[key] = keyAndVals[key]
-		}
-		return res, nil
+		return load(ctx, keys)
 	}
 
 	innerClient := conn.Client()
@@ -261,7 +265,7 @@ func TestCache_GetMulti_PartLock(t *testing.T) {
 func TestCache_Del(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
@@ -286,7 +290,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 	client, _ := makeClient(t, addr)
 	client2, _ := makeClient(t, addr)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	keyAndVals := make(map[string]string)
 	for i := range 6 {
 		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
@@ -296,13 +300,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 		keys = append(keys, k)
 	}
 
-	cb := func(ctx context.Context, keys []string) (map[string]string, error) {
-		res := make(map[string]string, len(keys))
-		for _, key := range keys {
-			res[key] = keyAndVals[key]
-		}
-		return res, nil
-	}
+	cb := mapLoader(keyAndVals)
 
 	wg := sync.WaitGroup{}
 
@@ -349,7 +347,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			out, err := client.GetMulti(
-				context.Background(),
+				t.Context(),
 				time.Second*10,
 				keys[3:],
 				cb)
@@ -361,7 +359,7 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			out, err := client2.GetMulti(
-				context.Background(),
+				t.Context(),
 				time.Second*10,
 				keys[3:],
 				cb)
@@ -374,271 +372,78 @@ func TestCBWrapper_GetMultiCheckConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
-func TestCBWrapper_GetMultiCheckConcurrentOverlapDifferentClients(t *testing.T) {
-	t.Parallel()
-
-	client1, _ := makeClient(t, addr)
-	client2, _ := makeClient(t, addr)
-	client3, _ := makeClient(t, addr)
-	client4, _ := makeClient(t, addr)
-
-	ctx := context.Background()
-	keyAndVals := make(map[string]string)
-	for i := range 6 {
-		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
-	}
-	keys := make([]string, 0, len(keyAndVals))
-	for k := range keyAndVals {
-		keys = append(keys, k)
-	}
-
-	cb := func(ctx context.Context, keys []string) (map[string]string, error) {
-		res := make(map[string]string, len(keys))
-		for _, key := range keys {
-			res[key] = keyAndVals[key]
-		}
-		return res, nil
-	}
-
-	wg := sync.WaitGroup{}
-
-	keys1 := []string{keys[0], keys[1], keys[3]}
-	expected1 := map[string]string{
-		keys[0]: keyAndVals[keys[0]],
-		keys[1]: keyAndVals[keys[1]],
-		keys[3]: keyAndVals[keys[3]],
-	}
-
-	keys2 := []string{keys[2], keys[4], keys[5]}
-	expected2 := map[string]string{
-		keys[2]: keyAndVals[keys[2]],
-		keys[4]: keyAndVals[keys[4]],
-		keys[5]: keyAndVals[keys[5]],
-	}
-
-	keys3 := []string{keys[0], keys[2], keys[4]}
-	expected3 := map[string]string{
-		keys[0]: keyAndVals[keys[0]],
-		keys[2]: keyAndVals[keys[2]],
-		keys[4]: keyAndVals[keys[4]],
-	}
-
-	keys4 := []string{keys[1], keys[3], keys[5]}
-	expected4 := map[string]string{
-		keys[1]: keyAndVals[keys[1]],
-		keys[3]: keyAndVals[keys[3]],
-		keys[5]: keyAndVals[keys[5]],
-	}
-
-	for range 100 {
-		wg.Add(4)
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys1)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client1.GetMulti(
-				ctx,
-				time.Second*10,
-				localKeys,
-				cb,
-			)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected1, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 1 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys2)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client2.GetMulti(
-				ctx,
-				time.Second*10,
-				localKeys,
-				cb,
-			)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected2, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 2 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys3)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client3.GetMulti(
-				context.Background(),
-				time.Second*10,
-				localKeys,
-				cb)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected3, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 3 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys4)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client4.GetMulti(
-				context.Background(),
-				time.Second*10,
-				localKeys,
-				cb)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected4, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 4 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
-			}
-		}()
-	}
-	wg.Wait()
-}
-
+// TestCBWrapper_GetMultiCheckConcurrentOverlap hammers overlapping GetMulti key
+// sets, spread across separate clients or all on one client.
 func TestCBWrapper_GetMultiCheckConcurrentOverlap(t *testing.T) {
 	t.Parallel()
 
-	client, _ := makeClient(t, addr)
+	for _, tt := range []struct {
+		name    string
+		clients int
+	}{
+		{"DifferentClients", 4},
+		{"SingleClient", 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	ctx := context.Background()
-	keyAndVals := make(map[string]string)
-	for i := range 6 {
-		keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
-	}
-	keys := make([]string, 0, len(keyAndVals))
-	for k := range keyAndVals {
-		keys = append(keys, k)
-	}
-
-	cb := func(ctx context.Context, keys []string) (map[string]string, error) {
-		res := make(map[string]string, len(keys))
-		for _, key := range keys {
-			res[key] = keyAndVals[key]
-		}
-		return res, nil
-	}
-
-	wg := sync.WaitGroup{}
-
-	keys1 := []string{keys[0], keys[1], keys[3]}
-	expected1 := map[string]string{
-		keys[0]: keyAndVals[keys[0]],
-		keys[1]: keyAndVals[keys[1]],
-		keys[3]: keyAndVals[keys[3]],
-	}
-
-	keys2 := []string{keys[2], keys[4], keys[5]}
-	expected2 := map[string]string{
-		keys[2]: keyAndVals[keys[2]],
-		keys[4]: keyAndVals[keys[4]],
-		keys[5]: keyAndVals[keys[5]],
-	}
-
-	keys3 := []string{keys[0], keys[2], keys[4]}
-	expected3 := map[string]string{
-		keys[0]: keyAndVals[keys[0]],
-		keys[2]: keyAndVals[keys[2]],
-		keys[4]: keyAndVals[keys[4]],
-	}
-
-	keys4 := []string{keys[1], keys[3], keys[5]}
-	expected4 := map[string]string{
-		keys[1]: keyAndVals[keys[1]],
-		keys[3]: keyAndVals[keys[3]],
-		keys[5]: keyAndVals[keys[5]],
-	}
-
-	for range 100 {
-		wg.Add(4)
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys1)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client.GetMulti(
-				ctx,
-				time.Second*10,
-				localKeys,
-				cb,
-			)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected1, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 1 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
+			clients := make([]*redcache.Cache, tt.clients)
+			for i := range clients {
+				clients[i], _ = makeClient(t, addr)
 			}
-		}()
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys2)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client.GetMulti(
-				ctx,
-				time.Second*10,
-				localKeys,
-				cb,
-			)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected2, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 2 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
+
+			ctx := t.Context()
+			keyAndVals := make(map[string]string)
+			for i := range 6 {
+				keyAndVals[fmt.Sprintf("key:%d:%s", i, uuid.New().String())] = fmt.Sprintf("val:%d:%s", i, uuid.New().String())
 			}
-		}()
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys3)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client.GetMulti(
-				context.Background(),
-				time.Second*10,
-				localKeys,
-				cb)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected3, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 3 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
+			keys := make([]string, 0, len(keyAndVals))
+			for k := range keyAndVals {
+				keys = append(keys, k)
 			}
-		}()
-		go func() {
-			defer wg.Done()
-			localKeys := slices.Clone(keys4)
-			rand.Shuffle(len(localKeys), func(i, j int) {
-				localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
-			})
-			out, err := client.GetMulti(
-				context.Background(),
-				time.Second*10,
-				localKeys,
-				cb)
-			assert.NoError(t, err)
-			if diff := cmp.Diff(expected4, out); diff != "" {
-				t.Errorf("GetMulti() mismatch in 4 (-want +got):\n%s", diff)
-				t.Errorf("got: %v", out)
+
+			cb := mapLoader(keyAndVals)
+
+			// Each group of key indexes overlaps the others pairwise.
+			groups := [][]int{{0, 1, 3}, {2, 4, 5}, {0, 2, 4}, {1, 3, 5}}
+
+			wg := sync.WaitGroup{}
+			for range 100 {
+				for g, idxs := range groups {
+					groupKeys := make([]string, len(idxs))
+					expected := make(map[string]string, len(idxs))
+					for i, idx := range idxs {
+						groupKeys[i] = keys[idx]
+						expected[keys[idx]] = keyAndVals[keys[idx]]
+					}
+					client := clients[g%len(clients)]
+
+					wg.Go(func() {
+						localKeys := slices.Clone(groupKeys)
+						rand.Shuffle(len(localKeys), func(i, j int) {
+							localKeys[i], localKeys[j] = localKeys[j], localKeys[i]
+						})
+						out, err := client.GetMulti(ctx, time.Second*10, localKeys, cb)
+						if err != nil {
+							t.Errorf("GetMulti() error in %d: %v", g+1, err)
+							return
+						}
+						if diff := cmp.Diff(expected, out); diff != "" {
+							t.Errorf("GetMulti() mismatch in %d (-want +got):\n%s", g+1, diff)
+							t.Errorf("got: %v", out)
+						}
+					})
+				}
 			}
-		}()
+			wg.Wait()
+		})
 	}
-	wg.Wait()
 }
 
 func TestCache_DelMulti(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	keyAndVals := make(map[string]string)
 	for i := range 3 {
@@ -668,7 +473,7 @@ func TestCache_DelMulti(t *testing.T) {
 func TestCache_Touch_ExtendsTTL(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "touch:" + uuid.New().String()
 
@@ -687,7 +492,7 @@ func TestCache_Touch_ExtendsTTL(t *testing.T) {
 func TestCache_Touch_NoOpOnMissing(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "touch-missing:" + uuid.New().String()
 	require.NoError(t, client.Touch(ctx, 5*time.Second, key), "Touch on missing key must succeed silently")
@@ -699,7 +504,7 @@ func TestCache_Touch_NoOpOnMissing(t *testing.T) {
 func TestCache_Touch_NoOpOnLockValue(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "touch-lock:" + uuid.New().String()
 	lockVal := "__redcache:lock:abc"
@@ -721,7 +526,7 @@ func TestCache_Touch_NoOpOnLockValue(t *testing.T) {
 func TestCache_TouchMulti_ExtendsTTLs(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	keys := []string{
 		"touchm:0:" + uuid.New().String(),
@@ -747,21 +552,21 @@ func TestCache_TouchMulti_ExtendsTTLs(t *testing.T) {
 func TestCache_TouchMulti_EmptyKeysIsNoOp(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	require.NoError(t, client.TouchMulti(context.Background(), 5*time.Second, nil))
+	require.NoError(t, client.TouchMulti[string](t.Context(), 5*time.Second, nil))
 }
 
 func TestCache_GetParentContextCancellation(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
 	// Lock the key so Get will wait.
 	innerClient := conn.Client()
 	lockVal := "__redcache:lock:" + uuid.New().String()
-	err := innerClient.Do(context.Background(), innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
+	err := innerClient.Do(t.Context(), innerClient.B().Set().Key(key).Value(lockVal).Nx().Get().Px(time.Second*30).Build()).Error()
 	require.True(t, rueidis.IsRedisNil(err))
 
 	go func() {
@@ -778,6 +583,29 @@ func TestCache_GetParentContextCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+// getConcurrently runs 400 concurrent Gets of key and asserts each returns want.
+func getConcurrently(
+	ctx context.Context,
+	t *testing.T,
+	client *redcache.Cache,
+	key, want string,
+	cb func(context.Context, string) (string, error),
+) {
+	t.Helper()
+	var wg sync.WaitGroup
+	for range 400 {
+		wg.Go(func() {
+			res, err := client.Get(ctx, time.Second*10, key, cb)
+			if err != nil {
+				t.Errorf("Get() error: %v", err)
+				return
+			}
+			assert.Equal(t, want, res)
+		})
+	}
+	wg.Wait()
+}
+
 // TestConcurrentRegisterRace stresses register() to guard the CompareAndDelete race.
 func TestConcurrentRegisterRace(t *testing.T) {
 	t.Parallel()
@@ -791,9 +619,9 @@ func TestConcurrentRegisterRace(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
@@ -808,35 +636,7 @@ func TestConcurrentRegisterRace(t *testing.T) {
 		return val, nil
 	}
 
-	wg := sync.WaitGroup{}
-	for range 100 {
-		wg.Add(4)
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-	}
-	wg.Wait()
+	getConcurrently(ctx, t, client, key, val, cb)
 
 	// Cap above: a register-race regression would let every Get re-fire the callback unboundedly.
 	mu.Lock()
@@ -851,7 +651,7 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
@@ -865,36 +665,7 @@ func TestConcurrentGetSameKeySingleClient(t *testing.T) {
 		return val, nil
 	}
 
-	wg := sync.WaitGroup{}
-	for range 100 {
-		wg.Add(4)
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-		go func() {
-			defer wg.Done()
-			res, err := client.Get(ctx, time.Second*10, key, cb)
-			assert.NoError(t, err)
-			assert.Equal(t, val, res)
-		}()
-	}
-
-	wg.Wait()
+	getConcurrently(ctx, t, client, key, val, cb)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -909,7 +680,7 @@ func TestCache_Get_LeaderNXFailure_WaitsForInvalidation(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 	val := "val:" + uuid.New().String()
 
@@ -959,7 +730,7 @@ func TestConcurrentInvalidation(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "key:" + uuid.New().String()
 
 	callCount := 0
@@ -1015,7 +786,7 @@ func TestConcurrentInvalidation(t *testing.T) {
 func TestCache_Get_CallbackError(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	cbErr := fmt.Errorf("callback failed")
@@ -1037,7 +808,7 @@ func TestCache_Get_CallbackError(t *testing.T) {
 func TestCache_GetMulti_CallbackError(t *testing.T) {
 	t.Parallel()
 	client, _ := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	keys := []string{
 		"key:0:" + uuid.New().String(),
@@ -1055,13 +826,7 @@ func TestCache_GetMulti_CallbackError(t *testing.T) {
 		keys[0]: "val:0:" + uuid.New().String(),
 		keys[1]: "val:1:" + uuid.New().String(),
 	}
-	res, err := client.GetMulti(ctx, time.Second*10, keys, func(ctx context.Context, ks []string) (map[string]string, error) {
-		out := make(map[string]string, len(ks))
-		for _, k := range ks {
-			out[k] = vals[k]
-		}
-		return out, nil
-	})
+	res, err := client.GetMulti(ctx, time.Second*10, keys, mapLoader(vals))
 	require.NoError(t, err)
 	if diff := cmp.Diff(vals, res); diff != "" {
 		t.Errorf("GetMulti() mismatch (-want +got):\n%s", diff)
@@ -1071,7 +836,7 @@ func TestCache_GetMulti_CallbackError(t *testing.T) {
 func TestCache_Close(t *testing.T) {
 	t.Parallel()
 	client, conn := makeClient(t, addr)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 
@@ -1121,9 +886,9 @@ func TestCache_CloseCancelsRefreshCallback(t *testing.T) {
 		redcache.WithRefreshTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
+	client := redcache.New(conn, redcache.StringCodec{})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "close-refresh:" + uuid.New().String()
 	// Wide TTL: the second Get must land past the refresh threshold (half the
 	// TTL) and well before expiry, or it takes the miss path instead.
@@ -1163,673 +928,6 @@ func TestCache_CloseCancelsRefreshCallback(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Close did not cancel the refresh callback promptly")
 	}
-}
-
-func makeRefreshClient(t *testing.T, addr []string, fraction float64) (redcache.Cache[string, string], *redcache.Conn) {
-	t.Helper()
-	skipIfNoRedis(t)
-	conn, err := redcache.Open(
-		rueidis.ClientOption{
-			InitAddress: addr,
-		},
-		redcache.WithLockTTL(time.Second*2),
-		redcache.WithRefreshAfterFraction(fraction),
-		// Disable XFetch sampling so tests assert exact refresh-vs-no-refresh
-		// outcomes; sampling is exercised by TestShouldRefresh_XFetch.
-		redcache.WithRefreshBeta(0),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(conn.Close)
-	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
-}
-
-func TestRefreshAhead_TriggersBackgroundRefresh(t *testing.T) {
-	t.Parallel()
-	// fraction=0.5 -> refresh once <50% TTL remaining.
-	client, _ := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
-
-	key := "key:" + uuid.New().String()
-	callCount := 0
-	var mu sync.Mutex
-
-	cb := func(_ context.Context, _ string) (string, error) {
-		mu.Lock()
-		callCount++
-		c := callCount
-		mu.Unlock()
-		return fmt.Sprintf("val-%d", c), nil
-	}
-
-	ttl := 2 * time.Second
-
-	res, err := client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-	assert.Equal(t, "val-1", res)
-
-	// Cross the refresh threshold.
-	time.Sleep(1200 * time.Millisecond)
-
-	res, err = client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-	assert.Equal(t, "val-1", res)
-
-	require.Eventually(t, func() bool {
-		v, e := client.Get(ctx, ttl, key, cb)
-		return e == nil && v == "val-2"
-	}, 2*time.Second, 10*time.Millisecond, "expected refreshed value after background refresh")
-
-	mu.Lock()
-	assert.Equal(t, 2, callCount, "fn should have been called exactly twice")
-	mu.Unlock()
-}
-
-func TestRefreshAhead_Dedup(t *testing.T) {
-	t.Parallel()
-	client, _ := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
-
-	key := "key:" + uuid.New().String()
-	var refreshCount int64
-	var mu sync.Mutex
-	firstCall := true
-
-	// Block the refresh callback so every concurrent Get is forced through
-	// the dedup decision before any refresh can complete.
-	refreshUnblock := make(chan struct{})
-
-	cb := func(_ context.Context, _ string) (string, error) {
-		mu.Lock()
-		if firstCall {
-			firstCall = false
-			mu.Unlock()
-			return "initial", nil
-		}
-		refreshCount++
-		mu.Unlock()
-		<-refreshUnblock
-		return "refreshed", nil
-	}
-
-	ttl := 2 * time.Second
-
-	_, err := client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-
-	time.Sleep(1200 * time.Millisecond)
-
-	var wg sync.WaitGroup
-	for range 20 {
-		wg.Go(func() {
-			res, err := client.Get(ctx, ttl, key, cb)
-			if err != nil {
-				t.Errorf("Get() error: %v", err)
-				return
-			}
-			assert.Equal(t, "initial", res)
-		})
-	}
-	wg.Wait()
-
-	// All 20 Gets have made their dedup decision; release the worker.
-	close(refreshUnblock)
-
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return refreshCount >= 1
-	}, 2*time.Second, 10*time.Millisecond, "refresh callback should fire")
-
-	mu.Lock()
-	assert.Equal(t, int64(1), refreshCount, "refresh callback should be called exactly once")
-	mu.Unlock()
-}
-
-func TestRefreshAhead_Disabled(t *testing.T) {
-	t.Parallel()
-	client, _ := makeClient(t, addr)
-	ctx := context.Background()
-
-	key := "key:" + uuid.New().String()
-	callCount := 0
-	var mu sync.Mutex
-
-	cb := func(_ context.Context, _ string) (string, error) {
-		mu.Lock()
-		callCount++
-		mu.Unlock()
-		return "val", nil
-	}
-
-	_, err := client.Get(ctx, 2*time.Second, key, cb)
-	require.NoError(t, err)
-
-	time.Sleep(1500 * time.Millisecond)
-
-	_, err = client.Get(ctx, 2*time.Second, key, cb)
-	require.NoError(t, err)
-
-	time.Sleep(300 * time.Millisecond)
-
-	mu.Lock()
-	assert.Equal(t, 1, callCount, "fn should only be called once with refresh-ahead disabled")
-	mu.Unlock()
-}
-
-func TestRefreshAhead_ErrorLogged(t *testing.T) {
-	t.Parallel()
-	client, _ := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
-
-	key := "key:" + uuid.New().String()
-	firstCall := true
-	var mu sync.Mutex
-
-	cb := func(_ context.Context, _ string) (string, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if firstCall {
-			firstCall = false
-			return "initial", nil
-		}
-		return "", fmt.Errorf("refresh failed")
-	}
-
-	ttl := 2 * time.Second
-
-	res, err := client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-	assert.Equal(t, "initial", res)
-
-	time.Sleep(1200 * time.Millisecond)
-
-	// Background refresh fails; stale value is still returned.
-	res, err = client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-	assert.Equal(t, "initial", res)
-
-	// Refresh goroutine logs the error rather than returning it.
-	time.Sleep(500 * time.Millisecond)
-
-	res, err = client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-	assert.Equal(t, "initial", res)
-}
-
-func TestRefreshAhead_PanicRecovered(t *testing.T) {
-	t.Parallel()
-	client, _ := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
-
-	key := "key:" + uuid.New().String()
-	var calls atomic.Int32
-
-	cb := func(_ context.Context, _ string) (string, error) {
-		n := calls.Add(1)
-		if n == 1 {
-			return "initial", nil
-		}
-		if n == 2 {
-			panic("simulated callback panic")
-		}
-		return "refreshed", nil
-	}
-
-	ttl := 2 * time.Second
-
-	res, err := client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-	assert.Equal(t, "initial", res)
-
-	// First refresh panics; worker must recover and stay alive.
-	time.Sleep(1200 * time.Millisecond)
-	res, err = client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-	assert.Equal(t, "initial", res)
-
-	require.Eventually(t, func() bool {
-		return calls.Load() >= 2
-	}, 2*time.Second, 10*time.Millisecond, "refresh callback should have been invoked")
-
-	// Wait past dedup TTL so the next refresh is not deduped.
-	time.Sleep(2500 * time.Millisecond)
-
-	key2 := "key:" + uuid.New().String()
-	res, err = client.Get(ctx, ttl, key2, cb)
-	require.NoError(t, err)
-	assert.Equal(t, "refreshed", res)
-
-	time.Sleep(1200 * time.Millisecond)
-	res, err = client.Get(ctx, ttl, key2, cb)
-	require.NoError(t, err)
-	assert.Equal(t, "refreshed", res)
-
-	// A dead worker would stall calls.Load() here.
-	require.Eventually(t, func() bool {
-		return calls.Load() >= 4
-	}, 2*time.Second, 10*time.Millisecond, "worker should still be alive to process refreshes")
-}
-
-func TestRefreshAhead_DoesNotStompLockValue(t *testing.T) {
-	t.Parallel()
-	client, conn := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
-
-	key := "key:" + uuid.New().String()
-	callbackStarted := make(chan struct{})
-	callbackProceed := make(chan struct{})
-	var calls atomic.Int32
-
-	cb := func(_ context.Context, _ string) (string, error) {
-		n := calls.Add(1)
-		if n == 1 {
-			return "initial", nil
-		}
-		close(callbackStarted)
-		<-callbackProceed
-		return "refreshed", nil
-	}
-
-	ttl := 2 * time.Second
-
-	_, err := client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-
-	time.Sleep(1200 * time.Millisecond)
-
-	_, err = client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-
-	select {
-	case <-callbackStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("refresh callback did not start")
-	}
-
-	// Swap the stale value for a lock-prefixed value mid-refresh, simulating
-	// a concurrent Get-on-miss winning the distributed lock.
-	lockVal := "__redcache:lock:race-winner"
-	require.NoError(t, conn.Client().Do(ctx,
-		conn.Client().B().Set().Key(key).Value(lockVal).Px(ttl).Build()).Error())
-
-	close(callbackProceed)
-
-	// Independent client for the post-Close read: Close tears down client's own
-	// connection, so we verify the stored value through a separate one.
-	verify, vErr := rueidis.NewClient(rueidis.ClientOption{InitAddress: addr})
-	require.NoError(t, vErr)
-	defer verify.Close()
-
-	// Drain the refresh worker so its post-callback Lua-CAS has either run or
-	// definitively skipped before we assert. Avoids a wall-clock race on slow CI.
-	conn.Close()
-
-	got, gErr := verify.Do(ctx, verify.B().Get().Key(key).Build()).ToString()
-	require.NoError(t, gErr)
-	assert.Equal(t, lockVal, got, "refresh-ahead must skip the SET when a lock value is present")
-}
-
-func TestRefreshAhead_DoesNotStompNewerRealValue(t *testing.T) {
-	t.Parallel()
-	client, conn := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
-
-	key := "key:" + uuid.New().String()
-	callbackStarted := make(chan struct{})
-	callbackProceed := make(chan struct{})
-	var calls atomic.Int32
-
-	cb := func(_ context.Context, _ string) (string, error) {
-		n := calls.Add(1)
-		if n == 1 {
-			return "initial", nil
-		}
-		close(callbackStarted)
-		<-callbackProceed
-		return "refreshed", nil
-	}
-
-	ttl := 2 * time.Second
-
-	_, err := client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-
-	time.Sleep(1200 * time.Millisecond)
-
-	_, err = client.Get(ctx, ttl, key, cb)
-	require.NoError(t, err)
-
-	select {
-	case <-callbackStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("refresh callback did not start")
-	}
-
-	require.NoError(t, client.ForceSet(ctx, ttl, key, "newer"))
-
-	close(callbackProceed)
-
-	verify, vErr := rueidis.NewClient(rueidis.ClientOption{InitAddress: addr})
-	require.NoError(t, vErr)
-	defer verify.Close()
-
-	conn.Close()
-
-	got, gErr := verify.Do(ctx, verify.B().Get().Key(key).Build()).ToString()
-	require.NoError(t, gErr)
-	assert.Equal(t, "__redcache:v1:0:newer", got, "refresh-ahead must not overwrite a newer real value")
-}
-
-func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
-	t.Parallel()
-	skipIfNoRedis(t)
-
-	open := func(t *testing.T, lockTTL time.Duration) (redcache.Cache[string, string], *redcache.Conn) {
-		t.Helper()
-		conn, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithLockTTL(lockTTL),
-			redcache.WithRefreshAfterFraction(0.5),
-			redcache.WithRefreshBeta(0),
-			redcache.WithRefreshWorkers(1),
-			redcache.WithRefreshQueueSize(4),
-			redcache.WithRefreshTimeout(2*time.Second),
-		)
-		require.NoError(t, err)
-		return redcache.NewString[string](conn, redcache.StringCodec{}), conn
-	}
-
-	client1, conn1 := open(t, 150*time.Millisecond)
-	client2, conn2 := open(t, 2*time.Second)
-	client3, conn3 := open(t, 2*time.Second)
-	t.Cleanup(conn1.Close)
-	t.Cleanup(conn2.Close)
-	t.Cleanup(conn3.Close)
-
-	ctx := context.Background()
-	key := "refresh-lock:" + uuid.New().String()
-	// Both refreshes must start while the value is still cached: after half
-	// the TTL, and (for the second) after client1's 150ms refresh lock lapses.
-	// With a 1s TTL that window was ~350ms, which CI load could miss; once the
-	// value expires, Get runs the blocking loader as a plain miss instead.
-	ttl := 3 * time.Second
-
-	_, err := client1.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
-		return "initial", nil
-	})
-	require.NoError(t, err)
-
-	triggerRefresh := func(
-		t *testing.T,
-		client redcache.Cache[string, string],
-		started <-chan struct{},
-		fn func(context.Context, string) (string, error),
-		failureMsg string,
-	) {
-		t.Helper()
-		var lastErr error
-		require.Eventually(t, func() bool {
-			_, lastErr = client.Get(ctx, ttl, key, fn)
-			if lastErr != nil {
-				return true
-			}
-			select {
-			case <-started:
-				return true
-			default:
-				return false
-			}
-		}, 5*time.Second, 20*time.Millisecond, failureMsg)
-		require.NoError(t, lastErr)
-		select {
-		case <-started:
-		default:
-			t.Fatal(failureMsg)
-		}
-	}
-
-	firstStarted := make(chan struct{})
-	startFirst := sync.OnceFunc(func() { close(firstStarted) })
-	firstProceed := make(chan struct{})
-	releaseFirst := sync.OnceFunc(func() { close(firstProceed) })
-	defer releaseFirst()
-	firstErr := errors.New("first refresh failed")
-	triggerRefresh(t, client1, firstStarted, func(context.Context, string) (string, error) {
-		startFirst()
-		<-firstProceed
-		return "", firstErr
-	}, "first refresh did not start")
-
-	secondStarted := make(chan struct{})
-	startSecond := sync.OnceFunc(func() { close(secondStarted) })
-	secondProceed := make(chan struct{})
-	releaseSecond := sync.OnceFunc(func() { close(secondProceed) })
-	defer releaseSecond()
-	triggerRefresh(t, client2, secondStarted, func(context.Context, string) (string, error) {
-		startSecond()
-		<-secondProceed
-		return "second", nil
-	}, "second refresh did not start")
-
-	releaseFirst()
-	time.Sleep(50 * time.Millisecond)
-
-	thirdStarted := make(chan struct{})
-	_, err = client3.Get(ctx, ttl, key, func(context.Context, string) (string, error) {
-		close(thirdStarted)
-		return "third", nil
-	})
-	require.NoError(t, err)
-
-	select {
-	case <-thirdStarted:
-		releaseSecond()
-		t.Fatal("third refresh started while the second refresh lock should still be owned")
-	case <-time.After(300 * time.Millisecond):
-	}
-
-	releaseSecond()
-}
-
-func TestRefreshAhead_GetMulti(t *testing.T) {
-	t.Parallel()
-	client, _ := makeRefreshClient(t, addr, 0.5)
-	ctx := context.Background()
-
-	keys := []string{
-		"key:0:" + uuid.New().String(),
-		"key:1:" + uuid.New().String(),
-	}
-	callCount := 0
-	var mu sync.Mutex
-
-	cb := func(_ context.Context, ks []string) (map[string]string, error) {
-		mu.Lock()
-		callCount++
-		c := callCount
-		mu.Unlock()
-		res := make(map[string]string, len(ks))
-		for _, k := range ks {
-			res[k] = fmt.Sprintf("val-%d", c)
-		}
-		return res, nil
-	}
-
-	ttl := 2 * time.Second
-
-	res, err := client.GetMulti(ctx, ttl, keys, cb)
-	require.NoError(t, err)
-	for _, k := range keys {
-		assert.Equal(t, "val-1", res[k])
-	}
-
-	time.Sleep(1200 * time.Millisecond)
-
-	res, err = client.GetMulti(ctx, ttl, keys, cb)
-	require.NoError(t, err)
-	for _, k := range keys {
-		assert.Equal(t, "val-1", res[k])
-	}
-
-	require.Eventually(t, func() bool {
-		v, e := client.GetMulti(ctx, ttl, keys, cb)
-		if e != nil {
-			return false
-		}
-		for _, k := range keys {
-			if v[k] != "val-2" {
-				return false
-			}
-		}
-		return true
-	}, 2*time.Second, 10*time.Millisecond, "expected refreshed values after background refresh")
-
-	mu.Lock()
-	assert.Equal(t, 2, callCount, "fn should have been called exactly twice")
-	mu.Unlock()
-}
-
-func TestRefreshAhead_Backpressure(t *testing.T) {
-	t.Parallel()
-	skipIfNoRedis(t)
-	// Tiny pool (1 worker, queue size 1) plus a sleeping callback so the queue fills fast.
-	conn, err := redcache.Open(
-		rueidis.ClientOption{InitAddress: addr},
-		redcache.WithLockTTL(time.Second*3),
-		redcache.WithRefreshAfterFraction(0.5),
-		redcache.WithRefreshBeta(0),
-		redcache.WithRefreshWorkers(1),
-		redcache.WithRefreshQueueSize(1),
-	)
-	require.NoError(t, err)
-	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
-	ctx := context.Background()
-
-	// Distinct keys so each triggers its own refresh.
-	const numKeys = 20
-	keys := make([]string, numKeys)
-	for i := range numKeys {
-		keys[i] = fmt.Sprintf("key:%d:%s", i, uuid.New().String())
-	}
-
-	ttl := 3 * time.Second
-	var refreshCount atomic.Int64
-
-	populateCb := func(_ context.Context, _ string) (string, error) {
-		return "initial", nil
-	}
-
-	// Populate all keys.
-	for _, key := range keys {
-		_, err := client.Get(ctx, ttl, key, populateCb)
-		require.NoError(t, err)
-	}
-
-	time.Sleep(1700 * time.Millisecond)
-
-	refreshCb := func(_ context.Context, _ string) (string, error) {
-		refreshCount.Add(1)
-		time.Sleep(500 * time.Millisecond) // keeps the single worker busy
-		return "refreshed", nil
-	}
-
-	// 1 worker + queue size 1 accepts ~2 jobs; the rest are dropped.
-	var wg sync.WaitGroup
-	for _, key := range keys {
-		k := key
-		wg.Go(func() {
-			res, err := client.Get(ctx, ttl, k, refreshCb)
-			if err != nil {
-				t.Errorf("Get() error: %v", err)
-				return
-			}
-			assert.Equal(t, "initial", res)
-		})
-	}
-	wg.Wait()
-
-	time.Sleep(1500 * time.Millisecond)
-
-	count := refreshCount.Load()
-	assert.Less(t, count, int64(numKeys),
-		"expected fewer than %d refreshes, got %d — backpressure should drop excess jobs", numKeys, count)
-	assert.Positive(t, count, "at least one refresh should have executed")
-}
-
-func TestRefreshAhead_FractionValidation(t *testing.T) {
-	t.Parallel()
-	t.Run("negative fraction", func(t *testing.T) {
-		t.Parallel()
-		_, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithRefreshAfterFraction(-0.1),
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "RefreshAfterFraction")
-	})
-	t.Run("fraction equals 1", func(t *testing.T) {
-		t.Parallel()
-		_, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithRefreshAfterFraction(1.0),
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "RefreshAfterFraction")
-	})
-	t.Run("fraction greater than 1", func(t *testing.T) {
-		t.Parallel()
-		_, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithRefreshAfterFraction(1.5),
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "RefreshAfterFraction")
-	})
-	t.Run("valid fraction", func(t *testing.T) {
-		t.Parallel()
-		skipIfNoRedis(t)
-		conn, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithRefreshAfterFraction(0.8),
-		)
-		require.NoError(t, err)
-		t.Cleanup(conn.Close)
-	})
-	t.Run("negative RefreshWorkers", func(t *testing.T) {
-		t.Parallel()
-		_, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithRefreshAfterFraction(0.8),
-			redcache.WithRefreshWorkers(-1),
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "RefreshWorkers")
-	})
-	t.Run("negative RefreshQueueSize", func(t *testing.T) {
-		t.Parallel()
-		_, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithRefreshAfterFraction(0.8),
-			redcache.WithRefreshQueueSize(-1),
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "RefreshQueueSize")
-	})
-	t.Run("custom workers and queue", func(t *testing.T) {
-		t.Parallel()
-		skipIfNoRedis(t)
-		conn, err := redcache.Open(
-			rueidis.ClientOption{InitAddress: addr},
-			redcache.WithRefreshAfterFraction(0.8),
-			redcache.WithRefreshWorkers(2),
-			redcache.WithRefreshQueueSize(16),
-		)
-		require.NoError(t, err)
-		t.Cleanup(conn.Close)
-	})
 }
 
 func TestOpen_Validation(t *testing.T) {
@@ -1896,8 +994,8 @@ func TestCache_Get_ErrLockLostRetry(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	client := redcache.NewString[string](conn, redcache.StringCodec{})
-	ctx := context.Background()
+	client := redcache.New(conn, redcache.StringCodec{})
+	ctx := t.Context()
 
 	key := "key:" + uuid.New().String()
 	forcedVal := "forced:" + uuid.New().String()

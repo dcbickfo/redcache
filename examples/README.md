@@ -20,8 +20,7 @@ go run ./examples/metrics
 
 ## Examples
 
-- `string-cache` uses `NewString[string]` and `StringCodec`, which is the direct
-  migration path for string-key/string-value integrations.
+- `string-cache` uses `New(conn, StringCodec{})` for string keys and values.
 - `typed-cache` uses a domain key type, `KeyCodecFunc`, and `JSONCodec` for
   typed values.
 - `metrics` wires a custom `Metrics` implementation and shows hit/miss counters

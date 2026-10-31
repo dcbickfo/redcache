@@ -1,7 +1,6 @@
 package redcacheotel
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -16,7 +15,7 @@ func collect(t *testing.T, record func(m *Metrics)) map[string]metricdata.Metric
 
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = mp.Shutdown(t.Context()) })
 
 	m, err := NewMetrics(mp)
 	if err != nil {
@@ -25,7 +24,7 @@ func collect(t *testing.T, record func(m *Metrics)) map[string]metricdata.Metric
 	record(m)
 
 	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
+	if err := reader.Collect(t.Context(), &rm); err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
 

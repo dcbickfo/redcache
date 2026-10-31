@@ -26,7 +26,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	cache := redcache.NewString[string](conn, redcache.StringCodec{})
+	cache := redcache.New(conn, redcache.StringCodec{})
 	origin := map[string]string{
 		"user:1": "Ada Lovelace",
 		"user:2": "Grace Hopper",

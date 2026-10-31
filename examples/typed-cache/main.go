@@ -37,7 +37,7 @@ func main() {
 	keyCodec := redcache.KeyCodecFunc[userID](func(id userID) (string, error) {
 		return "redcache:examples:typed:" + runID + ":user:" + string(id), nil
 	})
-	cache := redcache.New[userID, user](conn, keyCodec, redcache.JSONCodec[user]{})
+	cache := redcache.NewKeyed(conn, keyCodec, redcache.JSONCodec{})
 
 	loadUsers := func(ids []userID) map[userID]user {
 		users := make(map[userID]user, len(ids))

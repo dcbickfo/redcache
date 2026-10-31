@@ -1,7 +1,7 @@
 // Package redcacheotel provides a drop-in OpenTelemetry adapter for the
 // redcache.Metrics interface.
 //
-// Wire it into a Conn with redcache.WithMetrics, then derive typed views:
+// Wire it into a Conn with redcache.WithMetrics, then construct a cache:
 //
 //	mp := otel.GetMeterProvider() // or your own *sdkmetric.MeterProvider
 //	m, err := redcacheotel.NewMetrics(mp)
@@ -14,7 +14,7 @@
 //	}
 //	defer conn.Close()
 //
-//	cache := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
+//	cache := redcache.New(conn, redcache.JSONCodec{})
 //
 // If you prefer to panic on construction failure (instruments only fail to
 // build on programmer error, e.g. a bad unit string), wrap it in a must helper:
