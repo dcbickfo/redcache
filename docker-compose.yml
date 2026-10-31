@@ -3,3 +3,16 @@ services:
     image: redis:7.2.4-alpine
     ports:
       - "6379:6379"
+
+  redis-cluster:
+    image: redis:7.2.4-alpine
+    entrypoint: ["/bin/sh", "/redis-cluster.sh"]
+    volumes:
+      - ./scripts/redis-cluster.sh:/redis-cluster.sh:ro
+    ports:
+      - "30001-30006:30001-30006"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -p 30001 cluster info | grep -q cluster_state:ok"]
+      interval: 1s
+      timeout: 2s
+      retries: 30

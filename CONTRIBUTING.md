@@ -21,10 +21,12 @@ the `Makefile`; run
 ## Running Redis
 
 ```bash
-docker compose up -d
+docker compose up -d --wait
 ```
 
-This starts the Redis defined in `docker-compose.yml` on port 6379. Stop it with
+This starts the Redis defined in `docker-compose.yml` on port 6379 and a Redis
+Cluster on ports 30001-30006. `make` points the cluster tests at it; without
+`REDCACHE_CLUSTER_ADDRS=127.0.0.1:30001`, `go test` skips them. Stop both with
 `docker compose down`. (`make redis-up` / `make redis-down` wrap these.)
 
 ## Tests, lint, format, bench

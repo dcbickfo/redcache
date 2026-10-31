@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.3.1] - 2026-10-29
+## [v0.3.1] - 2026-10-31
 
 A patch release for the v0.3 line, backported from the v0.4 work. The rueidis
 version is unchanged.
@@ -17,6 +17,8 @@ version is unchanged.
   first release with both fixes. CI tests on Go 1.26 and 1.27.
 - `go fix` modernizers for Go 1.26 are applied (`wg.Go`, `range` over ints,
   `min`/`max`), with no behavior change.
+- CI now runs the suite against a Redis Cluster, covering slot migration
+  (MOVED and ASK), primary failover, and per-node `SCRIPT LOAD` counts.
 
 ### Added
 - `ErrMissingValue`, returned (wrapped, naming the keys) when a `GetMulti` or
