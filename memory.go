@@ -1,0 +1,217 @@
+package redcache
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/redis/rueidis"
+)
+
+// MemoryOption configures OpenMemory.
+type MemoryOption func(*memEngine)
+
+// WithMemoryClock sets the time source used for TTL expiry, so tests can
+// advance time without sleeping. The default is time.Now.
+func WithMemoryClock(now func() time.Time) MemoryOption {
+	return func(m *memEngine) { m.now = now }
+}
+
+// OpenMemory returns a Conn backed by an in-process map instead of Redis, for
+// unit tests and local development. Caches built over it (New, NewKeyed,
+// NewBytes) behave identically at the typed layer — codecs run, TTLs expire,
+// a present entry is a hit, a miss calls the loader, and loader results for keys
+// nobody asked for are dropped — but there is no single-flight (concurrent
+// misses each call the loader), no distributed locking, invalidation, refresh-ahead, or metrics, and Client()
+// returns nil. It never fails and needs no Close.
+func OpenMemory(opts ...MemoryOption) *Conn {
+	m := &memEngine{data: make(map[string]memEntry), now: time.Now}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return &Conn{core: m}
+}
+
+type memEntry struct {
+	val      string
+	deadline time.Time
+}
+
+type memEngine struct {
+	mu   sync.Mutex
+	data map[string]memEntry
+	now  func() time.Time
+}
+
+func (m *memEngine) Client() rueidis.Client { return nil }
+
+func (m *memEngine) Close() {}
+
+// load returns the live value for key; an expired entry is evicted and a miss.
+// Callers hold m.mu.
+func (m *memEngine) load(key string) (string, bool) {
+	e, ok := m.data[key]
+	if !ok {
+		return "", false
+	}
+	if m.now().After(e.deadline) {
+		delete(m.data, key)
+		return "", false
+	}
+	return e.val, true
+}
+
+// store copies val: it may alias the caller's buffer (UnsafeBytesCodec), which
+// the Redis engine never retains past the call either.
+func (m *memEngine) store(ttl time.Duration, key, val string) {
+	m.data[key] = memEntry{val: strings.Clone(val), deadline: m.now().Add(ttl)}
+}
+
+func (m *memEngine) get(ctx context.Context, ttl time.Duration, key string, fn func(context.Context, string) (string, error)) (string, error) {
+	m.mu.Lock()
+	val, ok := m.load(key)
+	m.mu.Unlock()
+	if ok {
+		return val, nil
+	}
+	val, err := fn(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	m.store(ttl, key, val)
+	m.mu.Unlock()
+	return val, nil
+}
+
+func (m *memEngine) getMulti(ctx context.Context, ttl time.Duration, keys []string, fn func(context.Context, []string) (map[string]string, error)) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	var missing []string
+	m.mu.Lock()
+	for _, k := range keys {
+		if _, seen := out[k]; seen || slices.Contains(missing, k) {
+			continue
+		}
+		if v, ok := m.load(k); ok {
+			out[k] = v
+		} else {
+			missing = append(missing, k)
+		}
+	}
+	m.mu.Unlock()
+	if len(missing) == 0 {
+		return out, nil
+	}
+	loaded, err := fn(ctx, missing)
+	if err != nil {
+		return nil, err
+	}
+	if omitted := slices.DeleteFunc(slices.Clone(missing), func(k string) bool { _, ok := loaded[k]; return ok }); len(omitted) > 0 {
+		slices.Sort(omitted)
+		return nil, fmt.Errorf("%w: %q", ErrMissingValue, omitted)
+	}
+	m.mu.Lock()
+	for _, k := range missing {
+		if v, ok := loaded[k]; ok {
+			m.store(ttl, k, v)
+			out[k] = v
+		}
+	}
+	m.mu.Unlock()
+	return out, nil
+}
+
+func (m *memEngine) peek(_ context.Context, _ time.Duration, key string) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.load(key)
+	return v, ok, nil
+}
+
+func (m *memEngine) set(ctx context.Context, ttl time.Duration, key string, fn func(context.Context, string) (string, error)) error {
+	val, err := fn(ctx, key)
+	if err != nil {
+		return err
+	}
+	return m.forceSet(ctx, ttl, key, val)
+}
+
+func (m *memEngine) setMulti(ctx context.Context, ttl time.Duration, keys []string, fn func(context.Context, []string) (map[string]string, error)) error {
+	keys = slices.Compact(slices.Sorted(slices.Values(keys)))
+	vals, err := fn(ctx, keys)
+	if err != nil {
+		return err
+	}
+	var failed map[string]error
+	succeeded := make([]string, 0, len(keys))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, k := range keys {
+		v, ok := vals[k]
+		if !ok {
+			if failed == nil {
+				failed = make(map[string]error)
+			}
+			failed[k] = fmt.Errorf("%w: %q", ErrMissingValue, k)
+			continue
+		}
+		m.store(ttl, k, v)
+		succeeded = append(succeeded, k)
+	}
+	return newBatchError(failed, succeeded)
+}
+
+func (m *memEngine) forceSet(_ context.Context, ttl time.Duration, key, value string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store(ttl, key, value)
+	return nil
+}
+
+func (m *memEngine) forceSetMulti(_ context.Context, ttl time.Duration, values map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, v := range values {
+		m.store(ttl, k, v)
+	}
+	return nil
+}
+
+func (m *memEngine) del(_ context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.data, key)
+	return nil
+}
+
+func (m *memEngine) delMulti(_ context.Context, keys ...string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, k := range keys {
+		delete(m.data, k)
+	}
+	return nil
+}
+
+func (m *memEngine) touch(_ context.Context, ttl time.Duration, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if v, ok := m.load(key); ok {
+		m.store(ttl, key, v)
+	}
+	return nil
+}
+
+func (m *memEngine) touchMulti(_ context.Context, ttl time.Duration, keys ...string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, k := range keys {
+		if v, ok := m.load(k); ok {
+			m.store(ttl, k, v)
+		}
+	}
+	return nil
+}

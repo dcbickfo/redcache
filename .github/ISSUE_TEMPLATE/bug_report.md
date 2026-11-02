@@ -14,7 +14,7 @@ What you expected instead.
 
 **Minimal reproduction**
 A small snippet or steps that reproduce it. Include how the cache was built and
-the options used (e.g. `Open` + `NewString` and which codec,
+the options used (e.g. `Open` + `New` and which codec,
 `WithRefreshAfterFraction`, etc.).
 
 **Environment**

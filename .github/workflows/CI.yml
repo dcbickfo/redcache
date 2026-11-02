@@ -18,10 +18,6 @@ env:
 jobs:
   test:
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        go-version: ['1.26.x', '1.27.x']
     runs-on: ubuntu-latest
     services:
       redis:
@@ -35,7 +31,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version-file: .tool-versions
           cache: true
           cache-dependency-path: go.sum
       - name: Start Redis Cluster
@@ -48,7 +44,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: Go-results-${{ matrix.go-version }}
+          name: Go-results
           path: TestResults.json
           if-no-files-found: ignore
 
@@ -67,7 +63,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26.x'
+          go-version-file: .tool-versions
           cache: true
           cache-dependency-path: go.sum
       - name: Start Redis Cluster
@@ -98,11 +94,11 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26.x'
+          go-version-file: .tool-versions
           cache: true
           cache-dependency-path: go.sum
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.11.4
+          version: v2.15.0
           args: --timeout=5m

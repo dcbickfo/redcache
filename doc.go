@@ -2,7 +2,8 @@
 // client. It combines rueidis client-side caching with distributed SET NX
 // locking so that, across every process, only one caller populates a missing
 // key while the rest wait on the invalidation push for the populated value —
-// a stampede-resistant cache behind a single generic Cache[K, V] interface.
+// a stampede-resistant cache behind a single [Cache] whose operations infer
+// their key and value types per call.
 //
 // # How it works
 //
@@ -16,18 +17,25 @@
 // reads the populated value. In-process leader/follower coordination collapses a
 // thundering herd on one key to a single Redis SET NX.
 //
-// # Choosing a constructor
+// # Constructing a cache
 //
 // Open one [Conn] (it owns the rueidis client and invalidation stream), then
-// derive typed views over it that all share that single client:
+// construct caches over it that all share that client:
 //
-//   - [NewString] — Cache[string, V]: string keys, typed values. The common case.
-//   - [NewBytes]  — Cache[string, []byte]: zero-copy opaque payloads.
-//   - [New]       — Cache[K, V]: typed keys via a [KeyCodec] (and typed values).
+//   - [New]      — a Cache with [StringKeyCodec] (string, ~string, TextMarshaler keys).
+//   - [NewKeyed] — a Cache with an explicit [KeyCodec] for other key types.
+//   - [NewBytes] — a Cache with [UnsafeBytesCodec] for zero-copy []byte values.
 //
-// The views are operations-only; lifecycle (Close) and the raw-client escape
-// hatch (Client) live on the [Conn]. Deriving a view does no I/O, returns no
-// error, and panics on a nil codec.
+// A Cache owns one [KeyCodec] and one [Codec]. Its generic methods infer K from
+// the key and V from the loader or value on every call, so one JSON-backed
+// Cache can store different Go types under keys of different Go types.
+// [Cache.Peek] requires an explicit value type because it has no loader or
+// value argument from which Go can infer one. Lifecycle (Close) and raw-client
+// access (Client) live on the [Conn].
+//
+// There is no interface form (generic methods cannot satisfy Go interfaces);
+// code under test takes a *Cache and builds it over [OpenMemory], an
+// in-process Conn, instead of Redis.
 //
 // # Minimal example
 //
@@ -39,7 +47,7 @@
 //	}
 //	defer conn.Close()
 //
-//	cache := redcache.NewString[string](conn, redcache.StringCodec{})
+//	cache := redcache.New(conn, redcache.StringCodec{})
 //
 //	v, err := cache.Get(ctx, time.Minute, "k", func(ctx context.Context, key string) (string, error) {
 //		return loadFromUpstream(ctx, key) // runs only on a miss, once per key

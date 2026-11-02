@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,7 +27,7 @@ const clusterKeyCount = 64
 // makeClusterClient opens a Conn against the Redis Cluster named by
 // REDCACHE_CLUSTER_ADDRS (comma-separated, e.g. 127.0.0.1:30001). It skips
 // when unset, except under CI, where a missing cluster is a setup failure.
-func makeClusterClient(t *testing.T) (redcache.Cache[string, string], *redcache.Conn) {
+func makeClusterClient(t *testing.T) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
 	skipIfNoRedis(t)
 	addrs := os.Getenv("REDCACHE_CLUSTER_ADDRS")
@@ -43,7 +43,7 @@ func makeClusterClient(t *testing.T) (redcache.Cache[string, string], *redcache.
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
-	return redcache.NewString[string](conn, redcache.StringCodec{}), conn
+	return redcache.New(conn, redcache.StringCodec{}), conn
 }
 
 // clusterKeys returns keys spread across slots, plus two that share a hash tag

@@ -84,3 +84,23 @@ func redisMessage(t *testing.T, typ byte, length uint64, payload []byte) rueidis
 	require.NoError(t, m.CacheUnmarshalView(buf))
 	return m
 }
+
+// rueidis signals "everything is invalid" (disconnect, FLUSHALL) with nil.
+func TestOnInvalidate_NilCancelsEveryLock(t *testing.T) {
+	t.Parallel()
+	rca := &cacheAside{lockTTL: time.Minute, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), metrics: NoopMetrics{}}
+	a, _ := rca.register("a")
+	b, _ := rca.register("b")
+
+	rca.onInvalidate(nil)
+
+	for name, ch := range map[string]<-chan struct{}{"a": a, "b": b} {
+		select {
+		case <-ch:
+		default:
+			t.Fatalf("lock %q was not cancelled", name)
+		}
+		_, ok := rca.locks.Load(name)
+		require.False(t, ok, "lock %q still registered", name)
+	}
+}

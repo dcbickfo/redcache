@@ -2,10 +2,11 @@ package redcache_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dcbickfo/redcache"
@@ -60,16 +61,16 @@ func TestSetMulti_LoaderOmitsKey_ReportedAsFailed(t *testing.T) {
 	omitted := "omit:omitted:" + uuid.New().String()
 
 	err := cache.SetMulti(ctx, 10*time.Second, []string{present, omitted}, omitLoader(omitted))
-	var bke *redcache.BatchKeyError[string]
-	require.ErrorAs(t, err, &bke)
+	bke, ok := errors.AsType[*redcache.BatchKeyError[string]](err)
+	require.True(t, ok, "want *BatchKeyError[string], got %v", err)
 	require.ErrorIs(t, bke.ErrorFor(omitted), redcache.ErrMissingValue)
 	require.False(t, bke.HasError(present))
 
-	v, ok, err := cache.Peek(ctx, 10*time.Second, present)
+	v, ok, err := cache.Peek[string, string](ctx, 10*time.Second, present)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, "val:"+present, v)
-	_, ok, err = cache.Peek(ctx, 10*time.Second, omitted)
+	_, ok, err = cache.Peek[string, string](ctx, 10*time.Second, omitted)
 	require.NoError(t, err)
 	require.False(t, ok, "omitted key must be reverted")
 }

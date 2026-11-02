@@ -7,16 +7,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/redis/rueidis"
-
-	"github.com/dcbickfo/redcache/internal/cmdx"
 )
 
-// getMulti returns cached values for keys, calling fn for misses. SETs are
-// grouped by cluster slot.
+// getMulti returns cached values for keys, calling fn for misses.
 func (rca *cacheAside) getMulti(
 	ctx context.Context,
 	ttl time.Duration,
@@ -26,6 +22,22 @@ func (rca *cacheAside) getMulti(
 	if len(keys) == 0 {
 		return map[string]string{}, nil
 	}
+	// An error exit releases the entries this call leads, as in get.
+	var owned entryOwner
+	res, err := rca.getMultiLoop(ctx, ttl, keys, fn, &owned)
+	if err != nil {
+		rca.releaseOwned(owned)
+	}
+	return res, err
+}
+
+func (rca *cacheAside) getMultiLoop(
+	ctx context.Context,
+	ttl time.Duration,
+	keys []string,
+	fn func(ctx context.Context, keys []string) (map[string]string, error),
+	owned *entryOwner,
+) (map[string]string, error) {
 	res := make(map[string]string, len(keys))
 
 	// pending[i] / chans[i] are index-aligned: unresolved key + its wait channel.
@@ -52,7 +64,7 @@ func (rca *cacheAside) getMulti(
 
 retry:
 	chans = chans[:len(pending)]
-	leaderKeys := rca.registerPending(pending, chans, (*leaderKeysP)[:0])
+	leaderKeys := rca.registerPending(pending, chans, (*leaderKeysP)[:0], owned)
 	*leaderKeysP = leaderKeys
 
 	if err := rca.readGetMultiHits(ctx, ttl, pending, res, needRefreshP, fn); err != nil {
@@ -84,10 +96,12 @@ retry:
 	return res, nil
 }
 
-func (rca *cacheAside) registerPending(pending []string, chans []<-chan struct{}, leaderKeys []string) []string {
+// registerPending registers each pending key, appending the keys this call
+// leads to leaderKeys and recording their entries in owned.
+func (rca *cacheAside) registerPending(pending []string, chans []<-chan struct{}, leaderKeys []string, owned *entryOwner) []string {
 	for i, key := range pending {
 		var isLeader bool
-		chans[i], isLeader = rca.register(key)
+		chans[i], isLeader = rca.registerOwned(owned, key)
 		if isLeader {
 			leaderKeys = append(leaderKeys, key)
 		}
@@ -236,6 +250,9 @@ func (rca *cacheAside) tryGetMulti(
 	multi := *multiP
 	rca.fillCacheableTTLs(multi, ttl, keys)
 	resps := rca.client.DoMultiCache(ctx, multi...)
+	if len(resps) != len(keys) {
+		return needRefresh, nil, fmt.Errorf("tryGetMulti: response/key length mismatch: %d resps vs %d keys", len(resps), len(keys))
+	}
 
 	var needRefreshExpected map[string]string
 	for i, resp := range resps {
@@ -397,33 +414,28 @@ func (rca *cacheAside) tryLockMulti(ctx context.Context, keys []string) (map[str
 	// Drain every response: DoMulti has already executed all SET NXs in the
 	// pipeline, so an early return would leak the later acquires for lockTTL.
 	// IsRedisNil = acquired; nil = NX rejected; other = propagate.
-	var firstErr error
-	var firstErrKey string
+	var first firstKeyErr
 	for i, r := range resps {
 		err := r.Error()
 		if rueidis.IsRedisNil(err) {
 			continue
 		}
+		delete(lockVals, keys[i])
 		if err == nil {
-			delete(lockVals, keys[i])
 			continue
 		}
-		delete(lockVals, keys[i])
 		rca.emitRedisError("lock")
-		if firstErr == nil {
-			firstErr = err
-			firstErrKey = keys[i]
-		} else {
+		if !first.add(keys[i], err) {
 			rca.logger.Error("additional tryLockMulti error", "key", keys[i], "error", err)
 		}
 	}
-	if firstErr != nil {
+	if err := first.wrap("lock"); err != nil {
 		if len(lockVals) > 0 {
 			cleanupCtx, cancel := rca.cleanupCtx(ctx)
 			rca.unlockMulti(cleanupCtx, lockVals)
 			cancel()
 		}
-		return nil, fmt.Errorf("lock key %q: %w", firstErrKey, firstErr)
+		return nil, err
 	}
 	return lockVals, nil
 }
@@ -433,56 +445,10 @@ type valAndLock struct {
 	lockVal string
 }
 
-type keyOrderAndSet struct {
-	keyOrder []string
-	setStmts []rueidis.LuaExec
-}
-
-func groupBySlot(keyValLock map[string]valAndLock, ttl time.Duration) map[uint16]keyOrderAndSet {
-	stmts := make(map[uint16]keyOrderAndSet)
-	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
-
-	for k, vl := range keyValLock {
-		slot := cmdx.Slot(k)
-		kos := stmts[slot]
-		kos.keyOrder = append(kos.keyOrder, k)
-		kos.setStmts = append(kos.setStmts, rueidis.LuaExec{
-			Keys: []string{k},
-			Args: []string{vl.lockVal, vl.val, ttlMs},
-		})
-		stmts[slot] = kos
-	}
-
-	return stmts
-}
-
-type slotSetResult struct {
-	keys []string
-	err  error
-}
-
-// runSlotSet executes one slot's CAS-set scripts. Every response is inspected
-// so successes survive a sibling error; Lua=0 (or nil) is a lock-lost.
-func (rca *cacheAside) runSlotSet(ctx context.Context, kos keyOrderAndSet) slotSetResult {
-	var keys []string
-	var firstErr error
-	setResps := setKeyLua.ExecMulti(ctx, rca.client, kos.setStmts...)
-	for j, resp := range setResps {
-		ok, err := rca.inspectSlotSetResponse(kos.keyOrder[j], resp)
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-		if ok {
-			keys = append(keys, kos.keyOrder[j])
-		}
-	}
-	return slotSetResult{keys: keys, err: firstErr}
-}
-
-// inspectSlotSetResponse classifies one CAS-set response: success, silent
+// inspectSetResponse classifies one CAS-set response: success, silent
 // lock-lost, or surfaceable error. Parse errors are surfaced so script drift
 // can't trigger an infinite retry loop.
-func (rca *cacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResult) (bool, error) {
+func (rca *cacheAside) inspectSetResponse(key string, resp rueidis.RedisResult) (bool, error) {
 	if err := resp.Error(); err != nil {
 		if rueidis.IsRedisNil(err) {
 			rca.emitLockLost(key)
@@ -503,48 +469,25 @@ func (rca *cacheAside) inspectSlotSetResponse(key string, resp rueidis.RedisResu
 	return true, nil
 }
 
-// executeSetStatements runs the per-slot scripts then reduces to (keys, err).
-// Slot work runs to completion before the reduce so an error in one slot
-// can't mask successes in another.
-func (rca *cacheAside) executeSetStatements(ctx context.Context, stmts map[uint16]keyOrderAndSet) ([]string, error) {
-	return rca.collectSlotSetResults(rca.runSlotSets(ctx, stmts))
-}
-
-// runSlotSets fans out to goroutines only when there's real parallelism;
-// single-slot deployments hit the inline path (ExecMulti pipelines per-slot).
-func (rca *cacheAside) runSlotSets(ctx context.Context, stmts map[uint16]keyOrderAndSet) []slotSetResult {
-	results := make([]slotSetResult, 0, len(stmts))
-	if len(stmts) <= 1 {
-		for _, kos := range stmts {
-			results = append(results, rca.runSlotSet(ctx, kos))
-		}
-		return results
-	}
-	var (
-		mu sync.Mutex
-		wg sync.WaitGroup
-	)
-	for _, kos := range stmts {
-		wg.Go(func() {
-			sr := rca.runSlotSet(ctx, kos)
-			mu.Lock()
-			results = append(results, sr)
-			mu.Unlock()
-		})
-	}
-	wg.Wait()
-	return results
-}
-
-// collectSlotSetResults reduces per-slot outcomes. On error, succeeded keys
-// are logged for operator reconciliation.
-func (rca *cacheAside) collectSlotSetResults(results []slotSetResult) ([]string, error) {
+// setMultiWithLock CAS-replaces each held lock with its value in one pipeline;
+// the client routes each single-key script to its slot's node. Every response
+// is inspected so successes survive a sibling error, and on error the keys
+// already written are logged for operator reconciliation. Lua=0 (or nil) is a
+// lock-lost.
+func (rca *cacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, keyValLock map[string]valAndLock) ([]string, error) {
+	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
+	keys, execs := mapExecs(keyValLock, func(k string, vl valAndLock) rueidis.LuaExec {
+		return rueidis.LuaExec{Keys: []string{k}, Args: []string{vl.lockVal, vl.val, ttlMs}}
+	})
 	var succeeded []string
 	var firstErr error
-	for _, sr := range results {
-		succeeded = append(succeeded, sr.keys...)
-		if sr.err != nil && firstErr == nil {
-			firstErr = sr.err
+	for i, resp := range setKeyLua.ExecMulti(ctx, rca.client, execs...) {
+		ok, err := rca.inspectSetResponse(keys[i], resp)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if ok {
+			succeeded = append(succeeded, keys[i])
 		}
 	}
 	if firstErr != nil {
@@ -556,47 +499,17 @@ func (rca *cacheAside) collectSlotSetResults(results []slotSetResult) ([]string,
 	return succeeded, nil
 }
 
-func (rca *cacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, keyValLock map[string]valAndLock) ([]string, error) {
-	stmts := groupBySlot(keyValLock, ttl)
-	return rca.executeSetStatements(ctx, stmts)
-}
-
 func (rca *cacheAside) unlockMulti(ctx context.Context, lockVals map[string]string) {
 	if len(lockVals) == 0 {
 		return
 	}
-	type keyedExec struct {
-		key  string
-		exec rueidis.LuaExec
+	keys, execs := mapExecs(lockVals, func(key, lockVal string) rueidis.LuaExec {
+		return rueidis.LuaExec{Keys: []string{key}, Args: []string{lockVal}}
+	})
+	// Best effort — locks expire on lockTTL anyway.
+	for i, resp := range delKeyLua.ExecMulti(ctx, rca.client, execs...) {
+		if err := resp.Error(); err != nil {
+			rca.logger.Error("failed to unlock key in batch", "key", keys[i], "error", err)
+		}
 	}
-	delStmts := make(map[uint16][]keyedExec)
-	for key, lockVal := range lockVals {
-		slot := cmdx.Slot(key)
-		delStmts[slot] = append(delStmts[slot], keyedExec{
-			key: key,
-			exec: rueidis.LuaExec{
-				Keys: []string{key},
-				Args: []string{lockVal},
-			},
-		})
-	}
-	var wg sync.WaitGroup
-	for slot, stmts := range delStmts {
-		wg.Go(func() {
-			execsP := luaExecPool.Get(len(stmts))
-			defer luaExecPool.Put(execsP)
-			execs := *execsP
-			for i, s := range stmts {
-				execs[i] = s.exec
-			}
-			// Best effort — locks expire on lockTTL anyway.
-			resps := delKeyLua.ExecMulti(ctx, rca.client, execs...)
-			for i, resp := range resps {
-				if err := resp.Error(); err != nil {
-					rca.logger.Error("failed to unlock key in batch", "key", stmts[i].key, "slot", slot, "error", err)
-				}
-			}
-		})
-	}
-	wg.Wait()
 }

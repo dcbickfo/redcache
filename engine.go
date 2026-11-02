@@ -22,12 +22,13 @@ const (
 )
 
 var (
-	cacheableTTLPool = poolx.NewSlice(func() []rueidis.CacheableTTL { return make([]rueidis.CacheableTTL, 0, 16) })
+	cacheableTTLPool poolx.Slice[rueidis.CacheableTTL]
 	// No pool for []rueidis.Completed: on ctx cancel, DoMulti returns while
 	// rueidis's writer goroutine still reads the slice, so recycling it crashes.
-	luaExecPool = poolx.NewSlice(func() []rueidis.LuaExec { return make([]rueidis.LuaExec, 0, 16) })
-	stringPool  = poolx.NewSlice(func() []string { return make([]string, 0, 16) })
-	chanPool    = poolx.NewSlice(func() []<-chan struct{} { return make([]<-chan struct{}, 0, 16) })
+	// Standalone and sentinel clients pass the slice through; cluster copies it.
+	luaExecPool poolx.Slice[rueidis.LuaExec]
+	stringPool  poolx.Slice[string]
+	chanPool    poolx.Slice[<-chan struct{}]
 )
 
 // lockEntry tracks a key's wait channel and its TTL timer. cancel and
@@ -57,7 +58,7 @@ func (le *lockEntry) timerExpired() {
 }
 
 // cacheAside is the string-typed cache-aside engine over a rueidis.Client. It
-// owns the lock/refresh/pool machinery; the generic Cache[K,V] layer encodes
+// owns the lock/refresh/pool machinery; the generic-method Cache layer encodes
 // K/V and delegates here.
 type cacheAside struct {
 	client         rueidis.Client
@@ -91,10 +92,7 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 		return nil, err
 	}
 
-	lp, err := lockpool.New(cfg.lockPrefix)
-	if err != nil {
-		return nil, fmt.Errorf("lock pool: %w", err)
-	}
+	lp := lockpool.New(cfg.lockPrefix)
 	_, isNoop := cfg.metrics.(NoopMetrics)
 	rca := &cacheAside{
 		lockPool:       lp,
@@ -114,6 +112,7 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	clientOption.PipelineMultiplex = -1
 	clientOption.OnInvalidations = rca.onInvalidate
 
+	var err error
 	if cfg.clientBuilder != nil {
 		rca.client, err = cfg.clientBuilder(clientOption)
 	} else {
@@ -124,7 +123,6 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	}
 
 	if rca.refreshAfter > 0 {
-		//nolint:gosec // refreshCancel is retained on the engine and called by Close.
 		rca.refreshCtx, rca.refreshCancel = context.WithCancel(context.Background())
 		rca.refreshQueue = make(chan refreshJob, cfg.refreshQueueSize)
 		rca.refreshDone = make(chan struct{})
@@ -195,8 +193,9 @@ func (rca *cacheAside) awaitLockOrPoll(ctx context.Context, waitChan <-chan stru
 }
 
 // awaitLockMultiOrPoll is awaitLockOrPoll for many channels. The WaitForAll
-// goroutine is cancelled when poll resolves first, so fallback reads do not
-// leave a waiter behind until every stale channel closes.
+// goroutine is cancelled and joined when poll (or ctx) resolves first, so
+// fallback reads do not leave a waiter behind — and so the caller may reuse
+// chans on its next retry without racing a goroutine still ranging over it.
 func (rca *cacheAside) awaitLockMultiOrPoll(ctx context.Context, chans []<-chan struct{}, poll func() (bool, error)) (polled bool, err error) {
 	start := time.Now()
 	defer func() {
@@ -205,23 +204,28 @@ func (rca *cacheAside) awaitLockMultiOrPoll(ctx context.Context, chans []<-chan 
 
 	waitCtx, waitCancel := context.WithCancel(ctx)
 	defer waitCancel()
-	waitDone := make(chan error, 1)
+	var waitErr error
+	waitDone := make(chan struct{})
 	go func() {
-		waitDone <- syncx.WaitForAll(waitCtx, chans)
+		defer close(waitDone)
+		waitErr = syncx.WaitForAll(waitCtx, chans)
 	}()
 
 	timer := time.NewTimer(rca.nextLockPollDelay())
 	defer timer.Stop()
 	for {
 		select {
-		case err := <-waitDone:
-			return false, err
+		case <-waitDone:
+			return false, waitErr
 		case <-ctx.Done():
+			waitCancel()
+			<-waitDone
 			return false, ctx.Err()
 		case <-timer.C:
 			ok, err := poll()
 			if ok || err != nil {
 				waitCancel()
+				<-waitDone
 				return ok, err
 			}
 			timer.Reset(rca.nextLockPollDelay())
@@ -229,7 +233,19 @@ func (rca *cacheAside) awaitLockMultiOrPoll(ctx context.Context, chans []<-chan 
 	}
 }
 
+// onInvalidate wakes waiters on invalidated keys. rueidis passes nil to mean
+// every key (connection lost, FLUSHALL/FLUSHDB): wake every waiter, since no
+// per-key message will follow for what changed meanwhile.
 func (rca *cacheAside) onInvalidate(messages []rueidis.RedisMessage) {
+	if messages == nil {
+		rca.locks.Range(func(key string, entry *lockEntry) bool {
+			if rca.locks.CompareAndDelete(key, entry) {
+				entry.cancel()
+			}
+			return true
+		})
+		return
+	}
 	for _, m := range messages {
 		key, err := m.ToString()
 		if err != nil {
@@ -258,6 +274,40 @@ func (rca *cacheAside) nextLockPollDelay() time.Duration {
 	}
 	//nolint:gosec // This jitter only spreads Redis polling; it is not security-sensitive.
 	return minDelay + time.Duration(rand.Int64N(int64(maxDelay-minDelay)))
+}
+
+// entryOwner records the local wait entries one call created (register
+// returned leader=true). Nothing else wakes an entry its creator abandons
+// before writing to Redis, so an error exit must releaseOwned them, or local
+// followers park on them until lockTTL.
+type entryOwner map[string]<-chan struct{}
+
+// registerOwned is register that records a created entry in o.
+func (rca *cacheAside) registerOwned(o *entryOwner, key string) (<-chan struct{}, bool) {
+	wait, leader := rca.register(key)
+	if leader {
+		if *o == nil {
+			*o = make(entryOwner)
+		}
+		(*o)[key] = wait
+	}
+	return wait, leader
+}
+
+// releaseOwned releases every entry in o that is still the one it recorded.
+func (rca *cacheAside) releaseOwned(o entryOwner) {
+	for key, wait := range o {
+		rca.release(key, wait)
+	}
+}
+
+// release cancels and removes key's entry if it is still the one whose wait
+// channel is wait, waking its followers. Comparing channels ensures a stale
+// owner never cancels an entry another caller registered since.
+func (rca *cacheAside) release(key string, wait <-chan struct{}) {
+	if e, ok := rca.locks.Load(key); ok && e.done == wait && rca.locks.CompareAndDelete(key, e) {
+		e.cancel()
+	}
 }
 
 // register publishes a per-key lockEntry. leader=true means the caller drives
@@ -298,4 +348,41 @@ retry:
 	default:
 		return actual.done, false
 	}
+}
+
+// firstKeyErr records the first per-key error of a pipelined batch so every
+// response can still be drained.
+type firstKeyErr struct {
+	key string
+	err error
+}
+
+// add records err for key unless an earlier error was recorded, reporting
+// whether it was the first.
+func (f *firstKeyErr) add(key string, err error) bool {
+	if f.err != nil {
+		return false
+	}
+	f.key, f.err = key, err
+	return true
+}
+
+// wrap returns the recorded error as "<op> key %q: <err>", or nil.
+func (f *firstKeyErr) wrap(op string) error {
+	if f.err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s key %q: %w", op, f.key, f.err)
+}
+
+// mapExecs builds one script call per map entry. keys[i] is the entry behind
+// execs[i], so ExecMulti responses map back to keys by index.
+func mapExecs[V any](m map[string]V, exec func(key string, v V) rueidis.LuaExec) (keys []string, execs []rueidis.LuaExec) {
+	keys = make([]string, 0, len(m))
+	execs = make([]rueidis.LuaExec, 0, len(m))
+	for k, v := range m {
+		keys = append(keys, k)
+		execs = append(execs, exec(k, v))
+	}
+	return keys, execs
 }

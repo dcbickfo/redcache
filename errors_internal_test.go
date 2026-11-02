@@ -108,14 +108,14 @@ func TestNewBatchKeyError_ReturnsErrorWhenFailures(t *testing.T) {
 	assert.Equal(t, succeeded, bke.Succeeded)
 }
 
-func TestMergeForceSetResultString(t *testing.T) {
+func TestMergeForceSetResult_StringKeys(t *testing.T) {
 	t.Parallel()
 	values := map[string]string{"a": "1", "b": "2"}
 
 	t.Run("all encoded values succeed when core succeeds", func(t *testing.T) {
 		t.Parallel()
 		failed := map[string]error{}
-		succeeded := mergeForceSetResultString[string](nil, values, failed)
+		succeeded := mergeForceSetResult[string](nil, values, nil, failed)
 
 		assert.Empty(t, failed)
 		assert.ElementsMatch(t, []string{"a", "b"}, succeeded)
@@ -125,7 +125,7 @@ func TestMergeForceSetResultString(t *testing.T) {
 		t.Parallel()
 		wantErr := errors.New("redis failed")
 		failed := map[string]error{}
-		succeeded := mergeForceSetResultString[string](wantErr, values, failed)
+		succeeded := mergeForceSetResult[string](wantErr, values, nil, failed)
 
 		assert.Empty(t, succeeded)
 		require.ErrorIs(t, failed["a"], wantErr)
@@ -141,7 +141,7 @@ func TestMergeForceSetResultString(t *testing.T) {
 			Succeeded: []string{"a"},
 		}
 
-		succeeded := mergeForceSetResultString[string](err, values, failed)
+		succeeded := mergeForceSetResult[string](err, values, nil, failed)
 
 		assert.ElementsMatch(t, []string{"a"}, succeeded)
 		require.ErrorIs(t, failed["b"], wantErr)

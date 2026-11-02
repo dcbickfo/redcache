@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -53,7 +53,7 @@ func do(t *testing.T, c rueidis.Client, args ...string) rueidis.RedisResult {
 // topologyTest opens a cluster client, fails fast unless the cluster is
 // healthy with three primaries, and bounds the test's Redis calls so a broken
 // topology fails the test instead of hanging it.
-func topologyTest(t *testing.T) (context.Context, redcache.Cache[string, string], *redcache.Conn, []clusterNode) {
+func topologyTest(t *testing.T) (context.Context, *redcache.Cache, *redcache.Conn, []clusterNode) {
 	t.Helper()
 	client, conn := makeClusterClient(t)
 	info, err := do(t, adminClient(t, "127.0.0.1:30001"), "CLUSTER", "INFO").ToString()
