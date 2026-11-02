@@ -4,13 +4,13 @@ import (
 	"context"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/require"
 )
 
-// Open builds a Conn; NewString and New derive typed views that share its engine
+// Open builds a Conn; New and NewBytes derive caches that share its engine
 // (one client, one invalidation stream). This in-package test asserts the share
 // is real via the unexported *cache.core, and that both views work.
 func TestConn_SharesEngine(t *testing.T) {
@@ -26,27 +26,28 @@ func TestConn_SharesEngine(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
 
-	strs := NewString[string](conn, StringCodec{})
-	ints := New[string, int](conn, StringKeyCodec{}, JSONCodec[int]{})
+	values := New(conn, JSONCodec{})
+	strs := New(conn, StringCodec{})
 
-	require.Same(t, conn.core, strs.(*cache[string, string]).core, "view must share the Conn engine")
-	require.Same(t, conn.core, ints.(*cache[string, int]).core, "views must share one engine")
+	require.Same(t, conn.core, values.core, "cache must share the Conn engine")
+	require.Same(t, conn.core, strs.core, "caches must share one engine")
 
 	// nil codecs panic, they are not rejected with an error.
-	require.Panics(t, func() { New[string, int](conn, nil, JSONCodec[int]{}) }, "New must panic on nil codec")
+	require.Panics(t, func() { NewKeyed(conn, nil, JSONCodec{}) }, "New must panic on nil key codec")
+	require.Panics(t, func() { New(conn, nil) }, "New must panic on nil value codec")
 
 	// Both views are usable over the shared engine.
-	ctx := context.Background()
-	sKey := "conn:str:" + uuid.NewString()
-	iKey := "conn:int:" + uuid.NewString()
+	ctx := t.Context()
+	sKey := "conn:str:" + uuid.New().String()
+	iKey := "conn:int:" + uuid.New().String()
 
-	gotS, err := strs.Get(ctx, time.Second, sKey, func(context.Context, string) (string, error) {
+	gotS, err := values.Get(ctx, time.Second, sKey, func(context.Context, string) (string, error) {
 		return "hello", nil
 	})
 	require.NoError(t, err)
 	require.Equal(t, "hello", gotS)
 
-	gotI, err := ints.Get(ctx, time.Second, iKey, func(context.Context, string) (int, error) {
+	gotI, err := values.Get(ctx, time.Second, iKey, func(context.Context, string) (int, error) {
 		return 42, nil
 	})
 	require.NoError(t, err)
@@ -66,10 +67,10 @@ func TestConn_ClosesCleanly(t *testing.T) {
 		WithLockTTL(time.Second),
 	)
 	require.NoError(t, err)
-	c := NewString[string](conn, StringCodec{})
+	c := New(conn, StringCodec{})
 
-	ctx := context.Background()
-	key := "conn:oneshot:" + uuid.NewString()
+	ctx := t.Context()
+	key := "conn:oneshot:" + uuid.New().String()
 	got, err := c.Get(ctx, time.Second, key, func(context.Context, string) (string, error) {
 		return "v", nil
 	})
@@ -78,4 +79,30 @@ func TestConn_ClosesCleanly(t *testing.T) {
 
 	conn.Close()
 	conn.Close() // idempotent
+}
+
+// Close must not leave engine goroutines (refresh workers, lock waiters) blocked
+// forever. TestMain checks the whole run; this pins the check to Close with a
+// refresh worker live.
+func TestConn_Close_LeaksNoGoroutines(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Redis")
+	}
+
+	conn, err := Open(
+		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
+		WithLockTTL(2*time.Second),
+		WithRefreshAfterFraction(0.5),
+	)
+	require.NoError(t, err)
+
+	cache := New(conn, StringCodec{})
+	key := "leak:" + uuid.New().String()
+	_, err = cache.Get(t.Context(), time.Minute, key, func(context.Context, string) (string, error) {
+		return "v", nil
+	})
+	require.NoError(t, err)
+	conn.Close()
+
+	require.Empty(t, leakedGoroutines(), "leaked goroutines after Close")
 }

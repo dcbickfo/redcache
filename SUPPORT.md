@@ -15,13 +15,13 @@ Open a GitHub issue with the bug report template. Include:
 ## Questions
 
 Open a GitHub issue with the question template. For API usage questions, include
-the constructor and codecs you are using, for example `Open` plus `NewString`
-with `StringCodec` or `JSONCodec`.
+the constructors and codecs you are using, for example `Open` plus
+`New(conn, StringCodec{})` or `New(conn, JSONCodec{})`.
 
 ## Feature requests
 
 Open a GitHub issue with the feature request template. API sketches are useful,
-especially for changes to `Cache[K, V]`, codecs, metrics, or refresh behavior.
+especially for changes to `Cache`, codecs, metrics, or refresh behavior.
 
 ## Security
 

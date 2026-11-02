@@ -16,14 +16,25 @@ import (
 // force a deterministic per-key failure in the ForceSetMulti example.
 type failOnEmpty struct{}
 
-func (failOnEmpty) Encode(s string) ([]byte, error) {
+func (failOnEmpty) Encode(v any) ([]byte, error) {
+	s, ok := v.(string)
+	if !ok {
+		return nil, fmt.Errorf("failOnEmpty cannot encode %T", v)
+	}
 	if s == "" {
 		return nil, errors.New("empty value not allowed")
 	}
 	return []byte(s), nil
 }
 
-func (failOnEmpty) Decode(b []byte) (string, error) { return string(b), nil }
+func (failOnEmpty) Decode(b []byte, dst any) error {
+	p, ok := dst.(*string)
+	if !ok {
+		return fmt.Errorf("failOnEmpty cannot decode into %T", dst)
+	}
+	*p = string(b)
+	return nil
+}
 
 // Multi-key writes report per-key partial failures as *BatchKeyError[K],
 // reachable via errors.As. Note the generic type argument on the target pointer:
@@ -36,15 +47,14 @@ func ExampleCache_ForceSetMulti() {
 		panic(err)
 	}
 	defer conn.Close()
-	cache := redcache.NewString[string](conn, failOnEmpty{})
+	cache := redcache.New(conn, failOnEmpty{})
 
 	err = cache.ForceSetMulti(context.Background(), time.Minute, map[string]string{
 		"a": "alpha",
 		"b": "", // fails to encode
 	})
 
-	var be *redcache.BatchKeyError[string]
-	if errors.As(err, &be) {
+	if be, ok := errors.AsType[*redcache.BatchKeyError[string]](err); ok {
 		fmt.Println("b failed:", be.HasError("b"))
 		fmt.Println("a succeeded:", !be.HasError("a"))
 		for k, kerr := range be.Failed {
@@ -67,7 +77,7 @@ func ExampleCache_Set() {
 		panic(err)
 	}
 	defer conn.Close()
-	cache := redcache.NewString[string](conn, redcache.StringCodec{})
+	cache := redcache.New(conn, redcache.StringCodec{})
 
 	err = cache.Set(context.Background(), time.Minute, "config:greeting",
 		func(ctx context.Context, key string) (string, error) {
@@ -93,7 +103,7 @@ func ExampleCache_ForceSet() {
 		panic(err)
 	}
 	defer conn.Close()
-	cache := redcache.NewString[string](conn, redcache.StringCodec{})
+	cache := redcache.New(conn, redcache.StringCodec{})
 
 	if err := cache.ForceSet(context.Background(), time.Minute, "config:greeting", "hola"); err != nil {
 		panic(err)
@@ -101,9 +111,9 @@ func ExampleCache_ForceSet() {
 	fmt.Println("forced")
 }
 
-// New keys the cache by a domain type via a KeyCodec. KeyCodecFunc adapts a
+// NewKeyed keys the cache by a non-string domain type via a KeyCodec. KeyCodecFunc adapts a
 // plain function into a KeyCodec.
-func ExampleNew_typedKeys() {
+func ExampleNewKeyed() {
 	type UserID int64
 	type User struct {
 		ID   UserID
@@ -122,7 +132,7 @@ func ExampleNew_typedKeys() {
 		panic(err)
 	}
 	defer conn.Close()
-	cache := redcache.New[UserID, User](conn, userIDCodec, redcache.JSONCodec[User]{})
+	cache := redcache.NewKeyed(conn, userIDCodec, redcache.JSONCodec{})
 
 	u, err := cache.Get(context.Background(), time.Minute, UserID(123),
 		func(ctx context.Context, id UserID) (User, error) {
@@ -136,9 +146,9 @@ func ExampleNew_typedKeys() {
 	fmt.Println(u.Name)
 }
 
-// A Conn owns one Redis client and invalidation stream; New/NewString derive
-// typed views over it — one client backing multiple value types.
-func ExampleNew() {
+// A Conn owns one Redis client and invalidation stream. A JSON-backed Cache
+// infers a different key and value type for each generic operation.
+func ExampleNew_sharedConn() {
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.WithLockTTL(5*time.Second),
@@ -148,13 +158,19 @@ func ExampleNew() {
 	}
 	defer conn.Close() // closing the Conn closes the shared client (and all views)
 
-	// users and loginCounts share one client, connection, and invalidation stream.
-	users := redcache.NewString[string](conn, redcache.StringCodec{})
-	loginCounts := redcache.New[string, int](conn, redcache.StringKeyCodec{}, redcache.JSONCodec[int]{})
-	_ = users
+	values := redcache.New(conn, redcache.JSONCodec{})
+	_, err = values.Get(context.Background(), time.Minute, "user:u-123",
+		func(ctx context.Context, key string) (string, error) {
+			return "alice", nil
+		},
+	)
+	if err != nil {
+		panic(err)
+	}
 
-	n, err := loginCounts.Get(context.Background(), time.Minute, "u-123",
-		func(ctx context.Context, key string) (int, error) {
+	type AccountID string // ~string keys need no KeyCodec
+	n, err := values.Get(context.Background(), time.Minute, AccountID("login-count:u-123"),
+		func(ctx context.Context, id AccountID) (int, error) {
 			return 7, nil
 		},
 	)
@@ -179,7 +195,7 @@ func (m *countingMetrics) CacheMisses(n int64) { m.misses.Add(n) }
 // directly (no Redis needed) to show the counting shape.
 func ExampleNoopMetrics() {
 	m := &countingMetrics{}
-	// In real use: open a Conn and derive redcache.NewString[string](conn, codec) with redcache.WithMetrics(m) passed to Open.
+	// In real use: open a Conn and construct redcache.New(conn, codec) with redcache.WithMetrics(m) passed to Open.
 	m.CacheHits(3)
 	m.CacheMisses(1)
 	fmt.Println(m.hits.Load(), m.misses.Load())

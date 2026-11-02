@@ -2,7 +2,7 @@ pre-commit:
   parallel: true
   commands:
     lint:
-      run: golangci-lint run
+      run: make lint
     build:
       run: go build ./...
 

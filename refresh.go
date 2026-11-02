@@ -27,9 +27,7 @@ type refreshJob struct {
 // even with recover.
 func (rca *cacheAside) startRefreshWorkers(n int) {
 	for range n {
-		rca.refreshWg.Add(1)
-		go func() {
-			defer rca.refreshWg.Done()
+		rca.refreshWg.Go(func() {
 			for {
 				select {
 				case <-rca.refreshDone:
@@ -41,7 +39,7 @@ func (rca *cacheAside) startRefreshWorkers(n int) {
 					rca.runRefreshJob(job)
 				}
 			}
-		}()
+		})
 	}
 }
 
@@ -143,12 +141,13 @@ func (rca *cacheAside) shouldRefresh(cachePTTL int64, ttl time.Duration, delta t
 	if delta <= 0 || rca.refreshBeta <= 0 {
 		return true
 	}
+	//nolint:gosec // This jitter spreads refresh timing; it is not security-sensitive.
 	jitter := time.Duration(float64(delta) * rca.refreshBeta * rand.ExpFloat64())
 	return cachePTTLd <= jitter
 }
 
 // triggerRefresh enqueues a single-key refresh job to the worker pool.
-// Two-level dedup: local syncx.Map + distributed SET NX on a separate refresh key.
+// Two-level dedup: local ShardedMap + distributed SET NX on a separate refresh key.
 // If the queue is full, the refresh is dropped and counted via RefreshDropped.
 //
 // Safe against concurrent Close: the closing flag is a fast-exit optimization;
@@ -264,7 +263,7 @@ func (rca *cacheAside) doSingleRefresh(
 }
 
 // triggerMultiRefresh enqueues a multi-key refresh job. Two-level dedup: local
-// syncx.Map + distributed SET NX on separate refresh keys. Drops are counted via
+// ShardedMap + distributed SET NX on separate refresh keys. Drops are counted via
 // RefreshDropped when the queue is full. Safe against concurrent Close (see
 // triggerRefresh).
 func (rca *cacheAside) triggerMultiRefresh(
@@ -341,9 +340,7 @@ func (rca *cacheAside) doMultiRefresh(
 // acquireRefreshLocks batch-acquires distributed SET NX locks for refresh keys,
 // distinguishing IsRedisNil (healthy dedup) from real Redis errors.
 func (rca *cacheAside) acquireRefreshLocks(ctx context.Context, keys []string) ([]string, map[string]string) {
-	cmdsP := commandsPool.Get(len(keys))
-	defer commandsPool.Put(cmdsP)
-	cmds := *cmdsP
+	cmds := make(rueidis.Commands, len(keys))
 	refreshLocks := make(map[string]string, len(keys))
 	for i, key := range keys {
 		refreshLock := rca.lockPool.Generate()
@@ -376,10 +373,12 @@ func (rca *cacheAside) acquireRefreshLocks(ctx context.Context, keys []string) (
 func (rca *cacheAside) deleteRefreshLocks(ctx context.Context, locks map[string]string) {
 	cleanupCtx, cleanupCancel := rca.cleanupCtx(ctx)
 	defer cleanupCancel()
-	for key, refreshLock := range locks {
-		refreshKey := rca.refreshKeyFor(key)
-		if err := delKeyLua.Exec(cleanupCtx, rca.client, []string{refreshKey}, []string{refreshLock}).Error(); err != nil {
-			rca.logger.Error("refresh-ahead lock release failed", "key", key, "refreshKey", refreshKey, "error", err)
+	keys, execs := mapExecs(locks, func(key, refreshLock string) rueidis.LuaExec {
+		return rueidis.LuaExec{Keys: []string{rca.refreshKeyFor(key)}, Args: []string{refreshLock}}
+	})
+	for i, resp := range delKeyLua.ExecMulti(cleanupCtx, rca.client, execs...) {
+		if err := resp.Error(); err != nil {
+			rca.logger.Error("refresh-ahead lock release failed", "key", keys[i], "refreshKey", execs[i].Keys[0], "error", err)
 		}
 	}
 }
