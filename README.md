@@ -55,7 +55,7 @@ Set `REDIS_ADDR` to point them at a non-default Redis address.
 
 ## Migrating from v0.3.x
 
-The next release requires Go 1.27 and moves both type parameters from cache
+v0.4 requires Go 1.27 and moves both type parameters from cache
 construction to the operations (Go 1.27 generic methods). `Cache` is no longer
 generic:
 
@@ -64,7 +64,7 @@ generic:
 users  := redcache.NewString[User](conn, redcache.JSONCodec[User]{})
 orders := redcache.New[OrderID, Order](conn, orderIDCodec, redcache.JSONCodec[Order]{})
 
-// next release — one cache, K and V inferred per call
+// v0.4 — one cache, K and V inferred per call
 cache := redcache.New(conn, redcache.JSONCodec{})
 user, err  := cache.Get(ctx, ttl, "u-1", loadUser)      // K=string, V=User
 order, err := cache.Get(ctx, ttl, OrderID(7), loadOrder) // K=OrderID, V=Order
@@ -87,7 +87,7 @@ an in-process map; `redcachetest` is removed:
 func NewUserService(c redcache.Cache[string, User]) *UserService
 svc := NewUserService(redcachetest.New[string, User]())
 
-// next release
+// v0.4
 func NewUserService(c *redcache.Cache) *UserService
 svc := NewUserService(redcache.New(redcache.OpenMemory(), redcache.JSONCodec{}))
 ```

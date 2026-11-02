@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.4.0] - 2026-11-02
 
 ### Breaking
 
@@ -36,7 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `ErrMissingValue`, returned when a multi-key loader omits a key it was given.
 - `JSONV2Codec` — opt-in `encoding/json/v2` codec (nil slices/maps as `[]`/`{}`,
   case-sensitive field matching, duplicate object names rejected). `JSONCodec`
   keeps `encoding/json` v1 semantics and wire format.
@@ -46,21 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Multi-key Lua paths (`GetMulti`, `SetMulti`, `TouchMulti`, `DelMulti`,
-  refresh-ahead) no longer send `SCRIPT LOAD` to every node, replicas included,
-  on every call. They pipeline `EVALSHA` and re-send only `NOSCRIPT` replies as
-  `EVAL`, replacing rueidis's `Lua.ExecMulti`.
-- `GetMulti` no longer re-locks and re-runs the loader until the context ends
-  when the loader omits a requested key; it fails fast with `ErrMissingValue`
-  naming the keys. `SetMulti` reports such keys as failed with
-  `ErrMissingValue` (restoring their prior value) instead of returning nil.
-  Ported from the unreleased `fix/correctness-bundle` work.
-- Multi-key operations no longer recycle the command slice passed to rueidis
-  `DoMulti`. On context cancellation rueidis's writer goroutine could still be
-  reading it, and the pooled reset crashed the process with a nil-pointer
-  panic. Standalone and sentinel clients were affected, because they hand the
-  caller's slice to the connection; the cluster client copies commands into
-  per-node slices first, so cluster deployments were not.
 - A `Get`/`GetMulti` leader that exits on error (cancelled context, Redis
   error) releases its local wait entry. Later callers in the same process used
   to park on it until `LockTTL`, since nothing was written to invalidate it.
@@ -106,9 +90,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and goroutine per cluster slot. Every script touches a single key, and
   rueidis's cluster client already splits a pipeline per node, runs the nodes
   in parallel and follows redirects, so a batch now costs one round trip per
-  node rather than per slot. `internal/cmdx` is deleted. A 3-primary Redis
-  Cluster (`docker compose` service `redis-cluster`) runs the new
-  `cluster_test.go` suite locally and in CI.
+  node rather than per slot. `internal/cmdx` is deleted.
+
+## [v0.3.1] - 2026-10-31
+
+A patch release for the v0.3 line, backported from the v0.4 work. The rueidis
+version is unchanged.
+
+### Changed
+- The Go floor is now 1.26.10 (`go 1.26.10` in `go.mod`), up from 1.25. Go
+  1.25 is out of support and has unfixed standard-library vulnerabilities in
+  `crypto/tls` and `crypto/x509` (GO-2026-6607, GO-2026-6809); 1.26.10 is the
+  first release with both fixes. CI tests on Go 1.26 and 1.27.
+- `go fix` modernizers for Go 1.26 are applied (`wg.Go`, `range` over ints,
+  `min`/`max`), with no behavior change.
+- CI now runs the suite against a Redis Cluster, covering slot migration
+  (MOVED and ASK), primary failover, and per-node `SCRIPT LOAD` counts.
+
+### Added
+- `ErrMissingValue`, returned (wrapped, naming the keys) when a `GetMulti` or
+  `SetMulti` loader returns no value for a key it was given.
+
+### Fixed
+- Multi-key operations no longer recycle the command slice passed to rueidis
+  `DoMulti`. On context cancellation rueidis's writer goroutine could still be
+  reading it, and the pooled reset crashed the process with a nil-pointer
+  panic. Standalone and sentinel clients were affected, because they hand the
+  caller's slice to the connection; the cluster client copies commands into
+  per-node slices first, so cluster deployments were not.
+- `GetMulti` no longer livelocks when its loader omits a key. It used to
+  re-lock the key and re-run the loader until the context ended; it now fails
+  fast with `ErrMissingValue`. `SetMulti` reports omitted keys as failed with
+  `ErrMissingValue` (restoring their prior value) instead of returning nil.
+  `redcachetest.Fake` follows the same contract.
+- Multi-key Lua calls (`GetMulti` misses, `SetMulti`, `TouchMulti`,
+  multi-key refresh) no longer send `SCRIPT LOAD` to every node, replicas
+  included, and wait for it before every batch. They pipeline `EVALSHA` and
+  re-send only `NOSCRIPT` replies as `EVAL`, saving about one round trip per
+  call (the slowest node's, on a cluster).
 
 ## [v0.3.0] - 2026-06-19
 
@@ -300,6 +319,8 @@ hardening release. Stay v0.x; a v1 will be cut once the surface settles.
 - Lua scripts for atomic lock verification on SET and DEL.
 - CI workflow with GitHub Actions.
 
+[v0.4.0]: https://github.com/dcbickfo/redcache/compare/v0.3.1...v0.4.0
+[v0.3.1]: https://github.com/dcbickfo/redcache/compare/v0.3.0...v0.3.1
 [v0.3.0]: https://github.com/dcbickfo/redcache/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/dcbickfo/redcache/compare/v0.1.7...v0.2.0
 [v0.1.7]: https://github.com/dcbickfo/redcache/compare/v0.1.6...v0.1.7
