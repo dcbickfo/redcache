@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A `Get` or `GetMulti` loader slower than `LockTTL` no longer loops
+  forever.** The Redis lock was never extended while the loader ran, so the
+  lock expired, the final CAS-set failed with `ErrLockLost`, and the call
+  retried, re-running the loader indefinitely. The lock is now extended every
+  `LockTTL/3` for as long as the loader runs, and a call that loses its lock
+  more than three times returns `ErrLockLost` instead of retrying again.
+
 ## [v0.4.0] - 2026-11-02
 
 ### Breaking

@@ -3,6 +3,7 @@ package redcache
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -383,6 +384,66 @@ func (rca *cacheAside) touchMultiLocks(ctx context.Context, lockValues map[strin
 		if result == 0 {
 			rca.logger.Debug("lock lost during refresh", "key", key)
 			rca.emitLockLost(key)
+		}
+	}
+}
+
+// maxLockLostRetries bounds how many times one Get or GetMulti re-runs its
+// loader after losing its lock (a Del or ForceSet took it, or it expired)
+// before returning ErrLockLost instead of looping.
+const maxLockLostRetries = 3
+
+// lockLossExceeded counts one more lost lock in *n and reports whether the
+// retry cap is now exceeded.
+func lockLossExceeded(n *int) bool {
+	*n++
+	return *n > maxLockLostRetries
+}
+
+// holdLocks keeps CAS-extending the held locks (one PEXPIRE per lockTTL/3)
+// while a loader runs, so a loader slower than lockTTL still owns its lock
+// when it returns. The returned stop ends the keep-alive and waits for the
+// goroutine; call it once the loader has returned. A lock that is no longer
+// ours (refresh returned 0) drops out of the set; the CAS-set that follows
+// reports ErrLockLost.
+func (rca *cacheAside) holdLocks(ctx context.Context, lockVals map[string]string) (stop func()) {
+	held := maps.Clone(lockVals)
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(rca.lockTTL / 3)
+		defer ticker.Stop()
+		for len(held) > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				rca.refreshHeld(ctx, held)
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// refreshHeld extends each lock in held and removes the ones no longer ours.
+func (rca *cacheAside) refreshHeld(ctx context.Context, held map[string]string) {
+	keys, execs := mapExecs(held, func(key, lockVal string) rueidis.LuaExec {
+		return rueidis.LuaExec{Keys: []string{key}, Args: []string{lockVal, rca.lockTTLMs}}
+	})
+	for i, resp := range refreshLockScript.ExecMulti(ctx, rca.client, execs...) {
+		result, err := resp.AsInt64()
+		if err != nil {
+			if ctx.Err() == nil {
+				rca.logger.Error("lock keep-alive failed", "key", keys[i], "error", err)
+			}
+			continue
+		}
+		if result == 0 {
+			delete(held, keys[i])
 		}
 	}
 }
