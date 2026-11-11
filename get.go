@@ -204,6 +204,7 @@ func (rca *cacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key
 	}()
 	start := time.Now()
 	stopKeepAlive := rca.holdLocks(ctx, map[string]string{key: lockVal})
+	defer stopKeepAlive() // also on a loader panic; stop is idempotent
 	val, err = fn(ctx, key)
 	stopKeepAlive()
 	rca.emitLoaderDuration(time.Since(start))

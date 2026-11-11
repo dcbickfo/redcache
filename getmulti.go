@@ -364,6 +364,7 @@ func (rca *cacheAside) trySetMultiKeyFn(
 	fnKeys := slices.Collect(maps.Keys(lockVals))
 	start := time.Now()
 	stopKeepAlive := rca.holdLocks(ctx, lockVals)
+	defer stopKeepAlive() // also on a loader panic; stop is idempotent
 	vals, err := fn(ctx, fnKeys)
 	stopKeepAlive()
 	rca.emitLoaderDuration(time.Since(start))

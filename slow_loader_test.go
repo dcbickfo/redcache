@@ -167,3 +167,26 @@ func TestGetMulti_RepeatedLockLossReturnsErrLockLost(t *testing.T) {
 	assert.LessOrEqual(t, calls.Load(), int32(10))
 	require.NoError(t, ctx.Err())
 }
+
+// A panicking loader must stop the keep-alive: its lock is released, a later
+// Get loads normally, and the package's goroutine-leak check stays clean.
+func TestGet_PanickingLoaderStopsKeepAlive(t *testing.T) {
+	t.Parallel()
+	client, _ := openShortLock(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	key := "panic:" + uuid.New().String()
+
+	assert.Panics(t, func() {
+		_, _ = client.Get(ctx, time.Minute, key, func(context.Context, string) (string, error) {
+			time.Sleep(100 * time.Millisecond) // long enough for a keep-alive tick
+			panic("boom")
+		})
+	})
+
+	got, err := client.Get(ctx, time.Minute, key, func(context.Context, string) (string, error) {
+		return "after", nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "after", got)
+}

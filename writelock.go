@@ -403,7 +403,8 @@ func lockLossExceeded(n *int) bool {
 // holdLocks keeps CAS-extending the held locks (one PEXPIRE per lockTTL/3)
 // while a loader runs, so a loader slower than lockTTL still owns its lock
 // when it returns. The returned stop ends the keep-alive and waits for the
-// goroutine; call it once the loader has returned. A lock that is no longer
+// goroutine; call it once the loader has returned (it is idempotent, so
+// defer it too for a loader that panics). A lock that is no longer
 // ours (refresh returned 0) drops out of the set; the CAS-set that follows
 // reports ErrLockLost.
 func (rca *cacheAside) holdLocks(ctx context.Context, lockVals map[string]string) (stop func()) {
