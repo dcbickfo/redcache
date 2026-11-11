@@ -190,10 +190,13 @@ err := cache.Set(ctx, time.Minute, "u-123",
 ```
 
 **Restore-on-error precondition.** If the callback returns an error, `Set`
-puts the prior cached value back (with its remaining TTL; a key with no prior value is
-deleted). That is only correct when a failed callback did not change the source
-of truth. If the callback can commit and then return an error (a timeout waiting
-for the acknowledgement of a write that did land), the restored value is stale.
+puts the prior cached value back with the remaining TTL captured when `Set`
+took the key (not reduced by the callback's run time); a key with no prior
+value is deleted. If another writer replaced the lock in the meantime, that
+writer's value is kept, and if Redis is unreachable the lock stays until
+`LockTTL` expires. Restoring is only correct when a failed callback did not
+change the source of truth. If the callback can commit and then return an error
+(a timeout waiting for the acknowledgement of a write that did land), the restored value is stale.
 Make such callbacks return success once the write is committed, or follow a
 failed `Set` with `Del` so the next `Get` reloads. A callback that panics is
 rolled back the same way before the panic continues, so a caller that recovers
