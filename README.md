@@ -175,6 +175,40 @@ u, ok, err := cache.Peek[string, User](ctx, time.Minute, "u-123")
 // ok == false means not currently cached; Peek never runs your loader.
 ```
 
+## Write-through with Set
+
+`Set` takes a per-call write lock on the key, runs your callback, and writes the
+callback's value under that lock; `SetMulti` does the same for a batch. Use it
+to update the source of truth and the cache together:
+
+```go
+err := cache.Set(ctx, time.Minute, "u-123",
+    func(ctx context.Context, key string) (User, error) {
+        return db.UpdateUser(ctx, key) // write to the database, return the new value
+    },
+)
+```
+
+**Restore-on-error precondition.** If the callback returns an error, `Set`
+puts the prior cached value back (with its remaining TTL; a key with no prior value is
+deleted). That is only correct when a failed callback did not change the source
+of truth. If the callback can commit and then return an error (a timeout waiting
+for the acknowledgement of a write that did land), the restored value is stale.
+Make such callbacks return success once the write is committed, or follow a
+failed `Set` with `Del` so the next `Get` reloads. A callback that panics is
+rolled back the same way before the panic continues, so a caller that recovers
+(an HTTP server, for example) does not leave the key locked.
+
+**`ErrLockLost`.** The write lock is held for `LockTTL` and is not extended
+while your callback runs. `Set` returns `ErrLockLost` (test with
+`errors.Is`; `SetMulti` wraps it in a `*BatchKeyError` per key) when the lock
+was removed or expired before the value was written: a concurrent `ForceSet` or
+`Del` took the key, or the callback outlasted `LockTTL`. The callback's value
+was not written and the key holds whatever the other writer left, so the
+source of truth and the cache may disagree. Do not blindly retry a callback with
+side effects; reconcile with `Del` (the next `Get` reloads from the source) and
+size `LockTTL` above your slowest write callback.
+
 ## Typed keys
 
 Keys whose underlying type is `string` (e.g. `type UserID string`) and types

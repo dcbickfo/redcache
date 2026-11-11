@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`Set` and `SetMulti` roll back when the callback panics.** A callback
+  that panicked, with the panic recovered by the caller, left the write lock in
+  place for `LockTTL` and the prior value gone. The prior values are now
+  restored before the panic continues.
+- **A rollback no longer persists a value that was about to expire.** When the
+  prior value had under a millisecond of TTL left (`PTTL` 0), the restore wrote
+  it back with no expiry. It now deletes the key. Values with no expiry
+  (`PTTL` -1) are still restored without one.
+
+### Documentation
+
+- README: write-through `Set` section covering the restore-on-error
+  precondition and how to handle `ErrLockLost`.
+
 ## [v0.4.0] - 2026-11-02
 
 ### Breaking

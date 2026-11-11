@@ -53,7 +53,7 @@ func (rca *cacheAside) setLoop(
 		}
 
 		start := time.Now()
-		newVal, err := fn(ctx, key)
+		newVal, err := rca.callSetFn(ctx, key, lockVal, saved, fn)
 		rca.emitLoaderDuration(time.Since(start))
 		if err != nil {
 			rca.emitLoaderErrors(1)
@@ -85,6 +85,27 @@ func (rca *cacheAside) setLoop(
 		}
 		return nil
 	}
+}
+
+// callSetFn runs fn while the write lock is held. If fn panics (or exits its
+// goroutine), the deferred restore puts the prior value back before the panic
+// continues, so a caller that recovers does not leave the lock in place for
+// lockTTL with the prior value gone.
+func (rca *cacheAside) callSetFn(
+	ctx context.Context,
+	key, lockVal string,
+	saved savedValue,
+	fn func(ctx context.Context, key string) (string, error),
+) (val string, err error) {
+	returned := false
+	defer func() {
+		if !returned {
+			rca.bestEffortRestore(ctx, key, lockVal, saved)
+		}
+	}()
+	val, err = fn(ctx, key)
+	returned = true
+	return val, err
 }
 
 // acquireSingleWriteLock subscribes to the key, waits out any existing lock
@@ -187,7 +208,7 @@ func (rca *cacheAside) setMultiLocked(
 
 	fnKeys := slices.Collect(maps.Keys(lockValues))
 	start := time.Now()
-	vals, err := fn(ctx, fnKeys)
+	vals, err := rca.callSetMultiFn(ctx, fnKeys, lockValues, savedValues, fn)
 	rca.emitLoaderDuration(time.Since(start))
 	if err != nil {
 		rca.emitLoaderErrors(len(fnKeys))
@@ -230,6 +251,26 @@ func (rca *cacheAside) setMultiLocked(
 	}
 
 	return newBatchError(failed, succeeded)
+}
+
+// callSetMultiFn is callSetFn for every held key: a panic in fn restores them
+// all before it continues.
+func (rca *cacheAside) callSetMultiFn(
+	ctx context.Context,
+	fnKeys []string,
+	lockValues map[string]string,
+	savedValues map[string]savedValue,
+	fn func(ctx context.Context, keys []string) (map[string]string, error),
+) (vals map[string]string, err error) {
+	returned := false
+	defer func() {
+		if !returned {
+			rca.restoreMultiValues(ctx, lockValues, savedValues)
+		}
+	}()
+	vals, err = fn(ctx, fnKeys)
+	returned = true
+	return vals, err
 }
 
 // forceSet unconditionally writes value, bypassing locks. In-progress Get

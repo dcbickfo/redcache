@@ -96,3 +96,43 @@ func BenchmarkLuaScript_ExecMulti(b *testing.B) {
 		}
 	}
 }
+
+// A restore whose backup had no time left (PTTL 0) must leave the key absent,
+// not persist it; -1 (no expiry) stays persistent and a positive PTTL is kept.
+func TestRestoreValueOrDeleteScript_BackupPTTL(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	client, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}})
+	require.NoError(t, err)
+	t.Cleanup(client.Close)
+
+	for _, tc := range []struct {
+		name      string
+		pttl      string
+		wantExist bool
+		wantPTTL  func(int64) bool
+	}{
+		{"zero deletes", "0", false, nil},
+		{"-2 deletes", "-2", false, nil},
+		{"-1 stays persistent", "-1", true, func(p int64) bool { return p == -1 }},
+		{"positive keeps ttl", "5000", true, func(p int64) bool { return p > 0 && p <= 5000 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := "restore-pttl:" + uuid.New().String()
+			require.NoError(t, client.Do(ctx, client.B().Set().Key(key).Value("lock").Px(time.Minute).Build()).Error())
+			n, err := restoreValueOrDeleteScript.Exec(ctx, client, []string{key}, []string{"lock", "1", "prior", tc.pttl}).AsInt64()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, n)
+
+			exists, err := client.Do(ctx, client.B().Exists().Key(key).Build()).AsInt64()
+			require.NoError(t, err)
+			require.Equal(t, tc.wantExist, exists == 1)
+			if tc.wantExist {
+				pttl, err := client.Do(ctx, client.B().Pttl().Key(key).Build()).AsInt64()
+				require.NoError(t, err)
+				require.True(t, tc.wantPTTL(pttl), "pttl=%d", pttl)
+				t.Cleanup(func() { client.Do(ctx, client.B().Del().Key(key).Build()) })
+			}
+		})
+	}
+}

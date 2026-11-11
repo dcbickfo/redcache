@@ -48,8 +48,10 @@ var (
 	//
 	// ARGV: lock, had_saved ("0" or "1"), restore_value, restore_pttl.
 	// had_saved=0 means DEL; had_saved=1 means SET (preserves empty-string
-	// values). restore_pttl <= 0 means persistent (SET without PX); > 0 means
-	// SET PX <ms>.
+	// values). restore_pttl > 0 means SET PX <ms>; -1 means the prior value had
+	// no expiry (SET without PX); any other value (0: the prior value was in
+	// its last millisecond) means it has expired, so the key is deleted rather
+	// than restored with no TTL.
 	restoreValueOrDeleteScript = newLuaScript(`
 		local key = KEYS[1]
 		local expected_lock = ARGV[1]
@@ -60,7 +62,7 @@ var (
 		if redis.call("GET", key) ~= expected_lock then
 			return 0
 		end
-		if had_saved == "1" then
+		if had_saved == "1" and (restore_pttl > 0 or restore_pttl == -1) then
 			if restore_pttl > 0 then
 				redis.call("SET", key, restore_value, "PX", restore_pttl)
 			else
