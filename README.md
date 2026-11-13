@@ -265,7 +265,7 @@ Construction takes functional options. They are applied in order; later wins.
 
 | Option | Default | Description |
 |---|---|---|
-| `WithLockTTL(d)` | `10s` | Bounds both how long a Redis lock survives and how long callers wait for one. Values below 100ms are rejected. |
+| `WithLockTTL(d)` | `10s` | Bounds how long a lock survives without its holder (the holder extends it every `LockTTL/3` while its loader runs, so loaders may take longer than `LockTTL`) and how long callers wait for one. Values below 100ms are rejected. |
 | `WithLogger(l)` | `slog.Default()` | Logger for errors and debug output. Must be concurrent-safe. |
 | `WithMetrics(m)` | `NoopMetrics{}` | Observability sink. Runs on the hot path; must be concurrent-safe. |
 | `WithLockPrefix(p)` | `__redcache:lock:` | Prefix tagged onto in-Redis lock values so reads recognise a lock as a miss. |

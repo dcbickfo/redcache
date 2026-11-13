@@ -62,6 +62,7 @@ func (rca *cacheAside) getMultiLoop(
 	leaderKeysP := stringPool.GetCap(len(keys))
 	defer stringPool.Put(leaderKeysP)
 
+	lockLossRounds := 0
 retry:
 	chans = chans[:len(pending)]
 	leaderKeys := rca.registerPending(pending, chans, (*leaderKeysP)[:0], owned)
@@ -75,8 +76,13 @@ retry:
 
 	if len(pending) > 0 {
 		rca.emitCacheMisses(len(pending))
-		if err := rca.runLeaderSets(ctx, ttl, leaderKeys, fn, res); err != nil {
+		lost, err := rca.runLeaderSets(ctx, ttl, leaderKeys, fn, res)
+		if err != nil {
 			return nil, err
+		}
+		// As in get: retry a lost lock a bounded number of times.
+		if lost > 0 && lockLossExceeded(&lockLossRounds) {
+			return nil, fmt.Errorf("lock lost for %d key(s): %w", lost, ErrLockLost)
 		}
 		pending, chans = filterResolved(pending, chans, res)
 	}
@@ -202,7 +208,7 @@ func (rca *cacheAside) runLeaderSets(
 	leaderKeys []string,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
 	res map[string]string,
-) error {
+) (lost int, err error) {
 	n := 0
 	for _, k := range leaderKeys {
 		if _, ok := res[k]; !ok {
@@ -212,7 +218,7 @@ func (rca *cacheAside) runLeaderSets(
 	}
 	leaderKeys = leaderKeys[:n]
 	if len(leaderKeys) == 0 {
-		return nil
+		return 0, nil
 	}
 	return rca.trySetMultiKeyFn(ctx, ttl, leaderKeys, fn, res)
 }
@@ -343,31 +349,34 @@ func (rca *cacheAside) trySetMultiKeyFn(
 	keys []string,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
 	res map[string]string,
-) error {
+) (lost int, err error) {
 	lockVals, err := rca.tryLockMulti(ctx, keys)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	defer rca.unlockUnset(ctx, lockVals, res)
 
 	if len(lockVals) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	fnKeys := slices.Collect(maps.Keys(lockVals))
 	start := time.Now()
+	stopKeepAlive := rca.holdLocks(ctx, lockVals)
+	defer stopKeepAlive() // also on a loader panic; stop is idempotent
 	vals, err := fn(ctx, fnKeys)
+	stopKeepAlive()
 	rca.emitLoaderDuration(time.Since(start))
 	if err != nil {
 		rca.emitLoaderErrors(len(fnKeys))
-		return err
+		return 0, err
 	}
 	// A key the loader omits would never land in res, so the retry loop would
 	// re-lock it and re-run fn until ctx ends. Fail fast; the deferred unlock
 	// releases every lock.
 	if missing := missingKeys(lockVals, vals); len(missing) > 0 {
-		return fmt.Errorf("%w: %q", ErrMissingValue, missing)
+		return 0, fmt.Errorf("%w: %q", ErrMissingValue, missing)
 	}
 	// Amortise fn time across returned values for XFetch sampling. Skewed but
 	// better than 0 — slow batches get proportionally more refresh headroom.
@@ -384,14 +393,14 @@ func (rca *cacheAside) trySetMultiKeyFn(
 
 	keysSet, err := rca.setMultiWithLock(ctx, ttl, vL)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	for _, keySet := range keysSet {
 		res[keySet] = vals[keySet]
 	}
 
-	return nil
+	return len(vL) - len(keysSet), nil
 }
 
 // perValueDelta divides total by n. Returns 0 when n<=0 (shouldRefresh then
