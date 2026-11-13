@@ -40,6 +40,7 @@ func (rca *cacheAside) getLoop(
 	fn func(ctx context.Context, key string) (val string, err error),
 	owned *<-chan struct{},
 ) (string, error) {
+	lockLosses := 0
 retry:
 	wait, leader := rca.register(key)
 	if leader {
@@ -69,10 +70,16 @@ retry:
 		return val, nil
 	}
 
+	// A ForceSet or Del took the lock, or Redis expired it despite the
+	// keep-alive. Retry to read the new value, but a bounded number of times:
+	// a lock lost over and over must surface, not loop.
+	if errors.Is(err, ErrLockLost) && lockLossExceeded(&lockLosses) {
+		return "", err
+	}
 	if errors.Is(err, errLockFailed) || errors.Is(err, ErrLockLost) {
 		// errLockFailed: another process holds the Redis lock — wait alongside
 		// followers (cancelling our entry would wake them to race the same NX).
-		// ErrLockLost: a ForceSet stole our lock; retry to read its value.
+		// ErrLockLost: retry to read the winner's value.
 		val, done, err := rca.waitForGet(ctx, ttl, key, wait, fn)
 		if done {
 			return val, err
@@ -196,7 +203,10 @@ func (rca *cacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key
 		}
 	}()
 	start := time.Now()
+	stopKeepAlive := rca.holdLocks(ctx, map[string]string{key: lockVal})
+	defer stopKeepAlive() // also on a loader panic; stop is idempotent
 	val, err = fn(ctx, key)
+	stopKeepAlive()
 	rca.emitLoaderDuration(time.Since(start))
 	if err == nil {
 		wrapped := wrapEnvelope(val, time.Since(start))

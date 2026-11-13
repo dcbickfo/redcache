@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `Get` or `GetMulti` loader slower than `LockTTL` no longer loops
+  forever.** The Redis lock was never extended while the loader ran, so the
+  lock expired, the final CAS-set failed with `ErrLockLost`, and the call
+  retried, re-running the loader indefinitely. The lock is now extended every
+  `LockTTL/3` for as long as the loader runs, and a call that loses its lock
+  more than three times returns `ErrLockLost` instead of retrying again.
 - **`Set` and `SetMulti` roll back when the callback panics.** A callback
   that panicked, with the panic recovered by the caller, left the write lock in
   place for `LockTTL` and the prior value gone. The prior values are now
