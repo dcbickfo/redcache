@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.1] - 2026-11-12
+
 ### Fixed
 
 - **A `Get` or `GetMulti` loader slower than `LockTTL` no longer loops
