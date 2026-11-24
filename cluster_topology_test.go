@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 	"uuid"
 
@@ -620,6 +621,75 @@ func TestCluster_GetStampedeAfterASK(t *testing.T) {
 	}
 }
 
+func retryNoSlot(ctx context.Context, read func() error) (int, error) {
+	for retries := 0; ; retries++ {
+		err := read()
+		if !errors.Is(err, rueidis.ErrNoSlot) {
+			return retries, err
+		}
+		select {
+		case <-ctx.Done():
+			return retries, err
+		case <-time.After(100 * time.Millisecond):
+			if ctx.Err() != nil {
+				return retries, err
+			}
+		}
+	}
+}
+
+func TestRetryNoSlot(t *testing.T) {
+	t.Run("wrapped errors then success", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			const wantRetries = 3
+			calls := 0
+			retries, err := retryNoSlot(t.Context(), func() error {
+				calls++
+				if calls <= wantRetries {
+					return fmt.Errorf("lock key: %w", rueidis.ErrNoSlot)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			require.Equal(t, wantRetries, retries)
+			require.Equal(t, wantRetries+1, calls)
+		})
+	})
+	t.Run("different error with same text", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			other := errors.New(rueidis.ErrNoSlot.Error())
+			calls := 0
+			retries, err := retryNoSlot(ctx, func() error {
+				calls++
+				return other
+			})
+			require.Same(t, other, err)
+			require.Zero(t, retries)
+			require.Equal(t, 1, calls)
+		})
+	})
+	t.Run("deadline preserves latest no-slot error", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+			defer cancel()
+			var lastErr error
+			calls := 0
+			retries, err := retryNoSlot(ctx, func() error {
+				calls++
+				lastErr = fmt.Errorf("attempt %d: %w", calls, rueidis.ErrNoSlot)
+				return lastErr
+			})
+			require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+			require.Same(t, lastErr, err)
+			require.ErrorIs(t, err, rueidis.ErrNoSlot)
+			require.Equal(t, 2, retries)
+			require.Equal(t, 3, calls)
+		})
+	})
+}
+
 // TestCluster_PrimaryFailover freezes a primary with DEBUG SLEEP until its
 // replica takes over, then checks the multi-key paths against the promoted
 // replica, whose script cache is empty. The frozen node rejoins as a replica
@@ -682,7 +752,14 @@ func TestCluster_PrimaryFailover(t *testing.T) {
 	opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	start := time.Now()
-	got, err := client.GetMulti(opCtx, time.Minute, keys, noLoader)
+	var got map[string]string
+	// The role check can see promotion before rueidis's slot map includes the new primary.
+	retries, err := retryNoSlot(opCtx, func() error {
+		var err error
+		got, err = client.GetMulti(opCtx, time.Minute, keys, noLoader)
+		return err
+	})
+	t.Logf("first post-failover GetMulti took %s (%d retries)", time.Since(start), retries)
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 
