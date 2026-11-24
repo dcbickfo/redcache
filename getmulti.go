@@ -313,6 +313,7 @@ func (rca *cacheAside) retryAbortedReads(ctx context.Context, keys []string, abo
 	for i, index := range aborted {
 		cmds[i] = rca.client.B().Get().Key(keys[index]).Build()
 	}
+	rca.emitRedisError("read_fallback")
 	plain := rca.client.DoMulti(ctx, cmds...)
 	if len(plain) != len(aborted) {
 		return fmt.Errorf("plain read: response/key length mismatch: %d resps vs %d keys", len(plain), len(aborted))

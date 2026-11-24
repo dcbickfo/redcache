@@ -396,6 +396,8 @@ Implement `Metrics`, or embed `NoopMetrics` and override only the methods you ca
 
 High-volume events (`CacheHits`, `CacheMisses`, `LockContended`, `RefreshTriggered`, `RefreshSkipped`, `RefreshDropped`) are aggregated per operation and emitted once with a count rather than once per key. `LockWaitDuration` fires once per resolved wait, and `LoaderDuration` once per foreground origin-loader call (`Get`/`GetMulti` miss, `Set`/`SetMulti` — background refresh excluded). `LoaderErrors(n)` fires when a foreground loader returns an error, with `n` the number of keys it was responsible for. `RedisError(op)` fires when a Redis command fails, tagged with `op` (`"read"`, `"lock"`, `"set"`, `"del"`, `"touch"`). Diagnostic events (`LockLost`, `RefreshError`, `RefreshPanicked`, `InvalidationError`) carry the affected key where applicable.
 
+`RedisError("read_fallback")` counts calls that fall back to plain reads without client-side caching, once per batch. A sustained non-zero rate outside slot migration points to another cause of EXEC aborts, such as an ACL that denies `PTTL`.
+
 ```go
 type myMetrics struct {
     redcache.NoopMetrics

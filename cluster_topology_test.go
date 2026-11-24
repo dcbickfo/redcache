@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -291,17 +292,33 @@ func TestCluster_SlotMigrationFollowsMOVED(t *testing.T) {
 // still exist on the source are served there, and new keys are redirected to
 // the target with ASK. The target's script cache is empty.
 func TestCluster_SlotMigrationFollowsASK(t *testing.T) {
-	ctx, client, conn, nodes := topologyTest(t)
+	metrics := &capturingMetrics{}
+	ctx, client, conn, nodes := topologyTest(t, redcache.WithMetrics(metrics))
 	tag := uuid.New().String()
 	keys := taggedKeys(tag, 3)
 	old, fresh := keys[0], keys[1:]
 	slot := keySlot(t, conn, old)
 	from := slotOwner(t, nodes, slot)
 	to := otherPrimary(t, nodes, from)
+	server, err := do(t, adminClient(t, from.addr), "INFO", "server").ToString()
+	require.NoError(t, err)
+	valkey9 := strings.Contains(server, "\nvalkey_version:9.")
+	readErrorOps := func() []string {
+		metrics.mu.Lock()
+		defer metrics.mu.Unlock()
+		return slices.Clone(metrics.redisErrOps)
+	}
+	unexpectedLoader := func(context.Context, string) (string, error) {
+		return "", errors.New("loader must not run on a hit")
+	}
 
 	want := valuesFor(keys, "load")
-	_, err := client.GetMulti(ctx, time.Minute, []string{old}, exactLoader(want))
+	_, err = client.GetMulti(ctx, time.Minute, []string{old}, exactLoader(want))
 	require.NoError(t, err)
+	v, err := client.Get(ctx, time.Minute, old, unexpectedLoader)
+	require.NoError(t, err)
+	require.Equal(t, want[old], v)
+	require.Empty(t, readErrorOps(), "normal reads must not emit read_fallback")
 
 	beginSlotMigration(t, slot, from, to)
 	t.Cleanup(func() {
@@ -319,14 +336,25 @@ func TestCluster_SlotMigrationFollowsASK(t *testing.T) {
 	assert.Equal(t, want, got)
 	assert.ElementsMatch(t, fresh, loaded, "only the new keys are loaded")
 
+	if valkey9 {
+		before := len(readErrorOps())
+		v, err := client.Get(ctx, time.Minute, fresh[0], unexpectedLoader)
+		require.NoError(t, err)
+		require.Equal(t, want[fresh[0]], v)
+		assert.Equal(t, []string{"read_fallback"}, readErrorOps()[before:], "one event for a plain GET")
+	}
+	beforeBatch := len(readErrorOps())
 	got, err = client.GetMulti(ctx, time.Minute, keys, noLoader)
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
+	if valkey9 {
+		assert.Equal(t, []string{"read_fallback"}, readErrorOps()[beforeBatch:], "one event for the batch of two plain GETs")
+	}
 
 	// New keys live on the importing node, which serves them only after ASKING.
 	dst := adminClient(t, to.addr)
 	resps := dst.DoMulti(ctx, dst.B().Arbitrary("ASKING").Build(), dst.B().Get().Key(fresh[0]).Build())
-	v, err := resps[1].ToString()
+	v, err = resps[1].ToString()
 	require.NoError(t, err)
 	assert.True(t, strings.HasSuffix(v, ":"+want[fresh[0]]), "new key must be on the target: %q", v)
 

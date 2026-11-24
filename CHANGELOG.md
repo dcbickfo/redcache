@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `RedisError("read_fallback")` counts fallback calls that read without
+  client-side caching, once per batch. A sustained non-zero rate outside
+  slot migration points to another cause of EXEC aborts, such as missing
+  `PTTL` permission.
+
 ### Fixed
 
 - Fixed cache misses that could wait for a lock nobody held after a read

@@ -21,9 +21,12 @@ type Metrics interface {
 	// number of keys the loader was responsible for (1 for single, len(missing)
 	// for multi).
 	LoaderErrors(n int64)
-	// RedisError fires when a Redis command fails. op is one of "read", "lock",
-	// "set", "del", "touch". Lock-lost, redis-nil, and script-drift parse
-	// failures are not Redis errors and do not fire it.
+	// RedisError records Redis command failures with op "read", "lock", "set",
+	// "del", or "touch". "read_fallback" counts calls that fall back to reads
+	// without client-side caching, once per batch. A sustained non-zero rate outside
+	// slot migration points to another cause of EXEC aborts, such as missing
+	// PTTL permission. Lock-lost, Redis nil, and script-drift parse failures
+	// are excluded.
 	RedisError(op string)
 	RefreshTriggered(n int64)
 	// RefreshSkipped covers both local and distributed dedup.

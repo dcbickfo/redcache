@@ -198,6 +198,7 @@ func (rca *cacheAside) cachedReadValue(ctx context.Context, key, val string, err
 	if !rca.shouldRetryCachedRead(err) {
 		return val, err
 	}
+	rca.emitRedisError("read_fallback")
 	val, retryErr := rca.client.Do(ctx, rca.client.B().Get().Key(key).Build()).ToString()
 	if retryErr != nil && !rueidis.IsRedisNil(retryErr) {
 		return "", errors.Join(err, retryErr)
