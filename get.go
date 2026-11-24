@@ -189,8 +189,8 @@ func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 }
 
 func (rca *cacheAside) cachedReadValue(ctx context.Context, key, val string, err error) (string, error) {
-	// Valkey 9 can return ASK from EXEC itself during slot migration. Rueidis
-	// reports that as ErrDoCacheAborted, while an ordinary GET follows ASK.
+	// Valkey 9 can return ASK as the EXEC reply during slot migration. Rueidis
+	// reports it as ErrDoCacheAborted. An uncached GET follows the redirect.
 	if errors.Is(err, rueidis.ErrDoCacheAborted) {
 		return rca.client.Do(ctx, rca.client.B().Get().Key(key).Build()).ToString()
 	}

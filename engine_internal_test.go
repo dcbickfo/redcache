@@ -24,7 +24,7 @@ func (*uncachedGetClient) B() rueidis.Builder { return rueidis.Builder{} }
 
 func (c *uncachedGetClient) Do(_ context.Context, cmd rueidis.Completed) rueidis.RedisResult {
 	c.commands = append(c.commands, slices.Clone(cmd.Commands()))
-	return rueidis.RedisResult{} // empty value
+	return rueidis.RedisResult{}
 }
 
 func TestCachedReadRetriesOnlyRueidisAbort(t *testing.T) {

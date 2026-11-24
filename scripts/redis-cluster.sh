@@ -9,15 +9,15 @@ set -eu
 replica_ports="30004 30005 30006"
 if [ "${1:-}" = healthcheck ]; then
 	redis-cli -p 30001 cluster info | grep -q '^cluster_state:ok' || exit 1
-	# Slot coverage can be ready before the replicas finish their first sync.
+	# Wait for replica sync so the cluster is ready for failover tests.
 	for port in $replica_ports; do
 		redis-cli -p "$port" --raw role | grep -qx connected || exit 1
 	done
 	exit 0
 fi
 
-# All cluster nodes share a container and the cluster bus ports stay private.
-# Redis 8.12 requires explicit opt-out when running the test cluster without TLS.
+# Redis 8.12 requires disabling bus protection for this TLS-free test cluster.
+# The cluster bus stays inside the container.
 set --
 case "$(redis-server --version)" in
 	'Redis server v=8.12.'*) set -- --cluster-bus-port-protected-mode no ;;

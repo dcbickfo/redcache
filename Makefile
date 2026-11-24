@@ -39,7 +39,7 @@ test-short: ## Run tests with -short
 	$(GO) test -short $(PKG)
 
 .PHONY: test-server
-test-server: ## Run the root package tests without race or coverage
+test-server: ## Run root package tests against the configured server
 	$(GO) test -count=1 .
 
 .PHONY: test-race

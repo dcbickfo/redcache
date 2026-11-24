@@ -9,9 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Cache reads retry once without client-side caching when rueidis reports an
-  aborted cache read, allowing commands to follow ASK during Valkey 9 slot
-  migration.
+- Fixed cache read failures during Valkey 9 cluster slot migration.
 
 ## [v0.4.1] - 2026-11-12
 
