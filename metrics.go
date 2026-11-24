@@ -23,11 +23,13 @@ type Metrics interface {
 	LoaderErrors(n int64)
 	// RedisError records command failures with op "read", "lock", "set",
 	// "del", or "touch". "read_fallback" counts an attempted uncached retry
-	// after a clustered cached read aborted, once per single read or batch,
-	// including retries that fail, return Redis nil, or are canceled before
-	// sending. Missing PTTL permission can trigger an abort. A sustained
-	// rate alone cannot identify a server-side EXEC abort because rueidis
-	// also reports ErrDoCacheAborted when a connection closes.
+	// after a clustered cached read aborted. It emits one event per uncached
+	// retry attempt, whether for one key or a batch. A polling Get or
+	// GetMulti can make more than one attempt. The count includes retries
+	// that fail, return Redis nil, or are canceled before sending. Missing
+	// PTTL permission can trigger an abort. A sustained rate alone cannot
+	// identify a server-side EXEC abort because rueidis also reports
+	// ErrDoCacheAborted when a connection closes.
 	// Lock-lost, Redis nil, and script-drift parse failures are excluded
 	// from the command-failure labels.
 	RedisError(op string)

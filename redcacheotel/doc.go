@@ -43,7 +43,7 @@
 //	refresh.panicked       background refresh callbacks panicked
 //	invalidation.errors    invalidation messages that failed to parse
 //	loader.errors          foreground loader callbacks returned an error
-//	redis.errors           Redis commands that failed (attribute: op)
+//	redis.errors           Redis command failures and attempted uncached retries (attribute: op, read_fallback for retries)
 //
 // Histograms (Float64Histogram, unit "s" — seconds):
 //
@@ -52,8 +52,14 @@
 //
 // # Cardinality
 //
-// redis.errors carries a bounded op attribute (one of read, lock, set, del,
-// touch). All other counters are emitted without per-key labels. The redcache
+// redis.errors carries a bounded op attribute. The values read, lock, set,
+// del, and touch report command failures. The value read_fallback counts an
+// attempted uncached retry after a clustered cached read aborted. It emits
+// one event per uncached retry attempt, whether for one key or a batch. A
+// polling Get or GetMulti can make more than one attempt. Exclude
+// op="read_fallback" from alerts that count only command failures.
+//
+// All other counters are emitted without per-key labels. The redcache
 // diagnostics that carry a key (LockLost, RefreshError, RefreshPanicked) would
 // produce unbounded label cardinality if the key were attached, so they are
 // counted without the key. Use logs/traces to attribute individual keys.

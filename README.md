@@ -398,11 +398,12 @@ High-volume events (`CacheHits`, `CacheMisses`, `LockContended`, `RefreshTrigger
 
 `RedisError(op)` uses `read`, `lock`, `set`, `del`, and `touch` for command
 failures, and `read_fallback` for an attempted uncached retry after a
-clustered cached read aborted. It emits one `read_fallback` per single read
-or batch, including retries that fail, return Redis nil, or are canceled
-before sending. Missing `PTTL` permission can trigger an abort. A sustained
-rate alone cannot identify a server-side `EXEC` abort because rueidis also
-reports `ErrDoCacheAborted` when a connection closes.
+clustered cached read aborted. It emits one event per uncached retry attempt,
+whether for one key or a batch. A polling `Get` or `GetMulti` can make more
+than one attempt. The count includes retries that fail, return Redis nil,
+or are canceled before sending. Missing `PTTL` permission can trigger an
+abort. A sustained rate alone cannot identify a server-side `EXEC` abort
+because rueidis also reports `ErrDoCacheAborted` when a connection closes.
 
 Metrics implementations and dashboards that enumerate operation labels need
 to accept `read_fallback`. Unfiltered `redis.errors` alerts include successful

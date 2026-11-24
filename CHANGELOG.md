@@ -13,11 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   implementations and dashboards that enumerate operations or alert on all
   `redis.errors` need to account for.
   It counts an attempted uncached retry after a clustered cached read
-  aborted, once per single read or batch, including retries that fail,
-  return Redis nil, or are canceled before sending. Missing `PTTL`
-  permission can trigger an abort. A sustained rate alone cannot identify a
-  server-side `EXEC` abort because rueidis also reports `ErrDoCacheAborted`
-  when a connection closes.
+  aborted. It emits one event per uncached retry attempt, whether for one key
+  or a batch. A polling `Get` or `GetMulti` can make more than one attempt.
+  The count includes retries that fail, return Redis nil, or are canceled
+  before sending. Missing `PTTL` permission can trigger an abort. A
+  sustained rate alone cannot identify a server-side `EXEC` abort because
+  rueidis also reports `ErrDoCacheAborted` when a connection closes.
 
 ### Fixed
 
@@ -235,7 +236,8 @@ hardening release. Stay v0.x; a v1 will be cut once the surface settles.
 ### Added
 - **Observability signals on `Metrics`**: `LoaderDuration(d)` (foreground
   origin-loader latency), `LoaderErrors(n)` (loader failures by key count), and
-  `RedisError(op)` (Redis-command failures, `op` ∈ `read`/`lock`/`set`/`del`/`touch`).
+  `RedisError(op)` (Redis-command failures, `op` ∈ `read`/`lock`/`set`/`del`/`touch`
+  in this release). See [Metrics](README.md#metrics) for current operation labels.
 - **`redcacheotel`** subpackage (`github.com/dcbickfo/redcache/redcacheotel`) — a
   drop-in OpenTelemetry `Metrics` adapter (`redcacheotel.NewMetrics(meterProvider)`).
   It lives in the main module, so OpenTelemetry is now a core dependency, currently

@@ -82,8 +82,9 @@ func NewMetrics(mp metric.MeterProvider) (*Metrics, error) {
 	m.invalidationErrors = counter("invalidation.errors", "Invalidation messages that failed to parse.")
 	m.loaderErrors = counter("loader.errors", "Keys whose foreground loader returned an error.")
 	m.redisErrors = counter("redis.errors", "Redis command failures by operation. "+
-		"read_fallback counts an attempted uncached retry after a clustered cached read aborted, once per single read or batch, "+
-		"including retries that fail, return Redis nil, or are canceled before sending. Missing PTTL permission can trigger an abort. "+
+		"read_fallback counts an attempted uncached retry after a clustered cached read aborted. "+
+		"It emits one event per uncached retry attempt, whether for one key or a batch. A polling Get or GetMulti can make more than one attempt. "+
+		"The count includes retries that fail, return Redis nil, or are canceled before sending. Missing PTTL permission can trigger an abort. "+
 		"A sustained rate alone cannot identify a server-side EXEC abort because rueidis also reports ErrDoCacheAborted when a connection closes.")
 
 	m.lockWaitDuration = histogram("lock.wait.duration", "Time spent waiting on a contended lock, in seconds.")
