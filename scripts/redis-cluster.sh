@@ -6,7 +6,24 @@
 # see its replica take over within a few seconds.
 set -eu
 
-ports="30001 30002 30003 30004 30005 30006"
+replica_ports="30004 30005 30006"
+if [ "${1:-}" = healthcheck ]; then
+	redis-cli -p 30001 cluster info | grep -q '^cluster_state:ok' || exit 1
+	# Wait for replica sync so the cluster is ready for failover tests.
+	for port in $replica_ports; do
+		redis-cli -p "$port" --raw role | grep -qx connected || exit 1
+	done
+	exit 0
+fi
+
+# Redis 8.12 requires disabling bus protection for this TLS-free test cluster.
+# The cluster bus stays inside the container.
+set --
+case "$(redis-server --version)" in
+	'Redis server v=8.12.'*) set -- --cluster-bus-port-protected-mode no ;;
+esac
+
+ports="30001 30002 30003 $replica_ports"
 for port in $ports; do
 	# Start empty: /data is a volume that outlives the container, and a stale
 	# nodes.conf makes `--cluster create` refuse to run.
@@ -15,7 +32,7 @@ for port in $ports; do
 	redis-server --port "$port" --dir "/data/$port" --daemonize yes \
 		--cluster-enabled yes --cluster-config-file nodes.conf \
 		--cluster-announce-ip 127.0.0.1 --cluster-node-timeout 2000 \
-		--enable-debug-command yes --appendonly no --save ''
+		--enable-debug-command yes --appendonly no --save '' "$@"
 done
 for port in $ports; do
 	until redis-cli -p "$port" ping >/dev/null 2>&1; do sleep 0.1; done

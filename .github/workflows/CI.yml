@@ -19,12 +19,6 @@ jobs:
   test:
     timeout-minutes: 20
     runs-on: ubuntu-latest
-    services:
-      redis:
-        # Pinned to match the tag used in docker-compose.yml for local dev.
-        image: redis:7.2.4-alpine
-        ports:
-          - 6379:6379
 
     steps:
       - uses: actions/checkout@v6
@@ -34,8 +28,13 @@ jobs:
           go-version-file: .tool-versions
           cache: true
           cache-dependency-path: go.sum
-      - name: Start Redis Cluster
-        run: docker compose up -d --wait redis-cluster
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          args: --timeout=5m
+      - name: Start Redis and Redis Cluster
+        run: docker compose up -d --wait
       - name: Run race tests
         run: |
           set -o pipefail
@@ -48,26 +47,6 @@ jobs:
           path: TestResults.json
           if-no-files-found: ignore
 
-  coverage:
-    timeout-minutes: 15
-    runs-on: ubuntu-latest
-    services:
-      redis:
-        # Pinned to match the tag used in docker-compose.yml for local dev.
-        image: redis:7.2.4-alpine
-        ports:
-          - 6379:6379
-
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: .tool-versions
-          cache: true
-          cache-dependency-path: go.sum
-      - name: Start Redis Cluster
-        run: docker compose up -d --wait redis-cluster
       - name: Check coverage
         run: make cover-check GO=go
       - name: Coverage summary
@@ -86,9 +65,25 @@ jobs:
           # set CODECOV_TOKEN as a repository secret and it will be picked up here.
           token: ${{ secrets.CODECOV_TOKEN }}
 
-  lint:
+  server-tests:
     timeout-minutes: 10
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        # Cover the Redis version floor and latest release, plus supported Valkey minors.
+        image:
+          - redis:7.2
+          - redis:8.12
+          - valkey/valkey:7.2
+          - valkey/valkey:8.0
+          - valkey/valkey:8.1
+          - valkey/valkey:9.0
+          - valkey/valkey:9.1
+          - valkey/valkey:9.2
+    env:
+      REDCACHE_SERVER_IMAGE: ${{ matrix.image }}
     steps:
       - uses: actions/checkout@v6
       - name: Setup Go
@@ -97,8 +92,9 @@ jobs:
           go-version-file: .tool-versions
           cache: true
           cache-dependency-path: go.sum
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.15.0
-          args: --timeout=5m
+      - name: Start standalone and cluster servers
+        run: docker compose up -d --wait
+      - name: Run server tests
+        env:
+          GOFLAGS: ${{ matrix.image == 'valkey/valkey:9.2' && '-race' || '' }}
+        run: make test-server GO=go

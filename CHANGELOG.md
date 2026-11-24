@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `RedisError` can now receive `op="read_fallback"`, which `Metrics`
+  implementations and dashboards that enumerate operations or alert on all
+  `redis.errors` need to account for.
+  It counts an attempted uncached retry after a clustered cached read
+  aborted. It emits one event per uncached retry attempt, whether for one key
+  or a batch. A polling `Get` or `GetMulti` can make more than one attempt.
+  The count includes retries that fail, return Redis nil, or are canceled
+  before sending. Missing `PTTL` permission can trigger an abort. A
+  sustained rate alone cannot identify a server-side `EXEC` abort because
+  rueidis also reports `ErrDoCacheAborted` when a connection closes.
+
+### Fixed
+
+- Fixed cache misses that could wait for a lock nobody held after a read
+  without client-side tracking.
+- Cache reads can refill a missing key after a loader or write callback panics.
+- Cached reads follow ASK during Valkey 9 cluster slot migration.
+
 ## [v0.4.1] - 2026-11-12
 
 ### Fixed
@@ -216,7 +236,8 @@ hardening release. Stay v0.x; a v1 will be cut once the surface settles.
 ### Added
 - **Observability signals on `Metrics`**: `LoaderDuration(d)` (foreground
   origin-loader latency), `LoaderErrors(n)` (loader failures by key count), and
-  `RedisError(op)` (Redis-command failures, `op` ∈ `read`/`lock`/`set`/`del`/`touch`).
+  `RedisError(op)` (Redis-command failures, `op` ∈ `read`/`lock`/`set`/`del`/`touch`
+  in this release). See [Metrics](README.md#metrics) for current operation labels.
 - **`redcacheotel`** subpackage (`github.com/dcbickfo/redcache/redcacheotel`) — a
   drop-in OpenTelemetry `Metrics` adapter (`redcacheotel.NewMetrics(meterProvider)`).
   It lives in the main module, so OpenTelemetry is now a core dependency, currently

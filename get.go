@@ -20,16 +20,16 @@ func (rca *cacheAside) get(
 	key string,
 	fn func(ctx context.Context, key string) (val string, err error),
 ) (string, error) {
-	// owned is the wait channel of the entry this call registered as leader.
-	// Most error exits (cancelled ctx, Redis error) wrote nothing, so no
-	// invalidation will wake the local followers parked on it; release it so
-	// they retry now, not after lockTTL. After a loader error the unlock DEL
-	// also invalidates, and the release is redundant but harmless.
 	var owned <-chan struct{}
+	failed := true
+	// Wake followers only after the inner call has unwound and attempted its Redis cleanup.
+	defer func() {
+		if failed && owned != nil {
+			rca.release(key, owned)
+		}
+	}()
 	val, err := rca.getLoop(ctx, ttl, key, fn, &owned)
-	if err != nil && owned != nil {
-		rca.release(key, owned)
-	}
+	failed = err != nil
 	return val, err
 }
 
@@ -49,7 +49,7 @@ retry:
 	res, err := rca.tryGet(ctx, ttl, key)
 
 	if err == nil {
-		return rca.returnGetHit(ctx, ttl, key, fn, res)
+		return rca.returnGetHit(ctx, ttl, key, fn, res, *owned)
 	}
 	if !errors.Is(err, errNotFound) {
 		return "", err
@@ -58,7 +58,7 @@ retry:
 	rca.emitCacheMisses(1)
 
 	if !leader {
-		val, done, err := rca.waitForGet(ctx, ttl, key, wait, fn)
+		val, done, err := rca.waitForGet(ctx, ttl, key, wait, *owned, fn)
 		if done {
 			return val, err
 		}
@@ -67,6 +67,7 @@ retry:
 
 	val, err := rca.trySetKeyFunc(ctx, ttl, key, fn)
 	if err == nil {
+		rca.releaseIfUntracked(key, wait, res.untracked)
 		return val, nil
 	}
 
@@ -80,7 +81,7 @@ retry:
 		// errLockFailed: another process holds the Redis lock — wait alongside
 		// followers (cancelling our entry would wake them to race the same NX).
 		// ErrLockLost: retry to read the winner's value.
-		val, done, err := rca.waitForGet(ctx, ttl, key, wait, fn)
+		val, done, err := rca.waitForGet(ctx, ttl, key, wait, *owned, fn)
 		if done {
 			return val, err
 		}
@@ -94,7 +95,7 @@ func (rca *cacheAside) waitForGet(
 	ctx context.Context,
 	ttl time.Duration,
 	key string,
-	wait <-chan struct{},
+	wait, owned <-chan struct{},
 	fn func(ctx context.Context, key string) (string, error),
 ) (val string, done bool, err error) {
 	rca.emitLockContended(1)
@@ -103,7 +104,7 @@ func (rca *cacheAside) waitForGet(
 		return "", true, err
 	}
 	if ok {
-		val, err := rca.returnGetHit(ctx, ttl, key, fn, res)
+		val, err := rca.returnGetHit(ctx, ttl, key, fn, res, owned)
 		return val, true, err
 	}
 	return "", false, nil
@@ -115,7 +116,9 @@ func (rca *cacheAside) returnGetHit(
 	key string,
 	fn func(ctx context.Context, key string) (string, error),
 	res cacheReadResult,
+	owned <-chan struct{},
 ) (string, error) {
+	rca.releaseIfUntracked(key, owned, res.untracked)
 	rca.emitCacheHits(1)
 	if rca.refreshAfter > 0 && rca.shouldRefresh(res.pttl, ttl, res.delta) {
 		rca.triggerRefresh(ctx, ttl, key, res.raw, fn)
@@ -160,20 +163,21 @@ var (
 	errLockFailed = errors.New("lock failed")
 )
 
-// cacheReadResult is tryGet's return: value, client-side PTTL, recorded
-// compute delta (0 for legacy values).
 type cacheReadResult struct {
-	raw   string
-	val   string
-	pttl  int64
-	delta time.Duration
+	raw       string
+	val       string
+	pttl      int64
+	delta     time.Duration
+	untracked bool
 }
 
 func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string) (cacheReadResult, error) {
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), ttl)
 	val, err := resp.ToString()
+	val, err = rca.cachedReadValue(ctx, key, val, err)
+	untracked := readUntracked(resp)
 	if rueidis.IsRedisNil(err) || strings.HasPrefix(val, rca.lockPrefix) {
-		return cacheReadResult{}, errNotFound
+		return cacheReadResult{untracked: untracked}, errNotFound
 	}
 	if err != nil {
 		rca.emitRedisError("read")
@@ -184,7 +188,27 @@ func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 	if rca.refreshAfter > 0 {
 		pttl = resp.CachePTTL()
 	}
-	return cacheReadResult{raw: val, val: plain, pttl: pttl, delta: delta}, nil
+	return cacheReadResult{raw: val, val: plain, pttl: pttl, delta: delta, untracked: untracked}, nil
+}
+
+// cachedReadValue retries an aborted cached read in cluster mode with one plain
+// GET to follow ASK when Valkey 9 returns it as the EXEC reply during slot migration.
+// Fallback hits skip refresh-ahead because a plain GET has no cache TTL.
+func (rca *cacheAside) cachedReadValue(ctx context.Context, key, val string, err error) (string, error) {
+	if !rca.shouldRetryCachedRead(err) {
+		return val, err
+	}
+	rca.emitRedisError("read_fallback")
+	val, retryErr := rca.client.Do(ctx, rca.client.B().Get().Key(key).Build()).ToString()
+	if retryErr != nil && !rueidis.IsRedisNil(retryErr) {
+		return "", errors.Join(err, retryErr)
+	}
+	return val, retryErr
+}
+
+func (rca *cacheAside) shouldRetryCachedRead(err error) bool {
+	// Only cluster clients can follow ASK, and an abort can also signal an EXEC permission failure.
+	return errors.Is(err, rueidis.ErrDoCacheAborted) && rca.client.Mode() == rueidis.ClientModeCluster
 }
 
 func (rca *cacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key string, fn func(ctx context.Context, key string) (string, error)) (val string, err error) {

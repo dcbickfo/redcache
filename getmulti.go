@@ -2,6 +2,7 @@ package redcache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -22,12 +23,15 @@ func (rca *cacheAside) getMulti(
 	if len(keys) == 0 {
 		return map[string]string{}, nil
 	}
-	// An error exit releases the entries this call leads, as in get.
 	var owned entryOwner
+	failed := true
+	defer func() {
+		if failed {
+			rca.releaseFinished(owned, true)
+		}
+	}()
 	res, err := rca.getMultiLoop(ctx, ttl, keys, fn, &owned)
-	if err != nil {
-		rca.releaseOwned(owned)
-	}
+	failed = err != nil
 	return res, err
 }
 
@@ -68,7 +72,7 @@ retry:
 	leaderKeys := rca.registerPending(pending, chans, (*leaderKeysP)[:0], owned)
 	*leaderKeysP = leaderKeys
 
-	if err := rca.readGetMultiHits(ctx, ttl, pending, res, needRefreshP, fn); err != nil {
+	if err := rca.readGetMultiHits(ctx, ttl, pending, res, needRefreshP, *owned, fn); err != nil {
 		return nil, err
 	}
 
@@ -76,7 +80,7 @@ retry:
 
 	if len(pending) > 0 {
 		rca.emitCacheMisses(len(pending))
-		lost, err := rca.runLeaderSets(ctx, ttl, leaderKeys, fn, res)
+		lost, err := rca.runLeaderSets(ctx, ttl, leaderKeys, fn, res, *owned)
 		if err != nil {
 			return nil, err
 		}
@@ -90,7 +94,7 @@ retry:
 	if len(pending) > 0 {
 		var done bool
 		var waitErr error
-		pending, chans, done, waitErr = rca.waitForGetMulti(ctx, ttl, pending, chans, res, needRefreshP, fn)
+		pending, chans, done, waitErr = rca.waitForGetMulti(ctx, ttl, pending, chans, res, needRefreshP, *owned, fn)
 		if waitErr != nil {
 			return nil, waitErr
 		}
@@ -121,11 +125,12 @@ func (rca *cacheAside) readGetMultiHits(
 	pending []string,
 	res map[string]string,
 	needRefreshP *[]string,
+	owned entryOwner,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
 ) error {
 	hitsBefore := len(res)
 	needRefresh := resetNeedRefresh(needRefreshP)
-	needRefresh, needRefreshExpected, err := rca.tryGetMulti(ctx, ttl, pending, res, needRefresh)
+	needRefresh, needRefreshExpected, err := rca.tryGetMulti(ctx, ttl, pending, res, needRefresh, owned)
 	if err != nil {
 		return err
 	}
@@ -158,12 +163,13 @@ func (rca *cacheAside) waitForGetMulti(
 	chans []<-chan struct{},
 	res map[string]string,
 	needRefreshP *[]string,
+	owned entryOwner,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
 ) ([]string, []<-chan struct{}, bool, error) {
 	// Followers + leaders whose NX lost: wait for the holder's invalidation
 	// (or the jittered poll fallback / lockTTL).
 	rca.emitLockContended(len(pending))
-	polled, err := rca.awaitGetMulti(ctx, ttl, pending, chans, res, needRefreshP, fn)
+	polled, err := rca.awaitGetMulti(ctx, ttl, pending, chans, res, needRefreshP, owned, fn)
 	if err != nil {
 		return pending, chans, false, err
 	}
@@ -181,22 +187,15 @@ func (rca *cacheAside) awaitGetMulti(
 	chans []<-chan struct{},
 	res map[string]string,
 	needRefreshP *[]string,
+	owned entryOwner,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
 ) (bool, error) {
 	return rca.awaitLockMultiOrPoll(ctx, chans, func() (bool, error) {
 		hitsBefore := len(res)
-		needRefresh := resetNeedRefresh(needRefreshP)
-		needRefresh, needRefreshExpected, err := rca.tryGetMulti(ctx, ttl, pending, res, needRefresh)
-		if err != nil {
+		if err := rca.readGetMultiHits(ctx, ttl, pending, res, needRefreshP, owned, fn); err != nil {
 			return false, err
 		}
-		storeNeedRefresh(needRefreshP, needRefresh)
-		hits := len(res) - hitsBefore
-		rca.emitCacheHits(hits)
-		if len(needRefresh) > 0 {
-			rca.triggerMultiRefresh(ctx, ttl, needRefresh, needRefreshExpected, fn)
-		}
-		return hits > 0, nil
+		return len(res) > hitsBefore, nil
 	})
 }
 
@@ -208,6 +207,7 @@ func (rca *cacheAside) runLeaderSets(
 	leaderKeys []string,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
 	res map[string]string,
+	owned entryOwner,
 ) (lost int, err error) {
 	n := 0
 	for _, k := range leaderKeys {
@@ -220,7 +220,7 @@ func (rca *cacheAside) runLeaderSets(
 	if len(leaderKeys) == 0 {
 		return 0, nil
 	}
-	return rca.trySetMultiKeyFn(ctx, ttl, leaderKeys, fn, res)
+	return rca.trySetMultiKeyFn(ctx, ttl, leaderKeys, fn, res, owned)
 }
 
 // filterResolved drops keys present in resolved from pending+chans in place,
@@ -250,46 +250,80 @@ func (rca *cacheAside) tryGetMulti(
 	keys []string,
 	res map[string]string,
 	needRefresh []string,
+	owned entryOwner,
 ) ([]string, map[string]string, error) {
-	multiP := cacheableTTLPool.Get(len(keys))
-	defer cacheableTTLPool.Put(multiP)
-	multi := *multiP
-	rca.fillCacheableTTLs(multi, ttl, keys)
-	resps := rca.client.DoMultiCache(ctx, multi...)
-	if len(resps) != len(keys) {
-		return needRefresh, nil, fmt.Errorf("tryGetMulti: response/key length mismatch: %d resps vs %d keys", len(resps), len(keys))
+	resps, err := rca.readMultiCache(ctx, ttl, keys)
+	if err != nil {
+		return needRefresh, nil, err
 	}
 
 	var needRefreshExpected map[string]string
-	for i, resp := range resps {
-		var err error
-		needRefresh, needRefreshExpected, err = rca.collectGetMultiResponse(
+	for i, key := range keys {
+		needRefresh, needRefreshExpected = rca.collectGetMultiResponse(
 			ttl,
-			keys[i],
-			resp,
+			key,
+			resps[i],
 			res,
 			needRefresh,
 			needRefreshExpected,
 			len(keys),
+			owned,
 		)
-		if err != nil {
-			return needRefresh, needRefreshExpected, err
-		}
 	}
 	return needRefresh, needRefreshExpected, nil
 }
 
-func (rca *cacheAside) fillCacheableTTLs(
-	dst []rueidis.CacheableTTL,
-	ttl time.Duration,
-	keys []string,
-) {
+// On success, readMultiCache returns replies decodable as strings and Redis nil replies.
+func (rca *cacheAside) readMultiCache(ctx context.Context, ttl time.Duration, keys []string) ([]rueidis.RedisResult, error) {
+	multiP := cacheableTTLPool.Get(len(keys))
+	defer cacheableTTLPool.Put(multiP)
+	multi := *multiP
 	for i, key := range keys {
-		dst[i] = rueidis.CacheableTTL{
+		multi[i] = rueidis.CacheableTTL{
 			Cmd: rca.client.B().Get().Key(key).Cache(),
 			TTL: ttl,
 		}
 	}
+	resps := rca.client.DoMultiCache(ctx, multi...)
+	if len(resps) != len(keys) {
+		return nil, fmt.Errorf("cached read: response/key length mismatch: %d resps vs %d keys", len(resps), len(keys))
+	}
+
+	var aborted []int
+	// A terminal error in the cached batch precludes retrying any key.
+	for i, resp := range resps {
+		_, err := resp.ToString()
+		if rca.shouldRetryCachedRead(err) {
+			aborted = append(aborted, i)
+		} else if err != nil && !rueidis.IsRedisNil(err) {
+			rca.emitRedisError("read")
+			return nil, fmt.Errorf("read key %q: %w", keys[i], err)
+		}
+	}
+	if len(aborted) != 0 {
+		return resps, rca.retryAbortedReads(ctx, keys, aborted, resps)
+	}
+	return resps, nil
+}
+
+func (rca *cacheAside) retryAbortedReads(ctx context.Context, keys []string, aborted []int, resps []rueidis.RedisResult) error {
+	cmds := make(rueidis.Commands, len(aborted))
+	for i, index := range aborted {
+		cmds[i] = rca.client.B().Get().Key(keys[index]).Build()
+	}
+	rca.emitRedisError("read_fallback")
+	plain := rca.client.DoMulti(ctx, cmds...)
+	if len(plain) != len(aborted) {
+		return fmt.Errorf("plain read: response/key length mismatch: %d resps vs %d keys", len(plain), len(aborted))
+	}
+	for i, index := range aborted {
+		if _, err := plain[i].ToString(); err != nil && !rueidis.IsRedisNil(err) {
+			rca.emitRedisError("read")
+			return fmt.Errorf("read key %q: %w", keys[index], errors.Join(resps[index].Error(), err))
+		}
+		resps[index] = plain[i]
+	}
+	return nil
 }
 
 func (rca *cacheAside) collectGetMultiResponse(
@@ -300,30 +334,29 @@ func (rca *cacheAside) collectGetMultiResponse(
 	needRefresh []string,
 	needRefreshExpected map[string]string,
 	keyCount int,
-) ([]string, map[string]string, error) {
+	owned entryOwner,
+) ([]string, map[string]string) {
 	val, err := resp.ToString()
+	owned.rememberRead(key, resp)
 	if rueidis.IsRedisNil(err) {
-		return needRefresh, needRefreshExpected, nil
-	}
-	if err != nil {
-		rca.emitRedisError("read")
-		return needRefresh, needRefreshExpected, fmt.Errorf("key %q: %w", key, err)
+		return needRefresh, needRefreshExpected
 	}
 	if strings.HasPrefix(val, rca.lockPrefix) {
-		return needRefresh, needRefreshExpected, nil
+		return needRefresh, needRefreshExpected
 	}
 
+	rca.releaseUntracked(owned, key)
 	plain, delta := unwrapEnvelope(val)
 	res[key] = plain
 	if rca.refreshAfter == 0 || !rca.shouldRefresh(resp.CachePTTL(), ttl, delta) {
-		return needRefresh, needRefreshExpected, nil
+		return needRefresh, needRefreshExpected
 	}
 	if needRefreshExpected == nil {
 		needRefreshExpected = make(map[string]string, keyCount)
 	}
 	needRefresh = append(needRefresh, key)
 	needRefreshExpected[key] = val
-	return needRefresh, needRefreshExpected, nil
+	return needRefresh, needRefreshExpected
 }
 
 // unlockUnset releases the locks in lockVals whose keys never landed in res.
@@ -349,6 +382,7 @@ func (rca *cacheAside) trySetMultiKeyFn(
 	keys []string,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
 	res map[string]string,
+	owned entryOwner,
 ) (lost int, err error) {
 	lockVals, err := rca.tryLockMulti(ctx, keys)
 	if err != nil {
@@ -398,6 +432,7 @@ func (rca *cacheAside) trySetMultiKeyFn(
 
 	for _, keySet := range keysSet {
 		res[keySet] = vals[keySet]
+		rca.releaseUntracked(owned, keySet)
 	}
 
 	return len(vL) - len(keysSet), nil

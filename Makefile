@@ -38,6 +38,10 @@ test: ## Run all tests (needs Redis and Redis Cluster — see redis-up)
 test-short: ## Run tests with -short
 	$(GO) test -short $(PKG)
 
+.PHONY: test-server
+test-server: ## Run root package tests against the configured server
+	$(GO) test -count=1 .
+
 .PHONY: test-race
 test-race: ## Run tests with the race detector
 	$(GO) test -race -count=1 $(PKG)

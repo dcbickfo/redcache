@@ -1,18 +1,23 @@
 services:
   redis:
-    image: redis:7.2.4-alpine
+    image: ${REDCACHE_SERVER_IMAGE:-redis:7.2}
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -qx PONG"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
 
   redis-cluster:
-    image: redis:7.2.4-alpine
+    image: ${REDCACHE_SERVER_IMAGE:-redis:7.2}
     entrypoint: ["/bin/sh", "/redis-cluster.sh"]
     volumes:
       - ./scripts/redis-cluster.sh:/redis-cluster.sh:ro
     ports:
-      - "30001-30006:30001-30006"
+      - "127.0.0.1:30001-30006:30001-30006"
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -p 30001 cluster info | grep -q cluster_state:ok"]
+      test: ["CMD", "/bin/sh", "/redis-cluster.sh", "healthcheck"]
       interval: 1s
       timeout: 2s
       retries: 30
