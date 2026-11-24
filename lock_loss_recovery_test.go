@@ -185,6 +185,10 @@ func TestLockRecovery_FollowerAfterWriteAndDelete(t *testing.T) {
 			awaitLockRecoveryTest(t, gate.waiting)
 			close(publish)
 			require.NoError(t, awaitLockRecoveryTest(t, written))
+			value, found, err := other.Peek[string, string](ctx, time.Minute, key)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, "published", value)
 			require.NoError(t, other.Del(ctx, key))
 			close(gate.resume)
 
