@@ -264,6 +264,7 @@ func (rca *cacheAside) tryGetMulti(
 	for i, resp := range resps {
 		var err error
 		needRefresh, needRefreshExpected, err = rca.collectGetMultiResponse(
+			ctx,
 			ttl,
 			keys[i],
 			resp,
@@ -293,6 +294,7 @@ func (rca *cacheAside) fillCacheableTTLs(
 }
 
 func (rca *cacheAside) collectGetMultiResponse(
+	ctx context.Context,
 	ttl time.Duration,
 	key string,
 	resp rueidis.RedisResult,
@@ -302,6 +304,7 @@ func (rca *cacheAside) collectGetMultiResponse(
 	keyCount int,
 ) ([]string, map[string]string, error) {
 	val, err := resp.ToString()
+	val, err = rca.cachedReadValue(ctx, key, val, err)
 	if rueidis.IsRedisNil(err) {
 		return needRefresh, needRefreshExpected, nil
 	}

@@ -155,6 +155,7 @@ func (rca *cacheAside) waitForFailedKey(
 	waitChan, _ := rca.registerOwned(owned, firstFailed)
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(firstFailed).Cache(), rca.lockTTL)
 	val, rerr := resp.ToString()
+	val, rerr = rca.cachedReadValue(ctx, firstFailed, val, rerr)
 	if rueidis.IsRedisNil(rerr) {
 		return nil
 	}

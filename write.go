@@ -122,6 +122,7 @@ func (rca *cacheAside) acquireSingleWriteLock(
 
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), rca.lockTTL)
 	val, rerr := resp.ToString()
+	val, rerr = rca.cachedReadValue(ctx, key, val, rerr)
 	if rerr != nil && !rueidis.IsRedisNil(rerr) {
 		rca.emitRedisError("read")
 		return savedValue{}, false, fmt.Errorf("read key %q: %w", key, rerr)
@@ -158,6 +159,7 @@ func (rca *cacheAside) waitForWriteLockRelease(ctx context.Context, key string, 
 func (rca *cacheAside) isWriteLocked(ctx context.Context, key string) (bool, error) {
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), rca.lockTTL)
 	val, err := resp.ToString()
+	val, err = rca.cachedReadValue(ctx, key, val, err)
 	if rueidis.IsRedisNil(err) {
 		return false, nil
 	}
@@ -355,6 +357,7 @@ func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string, owne
 	var first firstKeyErr
 	for i := range keys {
 		val, err := resps[i].ToString()
+		val, err = rca.cachedReadValue(ctx, keys[i], val, err)
 		if rueidis.IsRedisNil(err) {
 			continue
 		}
@@ -406,6 +409,7 @@ func (rca *cacheAside) anyWriteLocked(ctx context.Context, keys []string) (bool,
 	}
 	for i, resp := range resps {
 		val, err := resp.ToString()
+		val, err = rca.cachedReadValue(ctx, keys[i], val, err)
 		if rueidis.IsRedisNil(err) {
 			continue
 		}

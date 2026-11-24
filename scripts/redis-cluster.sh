@@ -6,6 +6,13 @@
 # see its replica take over within a few seconds.
 set -eu
 
+# All cluster nodes share a container and the cluster bus ports stay private.
+# Redis 8.12 requires explicit opt-out when running the test cluster without TLS.
+set --
+case "$(redis-server --version)" in
+	'Redis server v=8.12.'*) set -- --cluster-bus-port-protected-mode no ;;
+esac
+
 ports="30001 30002 30003 30004 30005 30006"
 for port in $ports; do
 	# Start empty: /data is a volume that outlives the container, and a stale
@@ -15,7 +22,7 @@ for port in $ports; do
 	redis-server --port "$port" --dir "/data/$port" --daemonize yes \
 		--cluster-enabled yes --cluster-config-file nodes.conf \
 		--cluster-announce-ip 127.0.0.1 --cluster-node-timeout 2000 \
-		--enable-debug-command yes --appendonly no --save ''
+		--enable-debug-command yes --appendonly no --save '' "$@"
 done
 for port in $ports; do
 	until redis-cli -p "$port" ping >/dev/null 2>&1; do sleep 0.1; done

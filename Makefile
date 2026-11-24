@@ -38,6 +38,15 @@ test: ## Run all tests (needs Redis and Redis Cluster — see redis-up)
 test-short: ## Run tests with -short
 	$(GO) test -short $(PKG)
 
+# The server suite lives in the root package. Keep the unit cases in the mixed
+# Cache and RefreshAhead families on the full-suite job.
+SERVER_TESTS := Cache_|Cluster_|CBWrapper_|Concurrent|Conn_|Get(Multi)?_|Set(Multi)?_|Typed_|RefreshAhead_|Metrics_|Peek_|LuaScript_|RestoreValue|BestEffortUnlock_|TouchMultiLocks_|WaitFor(FailedKey|ReadLocks)_|NewBytes_|New_NilCodecPanics|Write_InvalidTTLRejected
+SERVER_TEST_SKIP := ^TestCache_(DuplicateEncodedKeysStopBeforeCore|EncodeMultiResultRejectsDuplicateEncodedKeys|InfersValueTypesPerOperation|KeyEncodeErrorStopsBeforeCore)$$|^TestRefreshAhead_FractionValidation$$/^(negative_.*|fraction_.*)$$
+
+.PHONY: test-server
+test-server: ## Run single-node and cluster integration tests without race or coverage
+	$(GO) test -count=1 -run '^Test($(SERVER_TESTS))' -skip '$(SERVER_TEST_SKIP)' .
+
 .PHONY: test-race
 test-race: ## Run tests with the race detector
 	$(GO) test -race -count=1 $(PKG)

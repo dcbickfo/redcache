@@ -172,6 +172,7 @@ type cacheReadResult struct {
 func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string) (cacheReadResult, error) {
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), ttl)
 	val, err := resp.ToString()
+	val, err = rca.cachedReadValue(ctx, key, val, err)
 	if rueidis.IsRedisNil(err) || strings.HasPrefix(val, rca.lockPrefix) {
 		return cacheReadResult{}, errNotFound
 	}
@@ -185,6 +186,15 @@ func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 		pttl = resp.CachePTTL()
 	}
 	return cacheReadResult{raw: val, val: plain, pttl: pttl, delta: delta}, nil
+}
+
+func (rca *cacheAside) cachedReadValue(ctx context.Context, key, val string, err error) (string, error) {
+	// Valkey 9 can return ASK from EXEC itself during slot migration. Rueidis
+	// reports that as ErrDoCacheAborted, while an ordinary GET follows ASK.
+	if errors.Is(err, rueidis.ErrDoCacheAborted) {
+		return rca.client.Do(ctx, rca.client.B().Get().Key(key).Build()).ToString()
+	}
+	return val, err
 }
 
 func (rca *cacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key string, fn func(ctx context.Context, key string) (string, error)) (val string, err error) {
