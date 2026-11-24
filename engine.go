@@ -276,11 +276,30 @@ func (rca *cacheAside) nextLockPollDelay() time.Duration {
 	return minDelay + time.Duration(rand.Int64N(int64(maxDelay-minDelay)))
 }
 
-// entryOwner records the local wait entries one call created (register
-// returned leader=true). Nothing else wakes an entry its creator abandons
-// before writing to Redis, so an error exit must releaseOwned them, or local
-// followers park on them until lockTTL.
-type entryOwner map[string]<-chan struct{}
+// entryOwner records a call's own wait entries and their latest read's tracking status.
+type entryOwner map[string]ownedEntry
+
+type ownedEntry struct {
+	wait      <-chan struct{}
+	untracked bool
+}
+
+// readUntracked uses rueidis's missing expiry metadata (CachePXAT and CachePTTL
+// both return -1) because plain reads, DisableCache, and RESP2 without caching
+// do not subscribe to invalidations. Redis 7.2 and Valkey 8.1 also clear the
+// tracking opt-in after ASKING, so a successful ASK read can lack tracking.
+func readUntracked(resp rueidis.RedisResult) bool {
+	return resp.CachePXAT() == -1
+}
+
+func (o entryOwner) rememberRead(key string, resp rueidis.RedisResult) {
+	if entry, ok := o[key]; ok {
+		if untracked := readUntracked(resp); entry.untracked != untracked {
+			entry.untracked = untracked
+			o[key] = entry
+		}
+	}
+}
 
 // registerOwned is register that records a created entry in o.
 func (rca *cacheAside) registerOwned(o *entryOwner, key string) (<-chan struct{}, bool) {
@@ -289,14 +308,30 @@ func (rca *cacheAside) registerOwned(o *entryOwner, key string) (<-chan struct{}
 		if *o == nil {
 			*o = make(entryOwner)
 		}
-		(*o)[key] = wait
+		(*o)[key] = ownedEntry{wait: wait}
 	}
 	return wait, leader
 }
 
-// releaseOwned releases every entry in o that is still the one it recorded.
-func (rca *cacheAside) releaseOwned(o entryOwner) {
-	for key, wait := range o {
+// releaseFinished wakes followers after a panic, an error, or a write whose
+// read lacked tracking, since an invalidation may never arrive.
+func (rca *cacheAside) releaseFinished(o entryOwner, failed bool) {
+	for key, entry := range o {
+		if failed || entry.untracked {
+			rca.release(key, entry.wait)
+		}
+	}
+}
+
+func (rca *cacheAside) releaseUntracked(o entryOwner, key string) {
+	if entry := o[key]; entry.untracked {
+		rca.release(key, entry.wait)
+		delete(o, key)
+	}
+}
+
+func (rca *cacheAside) releaseIfUntracked(key string, wait <-chan struct{}, untracked bool) {
+	if wait != nil && untracked {
 		rca.release(key, wait)
 	}
 }

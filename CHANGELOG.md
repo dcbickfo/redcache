@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed cache misses that could wait for a lock nobody held after a read
+  without client-side tracking.
+- Cache reads can refill a missing key after a loader or write callback panics.
 - Fixed cache read failures during Valkey 9 cluster slot migration.
 
 ## [v0.4.1] - 2026-11-12

@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"uuid"
@@ -53,9 +55,9 @@ func do(t *testing.T, c rueidis.Client, args ...string) rueidis.RedisResult {
 // topologyTest opens a cluster client, fails fast unless the cluster is
 // healthy with three primaries, and bounds the test's Redis calls so a broken
 // topology fails the test instead of hanging it.
-func topologyTest(t *testing.T) (context.Context, *redcache.Cache, *redcache.Conn, []clusterNode) {
+func topologyTest(t *testing.T, opts ...redcache.Option) (context.Context, *redcache.Cache, *redcache.Conn, []clusterNode) {
 	t.Helper()
-	client, conn := makeClusterClient(t)
+	client, conn := makeClusterClient(t, opts...)
 	info, err := do(t, adminClient(t, "127.0.0.1:30001"), "CLUSTER", "INFO").ToString()
 	require.NoError(t, err)
 	require.Contains(t, info, "cluster_state:ok", "cluster is unhealthy; reset it with `docker compose up -d --force-recreate --wait redis-cluster`")
@@ -334,6 +336,260 @@ func TestCluster_SlotMigrationFollowsASK(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, after, got)
 	require.NoError(t, client.DelMulti(ctx, keys))
+}
+
+func askRefillTest(t *testing.T, keyCount int, opts ...redcache.Option) (context.Context, *redcache.Cache, *redcache.Cache, []string) {
+	t.Helper()
+	ctx, reader, conn, nodes := topologyTest(t, opts...)
+	writer, _ := makeClusterClient(t)
+	keys := taggedKeys(uuid.New().String(), keyCount)
+	slot := keySlot(t, conn, keys[0])
+	from := slotOwner(t, nodes, slot)
+	to := otherPrimary(t, nodes, from)
+
+	beginSlotMigration(t, slot, from, to)
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		err := writer.DelMulti(cleanupCtx, keys)
+		s := strconv.Itoa(slot)
+		for _, node := range []clusterNode{from, to} {
+			err = errors.Join(err, do(t, adminClient(t, node.addr), "CLUSTER", "SETSLOT", s, "STABLE").Error())
+		}
+		require.NoError(t, err)
+	})
+	return ctx, reader, writer, keys
+}
+
+func TestCluster_GetRefillsAfterASKHit(t *testing.T) {
+	ctx, reader, writer, keys := askRefillTest(t, 1)
+	key := keys[0]
+	require.NoError(t, writer.ForceSet(ctx, time.Minute, key, "seed"))
+	got, err := reader.Get(ctx, time.Minute, key, func(context.Context, string) (string, error) {
+		return "", errors.New("loader must not run on a hit")
+	})
+	require.NoError(t, err)
+	require.Equal(t, "seed", got)
+	for round := 1; round <= 2; round++ {
+		require.NoError(t, writer.Del(ctx, key))
+		want := fmt.Sprintf("refill-%d", round)
+		refillCtx, cancel := context.WithTimeout(ctx, time.Second)
+		got, err := reader.Get(refillCtx, time.Minute, key, func(context.Context, string) (string, error) {
+			return want, nil
+		})
+		cancel()
+		require.NoError(t, err, "Get refill %d", round)
+		require.Equal(t, want, got)
+
+		stored, present, err := writer.Peek[string, string](ctx, time.Minute, key)
+		require.NoError(t, err)
+		require.True(t, present)
+		require.Equal(t, want, stored)
+	}
+}
+
+func TestCluster_GetMultiRefillsAfterASKHit(t *testing.T) {
+	ctx, reader, writer, keys := askRefillTest(t, 2)
+	seed := valuesFor(keys, "seed")
+	require.NoError(t, writer.ForceSetMulti(ctx, time.Minute, seed))
+	got, err := reader.GetMulti(ctx, time.Minute, keys, noLoader)
+	require.NoError(t, err)
+	require.Equal(t, seed, got)
+	requireASKMultiRefills(t, ctx, reader, writer, keys)
+}
+
+func requireASKMultiRefills(t *testing.T, ctx context.Context, reader, writer *redcache.Cache, keys []string) {
+	t.Helper()
+	for round := 1; round <= 2; round++ {
+		require.NoError(t, writer.DelMulti(ctx, keys))
+		want := valuesFor(keys, fmt.Sprintf("refill-%d", round))
+		refillCtx, cancel := context.WithTimeout(ctx, time.Second)
+		got, err := reader.GetMulti(refillCtx, time.Minute, keys, exactLoader(want))
+		cancel()
+		require.NoError(t, err, "GetMulti refill %d", round)
+		require.Equal(t, want, got)
+
+		stored, err := writer.GetMulti(ctx, time.Minute, keys, noLoader)
+		require.NoError(t, err)
+		require.Equal(t, want, stored)
+	}
+}
+
+func TestCluster_RefillsAfterASKPublication(t *testing.T) {
+	for _, operation := range []string{"Get", "GetMulti", "Set", "SetMulti"} {
+		t.Run(operation, func(t *testing.T) {
+			keyCount := 2
+			if operation == "Get" || operation == "Set" {
+				keyCount = 1
+			}
+			ctx, reader, writer, keys := askRefillTest(t, keyCount)
+			seed := valuesFor(keys, "seed")
+			single := func(_ context.Context, key string) (string, error) { return seed[key], nil }
+			switch operation {
+			case "Get":
+				_, err := reader.Get(ctx, time.Minute, keys[0], single)
+				require.NoError(t, err)
+			case "GetMulti":
+				_, err := reader.GetMulti(ctx, time.Minute, keys, exactLoader(seed))
+				require.NoError(t, err)
+			case "Set":
+				require.NoError(t, reader.Set(ctx, time.Minute, keys[0], single))
+			case "SetMulti":
+				require.NoError(t, reader.SetMulti(ctx, time.Minute, keys, exactLoader(seed)))
+			}
+			stored, err := writer.GetMulti(ctx, time.Minute, keys, noLoader)
+			require.NoError(t, err)
+			require.Equal(t, seed, stored)
+			requireASKMultiRefills(t, ctx, reader, writer, keys)
+		})
+	}
+}
+
+func TestCluster_RefillsAfterCallbackPanic(t *testing.T) {
+	const panicValue = "callback panic"
+	panicSingle := func(context.Context, string) (string, error) { panic(panicValue) }
+	panicMulti := func(context.Context, []string) (map[string]string, error) { panic(panicValue) }
+	for _, operation := range []string{"Get", "GetMulti", "Set", "SetMulti"} {
+		t.Run(operation, func(t *testing.T) {
+			multi := operation == "GetMulti" || operation == "SetMulti"
+			keyCount := 1
+			if multi {
+				keyCount = 2
+			}
+			ctx, reader, _, keys := askRefillTest(t, keyCount, redcache.WithLockTTL(30*time.Second))
+			_, conn := makeClusterClient(t)
+			require.PanicsWithValue(t, panicValue, func() {
+				switch operation {
+				case "Get":
+					_, _ = reader.Get(ctx, time.Minute, keys[0], panicSingle)
+				case "GetMulti":
+					_, _ = reader.GetMulti(ctx, time.Minute, keys, panicMulti)
+				case "Set":
+					_ = reader.Set(ctx, time.Minute, keys[0], panicSingle)
+				case "SetMulti":
+					_ = reader.SetMulti(ctx, time.Minute, keys, panicMulti)
+				}
+			})
+			client := conn.Client()
+			for _, key := range keys {
+				exists, err := client.Do(ctx, client.B().Exists().Key(key).Build()).AsInt64()
+				require.NoError(t, err)
+				require.Zero(t, exists, "the panic must roll back the Redis lock")
+			}
+
+			refillCtx, cancel := context.WithTimeout(ctx, time.Second)
+			defer cancel()
+			if multi {
+				want := valuesFor(keys, "refill")
+				got, err := reader.GetMulti(refillCtx, time.Minute, keys, exactLoader(want))
+				require.NoError(t, err, "GetMulti must refill on the same connection after the panic")
+				require.Equal(t, want, got)
+				return
+			}
+			got, err := reader.Get(refillCtx, time.Minute, keys[0], func(context.Context, string) (string, error) {
+				return "refilled", nil
+			})
+			require.NoError(t, err, "Get must refill on the same connection after the panic")
+			require.Equal(t, "refilled", got)
+		})
+	}
+}
+
+type stampedeMetrics struct {
+	redcache.NoopMetrics
+	waiting chan struct{}
+}
+
+func (m stampedeMetrics) LockContended(int64) {
+	select {
+	case m.waiting <- struct{}{}:
+	default:
+	}
+}
+
+func TestCluster_GetStampedeAfterASK(t *testing.T) {
+	for _, primer := range []string{"hit", "miss"} {
+		t.Run(primer, func(t *testing.T) {
+			metrics := stampedeMetrics{waiting: make(chan struct{}, 1)}
+			ctx, reader, writer, keys := askRefillTest(t, 1,
+				redcache.WithLockTTL(30*time.Second), redcache.WithMetrics(metrics))
+			key := keys[0]
+			if primer == "hit" {
+				require.NoError(t, writer.ForceSet(ctx, time.Minute, key, "seed"))
+			}
+			got, err := reader.Get(ctx, time.Minute, key, func(context.Context, string) (string, error) {
+				if primer == "hit" {
+					return "", errors.New("loader must not run on a hit")
+				}
+				return "seed", nil
+			})
+			require.NoError(t, err)
+			require.Equal(t, "seed", got)
+			require.NoError(t, writer.Del(ctx, key))
+
+			const callers = 16
+			callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			deadline, _ := callCtx.Deadline()
+			loaderStarted := make(chan struct{})
+			releaseLoader := make(chan struct{})
+			type result struct {
+				value    string
+				err      error
+				finished time.Time
+			}
+			results := make(chan result, callers)
+			var loads atomic.Int32
+			var workers sync.WaitGroup
+			startCaller := func() {
+				workers.Go(func() {
+					value, err := reader.Get(callCtx, time.Minute, key, func(loaderCtx context.Context, _ string) (string, error) {
+						if loads.Add(1) == 1 {
+							close(loaderStarted)
+						}
+						select {
+						case <-releaseLoader:
+							return "refilled", nil
+						case <-loaderCtx.Done():
+							return "", loaderCtx.Err()
+						}
+					})
+					results <- result{value, err, time.Now()}
+				})
+			}
+			startCaller()
+			select {
+			case <-loaderStarted:
+			case <-callCtx.Done():
+				workers.Wait()
+				t.Fatalf("loader did not start before the caller deadline: %v", callCtx.Err())
+			}
+			// Count contention only after the leader enters its loader.
+			select {
+			case <-metrics.waiting:
+			default:
+			}
+			for range callers - 1 {
+				startCaller()
+			}
+			select {
+			case <-metrics.waiting:
+				close(releaseLoader)
+			case <-callCtx.Done():
+				workers.Wait()
+				t.Fatalf("no follower waited before the caller deadline: %v", callCtx.Err())
+			}
+			workers.Wait()
+			for range callers {
+				got := <-results
+				require.NoError(t, got.err)
+				require.True(t, got.finished.Before(deadline), "caller returned after its deadline")
+				require.Equal(t, "refilled", got.value)
+			}
+			t.Logf("Loader count for %d concurrent callers: %d", callers, loads.Load())
+			require.EqualValues(t, 1, loads.Load())
+		})
+	}
 }
 
 // TestCluster_PrimaryFailover freezes a primary with DEBUG SLEEP until its

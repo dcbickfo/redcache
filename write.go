@@ -23,14 +23,11 @@ func (rca *cacheAside) set(
 	key string,
 	fn func(ctx context.Context, key string) (string, error),
 ) error {
-	// Writers register only to wait, but an entry they create is theirs: on an
-	// error exit release it so a Get parked on it retries instead of waiting
-	// out lockTTL (no Redis write may follow to invalidate it).
 	var owned entryOwner
+	failed := true
+	defer func() { rca.releaseFinished(owned, failed) }()
 	err := rca.setLoop(ctx, ttl, key, fn, &owned)
-	if err != nil {
-		rca.releaseOwned(owned)
-	}
+	failed = err != nil
 	return err
 }
 
@@ -123,6 +120,7 @@ func (rca *cacheAside) acquireSingleWriteLock(
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), rca.lockTTL)
 	val, rerr := resp.ToString()
 	val, rerr = rca.cachedReadValue(ctx, key, val, rerr)
+	(*owned).rememberRead(key, resp)
 	if rerr != nil && !rueidis.IsRedisNil(rerr) {
 		rca.emitRedisError("read")
 		return savedValue{}, false, fmt.Errorf("read key %q: %w", key, rerr)
@@ -130,7 +128,7 @@ func (rca *cacheAside) acquireSingleWriteLock(
 
 	if !rueidis.IsRedisNil(rerr) && strings.HasPrefix(val, rca.lockPrefix) {
 		rca.emitLockContended(1)
-		return savedValue{}, true, rca.waitForWriteLockRelease(ctx, key, waitChan)
+		return savedValue{}, true, rca.waitForWriteLockRelease(ctx, key, waitChan, *owned)
 	}
 
 	acquired, saved, err := rca.tryAcquireWriteLock(ctx, key, lockVal, lockTTLMs)
@@ -140,14 +138,14 @@ func (rca *cacheAside) acquireSingleWriteLock(
 	if !acquired {
 		// Another lock appeared between DoCache and Exec.
 		rca.emitLockContended(1)
-		return savedValue{}, true, rca.waitForWriteLockRelease(ctx, key, waitChan)
+		return savedValue{}, true, rca.waitForWriteLockRelease(ctx, key, waitChan, *owned)
 	}
 	return saved, false, nil
 }
 
-func (rca *cacheAside) waitForWriteLockRelease(ctx context.Context, key string, waitChan <-chan struct{}) error {
+func (rca *cacheAside) waitForWriteLockRelease(ctx context.Context, key string, waitChan <-chan struct{}, owned entryOwner) error {
 	_, err := rca.awaitLockOrPoll(ctx, waitChan, func() (bool, error) {
-		locked, err := rca.isWriteLocked(ctx, key)
+		locked, err := rca.isWriteLocked(ctx, key, owned)
 		if err != nil {
 			return false, err
 		}
@@ -156,10 +154,11 @@ func (rca *cacheAside) waitForWriteLockRelease(ctx context.Context, key string, 
 	return err
 }
 
-func (rca *cacheAside) isWriteLocked(ctx context.Context, key string) (bool, error) {
+func (rca *cacheAside) isWriteLocked(ctx context.Context, key string, owned entryOwner) (bool, error) {
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), rca.lockTTL)
 	val, err := resp.ToString()
 	val, err = rca.cachedReadValue(ctx, key, val, err)
+	owned.rememberRead(key, resp)
 	if rueidis.IsRedisNil(err) {
 		return false, nil
 	}
@@ -183,12 +182,11 @@ func (rca *cacheAside) setMulti(
 	if len(keys) == 0 {
 		return nil
 	}
-	// As in set: release the entries this call created on an error exit.
 	var owned entryOwner
+	failed := true
+	defer func() { rca.releaseFinished(owned, failed) }()
 	err := rca.setMultiLocked(ctx, ttl, keys, fn, &owned)
-	if err != nil {
-		rca.releaseOwned(owned)
-	}
+	failed = err != nil
 	return err
 }
 
@@ -358,6 +356,7 @@ func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string, owne
 	for i := range keys {
 		val, err := resps[i].ToString()
 		val, err = rca.cachedReadValue(ctx, keys[i], val, err)
+		(*owned).rememberRead(keys[i], resps[i])
 		if rueidis.IsRedisNil(err) {
 			continue
 		}
@@ -379,12 +378,12 @@ func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string, owne
 	if len(*lockedChansP) == 0 {
 		return nil
 	}
-	return rca.waitForWriteLocksRelease(ctx, *lockedKeysP, *lockedChansP)
+	return rca.waitForWriteLocksRelease(ctx, *lockedKeysP, *lockedChansP, *owned)
 }
 
-func (rca *cacheAside) waitForWriteLocksRelease(ctx context.Context, keys []string, waitChans []<-chan struct{}) error {
+func (rca *cacheAside) waitForWriteLocksRelease(ctx context.Context, keys []string, waitChans []<-chan struct{}, owned entryOwner) error {
 	_, err := rca.awaitLockMultiOrPoll(ctx, waitChans, func() (bool, error) {
-		locked, err := rca.anyWriteLocked(ctx, keys)
+		locked, err := rca.anyWriteLocked(ctx, keys, owned)
 		if err != nil {
 			return false, err
 		}
@@ -393,7 +392,7 @@ func (rca *cacheAside) waitForWriteLocksRelease(ctx context.Context, keys []stri
 	return err
 }
 
-func (rca *cacheAside) anyWriteLocked(ctx context.Context, keys []string) (bool, error) {
+func (rca *cacheAside) anyWriteLocked(ctx context.Context, keys []string, owned entryOwner) (bool, error) {
 	multiP := cacheableTTLPool.Get(len(keys))
 	defer cacheableTTLPool.Put(multiP)
 	multi := *multiP
@@ -410,6 +409,7 @@ func (rca *cacheAside) anyWriteLocked(ctx context.Context, keys []string) (bool,
 	for i, resp := range resps {
 		val, err := resp.ToString()
 		val, err = rca.cachedReadValue(ctx, keys[i], val, err)
+		owned.rememberRead(keys[i], resp)
 		if rueidis.IsRedisNil(err) {
 			continue
 		}

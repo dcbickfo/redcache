@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -15,22 +16,80 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type uncachedGetClient struct {
+type readTestClient struct {
 	rueidis.Client
 	commands [][]string
+	cached   []rueidis.RedisResult
 }
 
-func (*uncachedGetClient) B() rueidis.Builder { return rueidis.Builder{} }
+func (*readTestClient) B() rueidis.Builder { return rueidis.Builder{} }
 
-func (c *uncachedGetClient) Do(_ context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+func (c *readTestClient) Do(_ context.Context, cmd rueidis.Completed) rueidis.RedisResult {
 	c.commands = append(c.commands, slices.Clone(cmd.Commands()))
 	return rueidis.RedisResult{}
+}
+
+func (c *readTestClient) DoCache(context.Context, rueidis.Cacheable, time.Duration) rueidis.RedisResult {
+	return c.cached[0]
+}
+
+func (c *readTestClient) DoMultiCache(context.Context, ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	return slices.Clone(c.cached)
+}
+
+func TestTrackedHitKeepsWaitEntry(t *testing.T) {
+	t.Parallel()
+
+	const key = "read:{3560}"
+	const want = "tracked value"
+	expiry := time.Now().Add(time.Minute).UnixMilli()
+	message := redisStringMessage(t, want)
+	encoded := message.CacheMarshal(nil)
+	expiryBytes := binary.LittleEndian.AppendUint64(nil, uint64(expiry))
+	copy(encoded[:7], expiryBytes[:7])
+	require.NoError(t, message.CacheUnmarshalView(encoded))
+	reply := redisResult(t, message, nil)
+	require.Equal(t, expiry, reply.CachePXAT())
+
+	for _, operation := range []string{"Get", "GetMulti"} {
+		t.Run(operation, func(t *testing.T) {
+			client := &readTestClient{cached: []rueidis.RedisResult{reply}}
+			rca := &cacheAside{client: client, lockTTL: time.Minute, lockPrefix: "lock:"}
+			if operation == "Get" {
+				got, err := rca.get(t.Context(), time.Minute, key, nil)
+				require.NoError(t, err)
+				require.Equal(t, want, got)
+			} else {
+				got, err := rca.getMulti(t.Context(), time.Minute, []string{key}, nil)
+				require.NoError(t, err)
+				require.Equal(t, map[string]string{key: want}, got)
+			}
+			entry, ok := rca.locks.Load(key)
+			require.True(t, ok)
+			defer rca.release(key, entry.done)
+			select {
+			case <-entry.done:
+				t.Fatal("tracked hit closed its wait channel")
+			default:
+			}
+		})
+	}
+}
+
+func redisResult(t *testing.T, val rueidis.RedisMessage, err error) rueidis.RedisResult {
+	t.Helper()
+	var result rueidis.RedisResult
+	// Use rueidis's result fields to supply both transport errors and server replies.
+	fields := reflect.ValueOf(&result).Elem()
+	*(*error)(fields.FieldByName("err").Addr().UnsafePointer()) = err
+	*(*rueidis.RedisMessage)(fields.FieldByName("val").Addr().UnsafePointer()) = val
+	return result
 }
 
 func TestCachedReadRetriesOnlyRueidisAbort(t *testing.T) {
 	t.Parallel()
 
-	client := &uncachedGetClient{}
+	client := &readTestClient{}
 	rca := &cacheAside{client: client}
 	const key = "read:{3560}" // Slot zero matches the fake client's zero-value builder.
 	val, err := rca.cachedReadValue(t.Context(), key, "", rueidis.ErrDoCacheAborted)

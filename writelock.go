@@ -156,6 +156,7 @@ func (rca *cacheAside) waitForFailedKey(
 	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(firstFailed).Cache(), rca.lockTTL)
 	val, rerr := resp.ToString()
 	val, rerr = rca.cachedReadValue(ctx, firstFailed, val, rerr)
+	(*owned).rememberRead(firstFailed, resp)
 	if rueidis.IsRedisNil(rerr) {
 		return nil
 	}
@@ -170,7 +171,7 @@ func (rca *cacheAside) waitForFailedKey(
 		return nil
 	}
 
-	if err := rca.waitForWriteLockRelease(ctx, firstFailed, waitChan); err != nil {
+	if err := rca.waitForWriteLockRelease(ctx, firstFailed, waitChan, *owned); err != nil {
 		rca.restoreMultiValues(ctx, lockValues, savedValues)
 		return err
 	}

@@ -27,7 +27,7 @@ const clusterKeyCount = 64
 // makeClusterClient opens a Conn against the Redis Cluster named by
 // REDCACHE_CLUSTER_ADDRS (comma-separated, e.g. 127.0.0.1:30001). It skips
 // when unset, except under CI, where a missing cluster is a setup failure.
-func makeClusterClient(t *testing.T) (*redcache.Cache, *redcache.Conn) {
+func makeClusterClient(t *testing.T, opts ...redcache.Option) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
 	skipIfNoRedis(t)
 	addrs := os.Getenv("REDCACHE_CLUSTER_ADDRS")
@@ -39,7 +39,7 @@ func makeClusterClient(t *testing.T) (*redcache.Cache, *redcache.Conn) {
 	}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: strings.Split(addrs, ",")},
-		redcache.WithLockTTL(3*time.Second),
+		append([]redcache.Option{redcache.WithLockTTL(3 * time.Second)}, opts...)...,
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
