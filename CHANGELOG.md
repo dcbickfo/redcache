@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without client-side tracking.
 - Cache reads can refill a missing key after a loader or write callback panics.
 - Cached reads follow ASK during Valkey 9 cluster slot migration.
+- If another connection deletes the key during a load, a waiting reader
+  (owner or follower) retries lock acquisition on an absent-key poll without
+  waiting for `LockTTL`.
+- Untracked waiters (ASK on Redis 7.2 and Valkey 8.1, plain fallback on Valkey
+  9.x) retry when a failed holder in another process has its lock deleted,
+  though a lock that outlives a crashed holder still blocks until it expires.
 
 ## [v0.4.1] - 2026-11-12
 

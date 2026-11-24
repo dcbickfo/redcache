@@ -49,19 +49,19 @@ The library is a single-package Go module (`package redcache`) with internal hel
 
 **How it works — the Get loop:**
 
-1. **Register** (`register`) — creates a local `lockEntry` with a context that auto-expires after `lockTTL`. Returns the context's `Done()` channel, which serves as the "wait" channel.
+1. **Register** (`register`) — creates a local `lockEntry` with a `done` channel and a `time.AfterFunc` timer set to `lockTTL`. Returns `done` as the wait channel.
 2. **Try cached get** (`tryGet`) — calls `DoCache` (rueidis client-side caching) to GET the key. This serves a **dual purpose**: it returns any cached value *and* subscribes the client to Redis invalidation notifications for that key. If the value is missing or is a lock (has the lock prefix), it returns `errNotFound`.
 3. **Try lock + set** (`trySetKeyFunc`) — attempts `SET NX GET PX` to acquire a distributed lock. `NX` ensures only one caller wins; `GET` returns the old value (nil on success); `PX` sets lock TTL in milliseconds. On success, calls the user's callback, then atomically replaces the lock with the real value via `setKeyLua` (Lua script that verifies lock ownership before SET).
 4. **Wait** — if another caller holds the lock, wait on the channel from step 1 and poll with jitter. The wait ends when:
    - **Redis invalidation arrives** — when a tracked key changes, `onInvalidate` removes the local lock entry and wakes its waiters
    - **A poll finds a hit or an absent key** — the hit is returned, or the observed local entry is released so acquisition can be retried
-   - **Lock TTL expires** — the context times out automatically
+   - **Lock TTL expires** — the `time.AfterFunc` timer closes the `done` channel
    - **The request ends** — cancellation or the caller's deadline stops the wait
 5. **Retry** — after a wakeup, read the key again and retry acquisition on a miss.
 
 The key insight: because `tryGet` uses `DoCache`, any client that reads a lock value automatically subscribes to invalidation for that key. When the lock holder replaces the lock with the real value, Redis pushes an invalidation message, which unblocks all waiters.
 
-**Lock mechanism:** Lock values are prefixed UUIDv7 strings (default prefix `__redcache:lock:`). `tryGet` recognizes these by prefix and treats them as cache misses. Lua scripts (`delKeyLua`, `setKeyLua`) atomically verify lock ownership before deleting or overwriting values. Lock entries are tracked locally via `syncx.ShardedMap` with context-based auto-expiration via `context.AfterFunc`.
+**Lock mechanism:** Lock values are prefixed UUIDv7 strings (default prefix `__redcache:lock:`). `tryGet` recognizes these by prefix and treats them as cache misses. Lua scripts (`delKeyLua`, `setKeyLua`) atomically verify lock ownership before deleting or overwriting values. Lock entries are tracked locally via `syncx.ShardedMap` and expire via `time.AfterFunc` timers.
 
 **Multi-key operations:** `GetMulti` follows the same pattern but batches operations. `tryGetMulti` uses `DoMultiCache` for batch reads. `tryLockMulti` acquires locks in batch. `setMultiWithLock` pipelines the CAS-set Lua scripts. Every script touches one key, so multi-key paths never group by slot: rueidis's cluster `DoMulti` splits a pipeline per node, runs the nodes in parallel, and follows MOVED/ASK. `cluster_test.go` covers each path against a real cluster, and `cluster_topology_test.go` covers a completed slot migration (MOVED), a half-finished one (ASK), a primary failover, and no `SCRIPT LOAD` on any node. `syncx.WaitForAll` waits on each channel in turn (no goroutines), returning the context error on cancellation.
 

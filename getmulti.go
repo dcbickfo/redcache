@@ -150,8 +150,8 @@ func (rca *cacheAside) waitForGetMulti(
 	owned entryOwner,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
 ) ([]string, []<-chan struct{}, bool, error) {
-	// Followers + leaders whose NX lost: wait for the holder's invalidation
-	// (or the jittered poll fallback / lockTTL).
+	// Followers and leaders whose NX lost wait for invalidation and poll
+	// with jitter for hits or absent keys.
 	rca.emitLockContended(len(pending))
 	polled, err := rca.awaitGetMulti(ctx, ttl, pending, chans, res, needRefreshP, owned, fn)
 	if err != nil {
