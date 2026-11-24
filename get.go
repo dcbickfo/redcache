@@ -191,13 +191,23 @@ func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 	return cacheReadResult{raw: val, val: plain, pttl: pttl, delta: delta, untracked: untracked}, nil
 }
 
+// cachedReadValue retries an aborted cached read in cluster mode with one plain
+// GET to follow ASK when Valkey 9 returns it as the EXEC reply during slot migration.
+// Fallback hits skip refresh-ahead because a plain GET has no cache TTL.
 func (rca *cacheAside) cachedReadValue(ctx context.Context, key, val string, err error) (string, error) {
-	// Valkey 9 can return ASK as the EXEC reply during slot migration. Rueidis
-	// reports it as ErrDoCacheAborted. An uncached GET follows the redirect.
-	if errors.Is(err, rueidis.ErrDoCacheAborted) {
-		return rca.client.Do(ctx, rca.client.B().Get().Key(key).Build()).ToString()
+	if !rca.shouldRetryCachedRead(err) {
+		return val, err
 	}
-	return val, err
+	val, retryErr := rca.client.Do(ctx, rca.client.B().Get().Key(key).Build()).ToString()
+	if retryErr != nil && !rueidis.IsRedisNil(retryErr) {
+		return "", errors.Join(err, retryErr)
+	}
+	return val, retryErr
+}
+
+func (rca *cacheAside) shouldRetryCachedRead(err error) bool {
+	// Only cluster clients can follow ASK, and an abort can also signal an EXEC permission failure.
+	return errors.Is(err, rueidis.ErrDoCacheAborted) && rca.client.Mode() == rueidis.ClientModeCluster
 }
 
 func (rca *cacheAside) trySetKeyFunc(ctx context.Context, ttl time.Duration, key string, fn func(ctx context.Context, key string) (string, error)) (val string, err error) {

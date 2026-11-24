@@ -2,6 +2,7 @@ package redcache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -251,23 +252,17 @@ func (rca *cacheAside) tryGetMulti(
 	needRefresh []string,
 	owned entryOwner,
 ) ([]string, map[string]string, error) {
-	multiP := cacheableTTLPool.Get(len(keys))
-	defer cacheableTTLPool.Put(multiP)
-	multi := *multiP
-	rca.fillCacheableTTLs(multi, ttl, keys)
-	resps := rca.client.DoMultiCache(ctx, multi...)
-	if len(resps) != len(keys) {
-		return needRefresh, nil, fmt.Errorf("tryGetMulti: response/key length mismatch: %d resps vs %d keys", len(resps), len(keys))
+	resps, err := rca.readMultiCache(ctx, ttl, keys)
+	if err != nil {
+		return needRefresh, nil, err
 	}
 
 	var needRefreshExpected map[string]string
-	for i, resp := range resps {
-		var err error
+	for i, key := range keys {
 		needRefresh, needRefreshExpected, err = rca.collectGetMultiResponse(
-			ctx,
 			ttl,
-			keys[i],
-			resp,
+			key,
+			resps[i],
 			res,
 			needRefresh,
 			needRefreshExpected,
@@ -281,21 +276,58 @@ func (rca *cacheAside) tryGetMulti(
 	return needRefresh, needRefreshExpected, nil
 }
 
-func (rca *cacheAside) fillCacheableTTLs(
-	dst []rueidis.CacheableTTL,
-	ttl time.Duration,
-	keys []string,
-) {
+func (rca *cacheAside) readMultiCache(ctx context.Context, ttl time.Duration, keys []string) ([]rueidis.RedisResult, error) {
+	multiP := cacheableTTLPool.Get(len(keys))
+	defer cacheableTTLPool.Put(multiP)
+	multi := *multiP
 	for i, key := range keys {
-		dst[i] = rueidis.CacheableTTL{
+		multi[i] = rueidis.CacheableTTL{
 			Cmd: rca.client.B().Get().Key(key).Cache(),
 			TTL: ttl,
 		}
 	}
+	resps := rca.client.DoMultiCache(ctx, multi...)
+	if len(resps) != len(keys) {
+		return nil, fmt.Errorf("cached read: response/key length mismatch: %d resps vs %d keys", len(resps), len(keys))
+	}
+
+	var aborted []int
+	// A terminal error in the cached batch precludes retrying any key.
+	for i, resp := range resps {
+		_, err := resp.ToString()
+		if rca.shouldRetryCachedRead(err) {
+			aborted = append(aborted, i)
+		} else if err != nil && !rueidis.IsRedisNil(err) {
+			rca.emitRedisError("read")
+			return nil, fmt.Errorf("read key %q: %w", keys[i], err)
+		}
+	}
+	if len(aborted) != 0 {
+		return resps, rca.retryAbortedReads(ctx, keys, aborted, resps)
+	}
+	return resps, nil
+}
+
+func (rca *cacheAside) retryAbortedReads(ctx context.Context, keys []string, aborted []int, resps []rueidis.RedisResult) error {
+	cmds := make(rueidis.Commands, len(aborted))
+	for i, index := range aborted {
+		cmds[i] = rca.client.B().Get().Key(keys[index]).Build()
+	}
+	plain := rca.client.DoMulti(ctx, cmds...)
+	if len(plain) != len(aborted) {
+		return fmt.Errorf("plain read: response/key length mismatch: %d resps vs %d keys", len(plain), len(aborted))
+	}
+	for i, index := range aborted {
+		if _, err := plain[i].ToString(); err != nil && !rueidis.IsRedisNil(err) {
+			rca.emitRedisError("read")
+			return fmt.Errorf("read key %q: %w", keys[index], errors.Join(resps[index].Error(), err))
+		}
+		resps[index] = plain[i]
+	}
+	return nil
 }
 
 func (rca *cacheAside) collectGetMultiResponse(
-	ctx context.Context,
 	ttl time.Duration,
 	key string,
 	resp rueidis.RedisResult,
@@ -306,7 +338,6 @@ func (rca *cacheAside) collectGetMultiResponse(
 	owned entryOwner,
 ) ([]string, map[string]string, error) {
 	val, err := resp.ToString()
-	val, err = rca.cachedReadValue(ctx, key, val, err)
 	owned.rememberRead(key, resp)
 	if rueidis.IsRedisNil(err) {
 		return needRefresh, needRefreshExpected, nil

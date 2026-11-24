@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
@@ -13,20 +14,27 @@ import (
 	"time"
 
 	"github.com/redis/rueidis"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 type readTestClient struct {
 	rueidis.Client
-	commands [][]string
-	cached   []rueidis.RedisResult
+	mode          rueidis.ClientMode
+	commands      [][]string
+	multiCommands [][][]string
+	cached        []rueidis.RedisResult
+	plain         []rueidis.RedisResult
+	single        rueidis.RedisResult
 }
 
 func (*readTestClient) B() rueidis.Builder { return rueidis.Builder{} }
 
+func (c *readTestClient) Mode() rueidis.ClientMode { return c.mode }
+
 func (c *readTestClient) Do(_ context.Context, cmd rueidis.Completed) rueidis.RedisResult {
 	c.commands = append(c.commands, slices.Clone(cmd.Commands()))
-	return rueidis.RedisResult{}
+	return c.single
 }
 
 func (c *readTestClient) DoCache(context.Context, rueidis.Cacheable, time.Duration) rueidis.RedisResult {
@@ -35,6 +43,15 @@ func (c *readTestClient) DoCache(context.Context, rueidis.Cacheable, time.Durati
 
 func (c *readTestClient) DoMultiCache(context.Context, ...rueidis.CacheableTTL) []rueidis.RedisResult {
 	return slices.Clone(c.cached)
+}
+
+func (c *readTestClient) DoMulti(_ context.Context, cmds ...rueidis.Completed) []rueidis.RedisResult {
+	batch := make([][]string, len(cmds))
+	for i, cmd := range cmds {
+		batch[i] = slices.Clone(cmd.Commands())
+	}
+	c.multiCommands = append(c.multiCommands, batch)
+	return c.plain
 }
 
 func TestTrackedHitKeepsWaitEntry(t *testing.T) {
@@ -89,18 +106,152 @@ func redisResult(t *testing.T, val rueidis.RedisMessage, err error) rueidis.Redi
 func TestCachedReadRetriesOnlyRueidisAbort(t *testing.T) {
 	t.Parallel()
 
-	client := &readTestClient{}
-	rca := &cacheAside{client: client}
 	const key = "read:{3560}" // Slot zero matches the fake client's zero-value builder.
+	const want = "retried value"
+	client := &readTestClient{
+		mode:   rueidis.ClientModeCluster,
+		single: redisResult(t, redisStringMessage(t, want), nil),
+	}
+	rca := &cacheAside{client: client}
 	val, err := rca.cachedReadValue(t.Context(), key, "", rueidis.ErrDoCacheAborted)
 	require.NoError(t, err)
-	require.Empty(t, val)
+	require.Equal(t, want, val)
 	require.Equal(t, [][]string{{"GET", key}}, client.commands)
 
 	sameText := errors.New(rueidis.ErrDoCacheAborted.Error())
 	_, err = rca.cachedReadValue(t.Context(), key, "", sameText)
 	require.ErrorIs(t, err, sameText)
 	require.Len(t, client.commands, 1)
+}
+
+func TestCachedReadFallbackRequiresCluster(t *testing.T) {
+	t.Parallel()
+
+	const key = "read:{3560}"
+	const want = "fallback value"
+	abortErr := fmt.Errorf("cache transaction: %w", rueidis.ErrDoCacheAborted)
+	abort := redisResult(t, rueidis.RedisMessage{}, abortErr)
+	plain := redisResult(t, redisStringMessage(t, want), nil)
+	for _, mode := range []rueidis.ClientMode{rueidis.ClientModeStandalone, rueidis.ClientModeSentinel, rueidis.ClientModeCluster} {
+		t.Run(string(mode), func(t *testing.T) {
+			client := &readTestClient{
+				mode:   mode,
+				cached: []rueidis.RedisResult{abort},
+				plain:  []rueidis.RedisResult{plain},
+				single: plain,
+			}
+			rca := &cacheAside{client: client, lockPrefix: "lock:"}
+			got, singleErr := rca.cachedReadValue(t.Context(), key, "", abortErr)
+			results := make(map[string]string)
+			_, _, multiErr := rca.tryGetMulti(t.Context(), time.Minute, []string{key}, results, nil, nil)
+			if mode == rueidis.ClientModeCluster {
+				require.NoError(t, singleErr)
+				require.NoError(t, multiErr)
+				require.Equal(t, want, got)
+				require.Equal(t, map[string]string{key: want}, results)
+				require.Equal(t, [][]string{{"GET", key}}, client.commands)
+				require.Equal(t, [][][]string{{{"GET", key}}}, client.multiCommands)
+				return
+			}
+			assert.Empty(t, got)
+			assert.Empty(t, results)
+			assert.Empty(t, client.commands)
+			assert.Empty(t, client.multiCommands)
+			require.Error(t, singleErr)
+			require.Error(t, multiErr)
+			require.Same(t, abortErr, singleErr)
+			require.Same(t, abortErr, errors.Unwrap(multiErr))
+		})
+	}
+}
+
+func TestCachedReadBatchFallback(t *testing.T) {
+	t.Parallel()
+
+	keys := []string{"read:{3560}:b", "read:{3560}:a", "read:{3560}:d", "read:{3560}:c", "read:{3560}:e"}
+	abort := redisResult(t, rueidis.RedisMessage{}, rueidis.ErrDoCacheAborted)
+	terminalErr := errors.New("cached read failed")
+	terminal := redisResult(t, rueidis.RedisMessage{}, terminalErr)
+	value := func(s string) rueidis.RedisResult { return redisResult(t, redisStringMessage(t, s), nil) }
+	missing := redisResult(t, redisMessage(t, '_', 0, nil), nil)
+	require.True(t, rueidis.IsRedisNil(missing.Error()))
+	plain := []rueidis.RedisResult{value("first"), value("second"), missing, value("lock:held")}
+	unlocked := slices.Clone(plain)
+	unlocked[3] = missing
+	cached := []rueidis.RedisResult{abort, value("cached"), abort, abort, abort}
+	poll := func(t *testing.T, rca *cacheAside) (any, error) {
+		return rca.anyWriteLocked(t.Context(), keys, nil)
+	}
+	readers := []struct {
+		name  string
+		plain []rueidis.RedisResult
+		want  any
+		read  func(*testing.T, *cacheAside) (any, error)
+	}{
+		{"GetMulti", plain, map[string]string{keys[0]: "first", keys[1]: "cached", keys[2]: "second"},
+			func(t *testing.T, rca *cacheAside) (any, error) {
+				got := make(map[string]string)
+				_, _, err := rca.tryGetMulti(t.Context(), time.Minute, keys, got, nil, nil)
+				return got, err
+			}},
+		{"SetMulti initial lock scan", unlocked, nil,
+			func(t *testing.T, rca *cacheAside) (any, error) {
+				var owned entryOwner
+				defer func() { rca.releaseFinished(owned, true) }()
+				return nil, rca.waitForReadLocks(t.Context(), keys, &owned)
+			}},
+		{"SetMulti lock poll with lock", plain, true, poll},
+		{"SetMulti lock poll without lock", unlocked, false, poll},
+	}
+	for _, reader := range readers {
+		t.Run(reader.name, func(t *testing.T) {
+			client := &readTestClient{mode: rueidis.ClientModeCluster, cached: slices.Clone(cached), plain: reader.plain}
+			rca := &cacheAside{client: client, lockPrefix: "lock:", lockTTL: time.Minute, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			got, err := reader.read(t, rca)
+			require.NoError(t, err)
+			assert.Equal(t, reader.want, got)
+			assert.Len(t, client.multiCommands, 1)
+			assert.Equal(t, [][][]string{{{"GET", keys[0]}, {"GET", keys[2]}, {"GET", keys[3]}, {"GET", keys[4]}}}, client.multiCommands)
+			assert.Empty(t, client.commands)
+
+			client.cached[1] = terminal
+			client.multiCommands = nil
+			client.commands = nil
+			_, err = reader.read(t, rca)
+			require.ErrorIs(t, err, terminalErr)
+			require.Empty(t, client.multiCommands)
+			require.Empty(t, client.commands)
+		})
+	}
+}
+
+func TestCachedReadPreservesFallbackError(t *testing.T) {
+	t.Parallel()
+
+	const key = "read:{3560}"
+	const serverError = "OOM command not allowed"
+	abort := redisResult(t, rueidis.RedisMessage{}, rueidis.ErrDoCacheAborted)
+	errReply := redisResult(t, redisMessage(t, '-', uint64(len(serverError)), []byte(serverError)), nil)
+	client := &readTestClient{
+		mode:   rueidis.ClientModeCluster,
+		cached: []rueidis.RedisResult{abort},
+		plain:  []rueidis.RedisResult{errReply},
+		single: errReply,
+	}
+	rca := &cacheAside{client: client, lockPrefix: "lock:"}
+
+	_, singleErr := rca.tryGet(t.Context(), time.Minute, key)
+	_, _, multiErr := rca.tryGetMulti(t.Context(), time.Minute, []string{key}, make(map[string]string), nil, nil)
+	for name, err := range map[string]error{"single": singleErr, "batch": multiErr} {
+		t.Run(name, func(t *testing.T) {
+			var redisErr *rueidis.RedisError
+			require.ErrorAs(t, err, &redisErr)
+			require.EqualError(t, redisErr, serverError)
+			require.ErrorIs(t, err, rueidis.ErrDoCacheAborted)
+		})
+	}
+	require.Len(t, client.commands, 1)
+	require.Len(t, client.multiCommands, 1)
 }
 
 type invalidationMetrics struct {

@@ -332,49 +332,31 @@ func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string, owne
 		waitChans[i], _ = rca.registerOwned(owned, key)
 	}
 
-	multiP := cacheableTTLPool.Get(len(keys))
-	defer cacheableTTLPool.Put(multiP)
-	multi := *multiP
-	for i, key := range keys {
-		multi[i] = rueidis.CacheableTTL{
-			Cmd: rca.client.B().Get().Key(key).Cache(),
-			TTL: rca.lockTTL,
-		}
-	}
-	resps := rca.client.DoMultiCache(ctx, multi...)
-
-	// Distinguish redis-nil (no lock) from real Redis errors so the latter
-	// surface to the caller instead of silently advancing against a broken cluster.
-	if len(resps) != len(keys) {
-		return fmt.Errorf("waitForReadLocks: response/key length mismatch: %d resps vs %d keys", len(resps), len(keys))
+	resps, err := rca.readMultiCache(ctx, rca.lockTTL, keys)
+	if err != nil {
+		rca.logger.Error("waitForReadLocks read failed", "error", err)
+		return err
 	}
 	lockedChansP := chanPool.GetCap(len(keys))
 	defer chanPool.Put(lockedChansP)
 	lockedKeysP := stringPool.GetCap(len(keys))
 	defer stringPool.Put(lockedKeysP)
-	var first firstKeyErr
-	for i := range keys {
+	for i, key := range keys {
 		val, err := resps[i].ToString()
-		val, err = rca.cachedReadValue(ctx, keys[i], val, err)
-		(*owned).rememberRead(keys[i], resps[i])
+		(*owned).rememberRead(key, resps[i])
 		if rueidis.IsRedisNil(err) {
 			continue
 		}
 		if err != nil {
-			rca.logger.Error("waitForReadLocks read failed", "key", keys[i], "error", err)
+			rca.logger.Error("waitForReadLocks read failed", "key", key, "error", err)
 			rca.emitRedisError("read")
-			first.add(keys[i], err)
-			continue
+			return fmt.Errorf("read key %q: %w", key, err)
 		}
 		if strings.HasPrefix(val, rca.lockPrefix) {
 			*lockedChansP = append(*lockedChansP, waitChans[i])
-			*lockedKeysP = append(*lockedKeysP, keys[i])
+			*lockedKeysP = append(*lockedKeysP, key)
 		}
 	}
-	if err := first.wrap("read"); err != nil {
-		return err
-	}
-
 	if len(*lockedChansP) == 0 {
 		return nil
 	}
@@ -393,29 +375,19 @@ func (rca *cacheAside) waitForWriteLocksRelease(ctx context.Context, keys []stri
 }
 
 func (rca *cacheAside) anyWriteLocked(ctx context.Context, keys []string, owned entryOwner) (bool, error) {
-	multiP := cacheableTTLPool.Get(len(keys))
-	defer cacheableTTLPool.Put(multiP)
-	multi := *multiP
+	resps, err := rca.readMultiCache(ctx, rca.lockTTL, keys)
+	if err != nil {
+		return false, err
+	}
 	for i, key := range keys {
-		multi[i] = rueidis.CacheableTTL{
-			Cmd: rca.client.B().Get().Key(key).Cache(),
-			TTL: rca.lockTTL,
-		}
-	}
-	resps := rca.client.DoMultiCache(ctx, multi...)
-	if len(resps) != len(keys) {
-		return false, fmt.Errorf("waitForWriteLocksRelease: response/key length mismatch: %d resps vs %d keys", len(resps), len(keys))
-	}
-	for i, resp := range resps {
-		val, err := resp.ToString()
-		val, err = rca.cachedReadValue(ctx, keys[i], val, err)
-		owned.rememberRead(keys[i], resp)
+		val, err := resps[i].ToString()
+		owned.rememberRead(key, resps[i])
 		if rueidis.IsRedisNil(err) {
 			continue
 		}
 		if err != nil {
 			rca.emitRedisError("read")
-			return false, fmt.Errorf("read key %q: %w", keys[i], err)
+			return false, fmt.Errorf("read key %q: %w", key, err)
 		}
 		if strings.HasPrefix(val, rca.lockPrefix) {
 			return true, nil
