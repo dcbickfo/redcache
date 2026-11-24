@@ -52,10 +52,12 @@ The library is a single-package Go module (`package redcache`) with internal hel
 1. **Register** (`register`) — creates a local `lockEntry` with a context that auto-expires after `lockTTL`. Returns the context's `Done()` channel, which serves as the "wait" channel.
 2. **Try cached get** (`tryGet`) — calls `DoCache` (rueidis client-side caching) to GET the key. This serves a **dual purpose**: it returns any cached value *and* subscribes the client to Redis invalidation notifications for that key. If the value is missing or is a lock (has the lock prefix), it returns `errNotFound`.
 3. **Try lock + set** (`trySetKeyFunc`) — attempts `SET NX GET PX` to acquire a distributed lock. `NX` ensures only one caller wins; `GET` returns the old value (nil on success); `PX` sets lock TTL in milliseconds. On success, calls the user's callback, then atomically replaces the lock with the real value via `setKeyLua` (Lua script that verifies lock ownership before SET).
-4. **Wait** — if another caller holds the lock, wait on the channel from step 1. The channel closes when either:
-   - **Redis invalidation arrives** — the lock holder SETs the real value, Redis notifies all clients that cached the key (from step 2's `DoCache`), `onInvalidate` fires and cancels the lock entry's context
+4. **Wait** — if another caller holds the lock, wait on the channel from step 1 and poll with jitter. The wait ends when:
+   - **Redis invalidation arrives** — when a tracked key changes, `onInvalidate` removes the local lock entry and wakes its waiters
+   - **A poll finds a hit or an absent key** — the hit is returned, or the observed local entry is released so acquisition can be retried
    - **Lock TTL expires** — the context times out automatically
-5. **Retry** — go back to step 1; `tryGet` now finds the real value via client-side cache.
+   - **The request ends** — cancellation or the caller's deadline stops the wait
+5. **Retry** — after a wakeup, read the key again and retry acquisition on a miss.
 
 The key insight: because `tryGet` uses `DoCache`, any client that reads a lock value automatically subscribes to invalidation for that key. When the lock holder replaces the lock with the real value, Redis pushes an invalidation message, which unblocks all waiters.
 

@@ -29,10 +29,10 @@ A typed cache-aside for Redis, built on the [rueidis](https://github.com/redis/r
 - Go 1.27+
 - Redis 7+ with RESP3 and client-side caching (tracking) enabled
 
-RESP3 client-side caching is load-bearing, not optional: redcache wakes waiters
-through Redis invalidation pushes. Without RESP3 (or with tracking disabled)
-there are no pushes — waiters fall back to jittered polling until the lock TTL,
-raising tail latency and Redis read traffic under contention.
+RESP3 client-side caching lets redcache wake waiters through Redis invalidation
+pushes. Without tracking, waiters rely on jittered polling to see a published
+value or a deletion. A deletion prompts another lock acquisition attempt.
+Polling increases latency and Redis read traffic under contention.
 
 ## Installation
 
