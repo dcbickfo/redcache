@@ -9,10 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `RedisError("read_fallback")` counts fallback calls that read without
-  client-side caching, once per batch. A sustained non-zero rate outside
-  slot migration points to another cause of EXEC aborts, such as missing
-  `PTTL` permission.
+- `RedisError` can now receive `op="read_fallback"`, which `Metrics`
+  implementations and dashboards that enumerate operations or alert on all
+  `redis.errors` need to account for.
+  It counts an attempted uncached retry after a clustered cached read
+  aborted, once per single read or batch, including retries that fail,
+  return Redis nil, or are canceled before sending. Missing `PTTL`
+  permission can trigger an abort. A sustained rate alone cannot identify a
+  server-side `EXEC` abort because rueidis also reports `ErrDoCacheAborted`
+  when a connection closes.
 
 ### Fixed
 

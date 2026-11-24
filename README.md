@@ -394,9 +394,20 @@ the shared client and every cache built over it.
 
 Implement `Metrics`, or embed `NoopMetrics` and override only the methods you care about, to wire counters into Prometheus, OpenTelemetry, or any other backend. Methods run on the hot path and must be concurrent-safe.
 
-High-volume events (`CacheHits`, `CacheMisses`, `LockContended`, `RefreshTriggered`, `RefreshSkipped`, `RefreshDropped`) are aggregated per operation and emitted once with a count rather than once per key. `LockWaitDuration` fires once per resolved wait, and `LoaderDuration` once per foreground origin-loader call (`Get`/`GetMulti` miss, `Set`/`SetMulti` — background refresh excluded). `LoaderErrors(n)` fires when a foreground loader returns an error, with `n` the number of keys it was responsible for. `RedisError(op)` fires when a Redis command fails, tagged with `op` (`"read"`, `"lock"`, `"set"`, `"del"`, `"touch"`). Diagnostic events (`LockLost`, `RefreshError`, `RefreshPanicked`, `InvalidationError`) carry the affected key where applicable.
+High-volume events (`CacheHits`, `CacheMisses`, `LockContended`, `RefreshTriggered`, `RefreshSkipped`, `RefreshDropped`) are aggregated per operation and emitted once with a count rather than once per key. `LockWaitDuration` fires once per resolved wait, and `LoaderDuration` once per foreground origin-loader call (`Get`/`GetMulti` miss, `Set`/`SetMulti` — background refresh excluded). `LoaderErrors(n)` fires when a foreground loader returns an error, with `n` the number of keys it was responsible for. Diagnostic events (`LockLost`, `RefreshError`, `RefreshPanicked`, `InvalidationError`) carry the affected key where applicable.
 
-`RedisError("read_fallback")` counts calls that fall back to plain reads without client-side caching, once per batch. A sustained non-zero rate outside slot migration points to another cause of EXEC aborts, such as an ACL that denies `PTTL`.
+`RedisError(op)` uses `read`, `lock`, `set`, `del`, and `touch` for command
+failures, and `read_fallback` for an attempted uncached retry after a
+clustered cached read aborted. It emits one `read_fallback` per single read
+or batch, including retries that fail, return Redis nil, or are canceled
+before sending. Missing `PTTL` permission can trigger an abort. A sustained
+rate alone cannot identify a server-side `EXEC` abort because rueidis also
+reports `ErrDoCacheAborted` when a connection closes.
+
+Metrics implementations and dashboards that enumerate operation labels need
+to accept `read_fallback`. Unfiltered `redis.errors` alerts include successful
+retries. Exclude `op="read_fallback"` from alerts that count only command
+failures.
 
 ```go
 type myMetrics struct {

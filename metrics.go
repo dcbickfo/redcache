@@ -21,12 +21,15 @@ type Metrics interface {
 	// number of keys the loader was responsible for (1 for single, len(missing)
 	// for multi).
 	LoaderErrors(n int64)
-	// RedisError records Redis command failures with op "read", "lock", "set",
-	// "del", or "touch". "read_fallback" counts calls that fall back to reads
-	// without client-side caching, once per batch. A sustained non-zero rate outside
-	// slot migration points to another cause of EXEC aborts, such as missing
-	// PTTL permission. Lock-lost, Redis nil, and script-drift parse failures
-	// are excluded.
+	// RedisError records command failures with op "read", "lock", "set",
+	// "del", or "touch". "read_fallback" counts an attempted uncached retry
+	// after a clustered cached read aborted, once per single read or batch,
+	// including retries that fail, return Redis nil, or are canceled before
+	// sending. Missing PTTL permission can trigger an abort. A sustained
+	// rate alone cannot identify a server-side EXEC abort because rueidis
+	// also reports ErrDoCacheAborted when a connection closes.
+	// Lock-lost, Redis nil, and script-drift parse failures are excluded
+	// from the command-failure labels.
 	RedisError(op string)
 	RefreshTriggered(n int64)
 	// RefreshSkipped covers both local and distributed dedup.
