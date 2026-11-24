@@ -1,3 +1,4 @@
+// This file stays in package redcache: it exposes unexported functions, types and scripts to the external tests as thin aliases and accessors.
 package redcache
 
 import "github.com/redis/rueidis"
