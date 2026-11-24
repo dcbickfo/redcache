@@ -22,7 +22,7 @@ func (rca *cacheAside) get(
 ) (string, error) {
 	var owned <-chan struct{}
 	failed := true
-	// Wake followers after the inner call has unwound and rolled back its Redis lock.
+	// Wake followers only after the inner call has unwound and attempted its Redis cleanup.
 	defer func() {
 		if failed && owned != nil {
 			rca.release(key, owned)
