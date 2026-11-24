@@ -288,6 +288,7 @@ type ownedEntry struct {
 // both return -1) because plain reads, DisableCache, and RESP2 without caching
 // do not subscribe to invalidations. Redis 7.2 and Valkey 8.1 also clear the
 // tracking opt-in after ASKING, so a successful ASK read can lack tracking.
+// Treating a tracked reply as untracked only costs an extra release.
 func readUntracked(resp rueidis.RedisResult) bool {
 	return resp.CachePXAT() == -1
 }
