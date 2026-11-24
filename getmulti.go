@@ -259,7 +259,7 @@ func (rca *cacheAside) tryGetMulti(
 
 	var needRefreshExpected map[string]string
 	for i, key := range keys {
-		needRefresh, needRefreshExpected, err = rca.collectGetMultiResponse(
+		needRefresh, needRefreshExpected = rca.collectGetMultiResponse(
 			ttl,
 			key,
 			resps[i],
@@ -269,13 +269,11 @@ func (rca *cacheAside) tryGetMulti(
 			len(keys),
 			owned,
 		)
-		if err != nil {
-			return needRefresh, needRefreshExpected, err
-		}
 	}
 	return needRefresh, needRefreshExpected, nil
 }
 
+// On success, readMultiCache returns replies decodable as strings and Redis nil replies.
 func (rca *cacheAside) readMultiCache(ctx context.Context, ttl time.Duration, keys []string) ([]rueidis.RedisResult, error) {
 	multiP := cacheableTTLPool.Get(len(keys))
 	defer cacheableTTLPool.Put(multiP)
@@ -337,32 +335,28 @@ func (rca *cacheAside) collectGetMultiResponse(
 	needRefreshExpected map[string]string,
 	keyCount int,
 	owned entryOwner,
-) ([]string, map[string]string, error) {
+) ([]string, map[string]string) {
 	val, err := resp.ToString()
 	owned.rememberRead(key, resp)
 	if rueidis.IsRedisNil(err) {
-		return needRefresh, needRefreshExpected, nil
-	}
-	if err != nil {
-		rca.emitRedisError("read")
-		return needRefresh, needRefreshExpected, fmt.Errorf("key %q: %w", key, err)
+		return needRefresh, needRefreshExpected
 	}
 	if strings.HasPrefix(val, rca.lockPrefix) {
-		return needRefresh, needRefreshExpected, nil
+		return needRefresh, needRefreshExpected
 	}
 
 	rca.releaseUntracked(owned, key)
 	plain, delta := unwrapEnvelope(val)
 	res[key] = plain
 	if rca.refreshAfter == 0 || !rca.shouldRefresh(resp.CachePTTL(), ttl, delta) {
-		return needRefresh, needRefreshExpected, nil
+		return needRefresh, needRefreshExpected
 	}
 	if needRefreshExpected == nil {
 		needRefreshExpected = make(map[string]string, keyCount)
 	}
 	needRefresh = append(needRefresh, key)
 	needRefreshExpected[key] = val
-	return needRefresh, needRefreshExpected, nil
+	return needRefresh, needRefreshExpected
 }
 
 // unlockUnset releases the locks in lockVals whose keys never landed in res.

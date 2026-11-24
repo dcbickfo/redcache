@@ -347,11 +347,6 @@ func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string, owne
 		if rueidis.IsRedisNil(err) {
 			continue
 		}
-		if err != nil {
-			rca.logger.Error("waitForReadLocks read failed", "key", key, "error", err)
-			rca.emitRedisError("read")
-			return fmt.Errorf("read key %q: %w", key, err)
-		}
 		if strings.HasPrefix(val, rca.lockPrefix) {
 			*lockedChansP = append(*lockedChansP, waitChans[i])
 			*lockedKeysP = append(*lockedKeysP, key)
@@ -384,10 +379,6 @@ func (rca *cacheAside) anyWriteLocked(ctx context.Context, keys []string, owned 
 		owned.rememberRead(key, resps[i])
 		if rueidis.IsRedisNil(err) {
 			continue
-		}
-		if err != nil {
-			rca.emitRedisError("read")
-			return false, fmt.Errorf("read key %q: %w", key, err)
 		}
 		if strings.HasPrefix(val, rca.lockPrefix) {
 			return true, nil
