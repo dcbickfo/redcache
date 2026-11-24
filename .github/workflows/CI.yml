@@ -95,4 +95,6 @@ jobs:
       - name: Start standalone and cluster servers
         run: docker compose up -d --wait
       - name: Run server tests
+        env:
+          GOFLAGS: ${{ matrix.image == 'valkey/valkey:9.2' && '-race' || '' }}
         run: make test-server GO=go
