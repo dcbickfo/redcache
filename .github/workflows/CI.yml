@@ -73,15 +73,9 @@ jobs:
       max-parallel: 4
       matrix:
         # Redis Open Source and Valkey support policies, checked 2026-11-24.
-        # redcache requires Redis 7+.
+        # Redis floor and latest, plus the supported Valkey minors.
         image:
           - redis:7.2
-          - redis:7.4
-          - redis:8.0
-          - redis:8.2
-          - redis:8.6
-          - redis:8.8
-          - redis:8.10
           - redis:8.12
           - valkey/valkey:7.2
           - valkey/valkey:8.0

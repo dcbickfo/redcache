@@ -6,6 +6,16 @@
 # see its replica take over within a few seconds.
 set -eu
 
+replica_ports="30004 30005 30006"
+if [ "${1:-}" = healthcheck ]; then
+	redis-cli -p 30001 cluster info | grep -q '^cluster_state:ok' || exit 1
+	# Slot coverage can be ready before the replicas finish their first sync.
+	for port in $replica_ports; do
+		redis-cli -p "$port" --raw role | grep -qx connected || exit 1
+	done
+	exit 0
+fi
+
 # All cluster nodes share a container and the cluster bus ports stay private.
 # Redis 8.12 requires explicit opt-out when running the test cluster without TLS.
 set --
@@ -13,7 +23,7 @@ case "$(redis-server --version)" in
 	'Redis server v=8.12.'*) set -- --cluster-bus-port-protected-mode no ;;
 esac
 
-ports="30001 30002 30003 30004 30005 30006"
+ports="30001 30002 30003 $replica_ports"
 for port in $ports; do
 	# Start empty: /data is a volume that outlives the container, and a stale
 	# nodes.conf makes `--cluster create` refuse to run.
