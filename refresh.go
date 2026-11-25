@@ -256,7 +256,11 @@ func (rca *cacheAside) doSingleRefresh(
 	setCtx, setCancel := rca.cleanupCtx(ctx)
 	defer setCancel()
 	ttlMs := strconv.FormatInt(ttl.Milliseconds(), 10)
-	if err := refreshAheadSetScript.Exec(setCtx, rca.client, []string{key}, []string{wrapped, ttlMs, rca.lockPrefix, expected}).Error(); err != nil {
+	keys := []string{key}
+	mark := rca.writeMarks.begin(keys, time.Now(), writeMarkCap)
+	resp := refreshAheadSetScript.Exec(setCtx, rca.client, keys, []string{wrapped, ttlMs, rca.lockPrefix, expected})
+	rca.writeMarks.finish(keys, mark, time.Now(), func(int) bool { return casWrote(resp) })
+	if err := resp.Error(); err != nil {
 		rca.logger.Error("refresh-ahead set failed", "key", key, "error", err)
 		rca.emitRefreshError(key)
 	}
@@ -408,7 +412,9 @@ func (rca *cacheAside) setRefreshedValues(ctx context.Context, ttl time.Duration
 	if len(*stmtsP) == 0 {
 		return
 	}
+	mark := rca.writeMarks.begin(keyOrder, time.Now(), writeMarkCap)
 	resps := refreshAheadSetScript.ExecMulti(ctx, rca.client, *stmtsP...)
+	rca.writeMarks.finish(keyOrder, mark, time.Now(), successfulReplies(resps, casWrote))
 	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
 			rca.logger.Error("refresh-ahead multi set failed", "key", keyOrder[i], "error", err)

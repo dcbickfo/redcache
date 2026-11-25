@@ -15,14 +15,14 @@ import (
 
 // makeBenchClient opens a Conn (closed via b.Cleanup) and returns a string view
 // plus the Conn for benches that need the raw client.
-func makeBenchClient(b *testing.B) (*redcache.Cache, *redcache.Conn) {
+func makeBenchClient(b *testing.B, opts ...redcache.Option) (*redcache.Cache, *redcache.Conn) {
 	b.Helper()
 	skipIfNoRedis(b)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: []string{"127.0.0.1:6379"},
 		},
-		redcache.WithLockTTL(5*time.Second),
+		append([]redcache.Option{redcache.WithLockTTL(5 * time.Second)}, opts...)...,
 	)
 	if err != nil {
 		b.Fatal(err)
@@ -326,4 +326,41 @@ func BenchmarkCache_GetMulti_Refresh(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// BenchmarkForceSetThenGet measures an acknowledged write immediately followed by a same-key read.
+func BenchmarkForceSetThenGet(b *testing.B) {
+	var paths readPathCounts
+	cache, conn := makeBenchClient(b)
+	paths.Observe(conn)
+	ctx := b.Context()
+	key := "write-then-read:" + uuid.New().String()
+	noLoad := func(context.Context, string) (string, error) {
+		return "", fmt.Errorf("loader ran after an acknowledged ForceSet")
+	}
+	for b.Loop() {
+		if err := cache.ForceSet(ctx, time.Minute, key, "value"); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := cache.Get(ctx, time.Minute, key, noLoad); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(float64(paths.Bypasses.Load())/float64(b.N), "bypass_reads/write")
+}
+
+// BenchmarkForceSetParallel measures shared-Conn write contention.
+func BenchmarkForceSetParallel(b *testing.B) {
+	cache, _ := makeBenchClient(b)
+	ctx := b.Context()
+	b.SetParallelism(2)
+	runBenchParallel(b, func(pb *testing.PB) error {
+		key := "parallel-write:" + uuid.New().String()
+		for pb.Next() {
+			if err := cache.ForceSet(ctx, time.Minute, key, "value"); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

@@ -370,6 +370,45 @@ Open one `Conn`, then construct one cache per codec pair the service needs.
 Every cache shares the Conn's client and invalidation stream, and a single
 JSON-backed cache serves any key and value types on each operation.
 
+Reads through the same `Conn` see its acknowledged writes. For a recently
+written key, redcache bypasses the local cache and reads directly from Redis
+until the key's mark ends. A mark also expires one second after the write
+completes. The table shows the cost for reads started after a fill or explicit
+write completes.
+
+| Connection | After a `Get` or `GetMulti` loader fill | After `Set`, `SetMulti`, `ForceSet*`, or `Del*` |
+| --- | --- | --- |
+| Standalone, default tracking | One direct Redis GET, then local caching resumes. | One direct Redis GET, including a missing-key reply after `Del` or `DelMulti`, then local caching resumes. |
+| Cluster | Direct Redis GETs for up to one second, unless invalidation clears the mark sooner. | Direct Redis GETs for up to one second, unless invalidation clears the mark sooner. |
+| Sentinel | Direct Redis GETs until invalidation or the one-second deadline. | Direct Redis GETs until invalidation or the one-second deadline. |
+| Custom `ClientBuilder` | Direct Redis GETs until invalidation or the one-second deadline. | Direct Redis GETs until invalidation or the one-second deadline. |
+| Explicit `DisableCache` or RESP2 | Ordinary Redis reads with no marks. | Ordinary Redis reads with no marks. |
+
+**Standalone with default tracking** promises read-your-writes on a `Conn`
+while the mark is live. The read that ends the mark is sent on the connection
+that receives invalidations. Redis queues any pending invalidation for the key
+ahead of that read's reply, and the client evicts the local entry before it
+delivers the reply. An invalidation never ends the mark on this connection,
+because it can belong to an earlier write, by this `Conn` or another client, and
+the invalidation for a `Conn`'s own write follows its reply. Concurrent first
+reads can each issue a GET before the first reply ends the mark. Pool routing,
+an error reply, or a reconnect leaves the deadline in effect. If a write's
+invalidation arrives after the one-second deadline, the mark has expired and
+the cache can serve the older entry once, until the invalidation evicts it.
+
+**Connections without that read** keep a residual: cluster, Sentinel, a custom
+`ClientBuilder`, and standalone settings that suppress or redirect
+invalidations (`NOLOOP`, `BCAST`, `OPTOUT`, replica routing,
+`DisableAutoPipelining`, `ConnLifetime`, redirects). Their marks end when an
+invalidation arrives or the deadline passes. A read that began before a write
+can refill an older value after that write's invalidation. That invalidation
+can then end a later write's mark, and the older value stays visible until the
+later invalidation arrives. This takes a delayed read and two close writes,
+from concurrent writers or from one writer's back-to-back calls. Cluster is
+supported with this residual and has no barrier planned. A second `Conn`, even
+in the same process, is eventually consistent and sees the write when its own
+invalidation arrives.
+
 ```go
 conn, err := redcache.Open(
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},

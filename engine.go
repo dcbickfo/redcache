@@ -2,9 +2,13 @@ package redcache
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"math/rand/v2"
+	"net"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,6 +66,9 @@ func (le *lockEntry) timerExpired() {
 // K/V and delegates here.
 type cacheAside struct {
 	client         rueidis.Client
+	writeMarks     writeMarks
+	trackBypasses  bool
+	poolCutoff     int // batch size at which rueidis uses a pooled connection; <0 never, 1 always.
 	locks          syncx.ShardedMap[*lockEntry]
 	lockPool       *lockpool.Pool
 	lockTTL        time.Duration
@@ -94,8 +101,17 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 
 	lp := lockpool.New(cfg.lockPrefix)
 	_, isNoop := cfg.metrics.(NoopMetrics)
+	poolCutoff := clientOption.BlockingPipeline
+	if clientOption.DisableAutoPipelining {
+		poolCutoff = 1
+	} else if poolCutoff == 0 {
+		poolCutoff = rueidis.DefaultBlockingPipeline
+	}
 	rca := &cacheAside{
 		lockPool:       lp,
+		writeMarks:     writeMarks{disabled: clientOption.DisableCache || clientOption.AlwaysRESP2},
+		trackBypasses:  canTrackBypasses(clientOption),
+		poolCutoff:     poolCutoff,
 		lockTTL:        cfg.lockTTL,
 		lockTTLMs:      strconv.FormatInt(cfg.lockTTL.Milliseconds(), 10),
 		logger:         cfg.logger,
@@ -111,6 +127,10 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	// invalidation stream share a pipe. ClientBuilder can override.
 	clientOption.PipelineMultiplex = -1
 	clientOption.OnInvalidations = rca.onInvalidate
+	pipeLimit := rca.readBarrierPipeLimit(clientOption, cfg)
+	if pipeLimit != 0 {
+		rca.watchBarrierDials(&clientOption)
+	}
 
 	var err error
 	if cfg.clientBuilder != nil {
@@ -121,6 +141,12 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	if err != nil {
 		return nil, err
 	}
+	// Cluster replies in rueidis v1.0.75 hide MOVED/ASK and the serving
+	// pipe, and a slot can move between live pipes without a nil push.
+	// Sentinel can switch masters as well. Both keep the deadline fallback.
+	if rca.client.Mode() == rueidis.ClientModeStandalone {
+		rca.writeMarks.pipeLimit = pipeLimit
+	}
 
 	if rca.refreshAfter > 0 {
 		rca.refreshCtx, rca.refreshCancel = context.WithCancel(context.Background())
@@ -130,6 +156,60 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	}
 
 	return rca, nil
+}
+
+func (rca *cacheAside) readBarrierPipeLimit(opt rueidis.ClientOption, cfg config) int {
+	// Builders can change the multiplexing, routing or callbacks. The
+	// returned Client does not expose its effective options.
+	if cfg.clientBuilder != nil || !rca.trackBypasses || opt.DisableAutoPipelining || opt.ConnLifetime != 0 || opt.Standalone.EnableRedirect {
+		return 0
+	}
+	// NOLOOP suppresses our own pushes. BCAST, OPTOUT and REDIRECT do not
+	// provide the required OPTIN tracking on this pipeline.
+	for _, option := range opt.ClientTrackingOptions {
+		if !strings.EqualFold(option, "OPTIN") {
+			return 0
+		}
+	}
+	return rca.poolCutoff
+}
+
+func (rca *cacheAside) watchBarrierDials(opt *rueidis.ClientOption) {
+	dialCtx, dial := opt.DialCtxFn, opt.DialFn
+	opt.DialCtxFn = func(ctx context.Context, addr string, dialer *net.Dialer, config *tls.Config) (net.Conn, error) {
+		conn, err := dialRedis(ctx, addr, dialer, config, dialCtx, dial)
+		if err == nil {
+			// The mux may install a new socket before the old reader delivers
+			// its nil callback. Change the wire stamp before exposing it.
+			rca.writeMarks.wire.Add(1)
+		}
+		return conn, err
+	}
+}
+
+func dialRedis(ctx context.Context, addr string, dialer *net.Dialer, config *tls.Config,
+	dialCtx func(context.Context, string, *net.Dialer, *tls.Config) (net.Conn, error),
+	dial func(string, *net.Dialer, *tls.Config) (net.Conn, error),
+) (net.Conn, error) {
+	switch {
+	case dialCtx != nil:
+		return dialCtx(ctx, addr, dialer, config)
+	case dial != nil:
+		return dial(addr, dialer, config)
+	case config != nil:
+		return (&tls.Dialer{NetDialer: dialer, Config: config}).DialContext(ctx, "tcp", addr)
+	default:
+		return dialer.DialContext(ctx, "tcp", addr)
+	}
+}
+
+func canTrackBypasses(opt rueidis.ClientOption) bool {
+	if opt.DisableCache || opt.AlwaysRESP2 || opt.SendToReplicas != nil {
+		return false
+	}
+	return len(opt.ClientTrackingOptions) == 0 || slices.ContainsFunc(opt.ClientTrackingOptions, func(s string) bool {
+		return strings.EqualFold(s, "OPTIN")
+	})
 }
 
 // Client returns the underlying rueidis.Client. Bypasses cache-aside semantics.
@@ -238,6 +318,7 @@ func (rca *cacheAside) awaitLockMultiOrPoll(ctx context.Context, chans []<-chan 
 // per-key message will follow for what changed meanwhile.
 func (rca *cacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 	if messages == nil {
+		rca.writeMarks.reset(time.Now())
 		rca.locks.Range(func(key string, entry *lockEntry) bool {
 			if rca.locks.CompareAndDelete(key, entry) {
 				entry.cancel()
@@ -253,6 +334,7 @@ func (rca *cacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 			rca.emitInvalidationError()
 			continue
 		}
+		rca.writeMarks.invalidate(key)
 		entry, loaded := rca.locks.LoadAndDelete(key)
 		if loaded {
 			entry.cancel()
@@ -293,9 +375,9 @@ func readUntracked(resp rueidis.RedisResult) bool {
 	return resp.CachePXAT() == -1
 }
 
-func (o entryOwner) rememberRead(key string, resp rueidis.RedisResult) {
+func (o entryOwner) rememberRead(key string, resp rueidis.RedisResult, read bypassRead) {
 	if entry, ok := o[key]; ok {
-		if untracked := readUntracked(resp); entry.untracked != untracked {
+		if untracked := read.untracked(resp); entry.untracked != untracked {
 			entry.untracked = untracked
 			o[key] = entry
 		}

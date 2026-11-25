@@ -61,7 +61,10 @@ func (rca *cacheAside) setLoop(
 		}
 		wrapped := wrapEnvelope(newVal, time.Since(start))
 
-		resp := setWithWriteLockScript.Exec(ctx, rca.client, []string{key}, []string{wrapped, strconv.FormatInt(ttl.Milliseconds(), 10), lockVal})
+		keys := []string{key}
+		mark := rca.writeMarks.begin(keys, time.Now(), writeMarkCap)
+		resp := setWithWriteLockScript.Exec(ctx, rca.client, keys, []string{wrapped, strconv.FormatInt(ttl.Milliseconds(), 10), lockVal})
+		rca.writeMarks.finish(keys, mark, time.Now(), func(int) bool { return casWrote(resp) })
 		if err := resp.Error(); err != nil {
 			// CAS Lua errored mid-call; we may still hold the lock. Restore
 			// the prior value (DEL if none) — bestEffortUnlock would wipe a
@@ -117,10 +120,10 @@ func (rca *cacheAside) acquireSingleWriteLock(
 ) (saved savedValue, retry bool, err error) {
 	waitChan, _ := rca.registerOwned(owned, key)
 
-	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), rca.lockTTL)
+	resp, read := rca.readKey(ctx, rca.lockTTL, key, false)
 	val, rerr := resp.ToString()
 	val, rerr = rca.cachedReadValue(ctx, key, val, rerr)
-	(*owned).rememberRead(key, resp)
+	(*owned).rememberRead(key, resp, read)
 	if rerr != nil && !rueidis.IsRedisNil(rerr) {
 		rca.emitRedisError("read")
 		return savedValue{}, false, fmt.Errorf("read key %q: %w", key, rerr)
@@ -155,10 +158,10 @@ func (rca *cacheAside) waitForWriteLockRelease(ctx context.Context, key string, 
 }
 
 func (rca *cacheAside) isWriteLocked(ctx context.Context, key string, owned entryOwner) (bool, error) {
-	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), rca.lockTTL)
+	resp, read := rca.readKey(ctx, rca.lockTTL, key, false)
 	val, err := resp.ToString()
 	val, err = rca.cachedReadValue(ctx, key, val, err)
-	owned.rememberRead(key, resp)
+	owned.rememberRead(key, resp, read)
 	if rueidis.IsRedisNil(err) {
 		return false, nil
 	}
@@ -281,7 +284,11 @@ func (rca *cacheAside) callSetMultiFn(
 // back to the simple floor check. Prefer set when you need callback-error
 // rollback.
 func (rca *cacheAside) forceSet(ctx context.Context, ttl time.Duration, key, value string) error {
-	if err := rca.client.Do(ctx, rca.client.B().Set().Key(key).Value(wrapEnvelope(value, 0)).Px(ttl).Build()).Error(); err != nil {
+	keys := []string{key}
+	mark := rca.writeMarks.begin(keys, time.Now(), writeMarkCap)
+	err := rca.client.Do(ctx, rca.client.B().Set().Key(key).Value(wrapEnvelope(value, 0)).Px(ttl).Build()).Error()
+	rca.writeMarks.finish(keys, mark, time.Now(), func(int) bool { return err == nil })
+	if err != nil {
 		rca.emitRedisError("set")
 		return fmt.Errorf("force set key %q: %w", key, err)
 	}
@@ -303,7 +310,9 @@ func (rca *cacheAside) forceSetMulti(ctx context.Context, ttl time.Duration, val
 		keyOrder = append(keyOrder, key)
 		cmds = append(cmds, rca.client.B().Set().Key(key).Value(wrapEnvelope(val, 0)).Px(ttl).Build())
 	}
+	mark := rca.writeMarks.begin(keyOrder, time.Now(), writeMarkCap)
 	resps := rca.client.DoMulti(ctx, cmds...)
+	rca.writeMarks.finish(keyOrder, mark, time.Now(), successfulReplies(resps, writeReplied))
 	var failed map[string]error
 	succeeded := make([]string, 0, len(resps))
 	for i, resp := range resps {
@@ -332,7 +341,7 @@ func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string, owne
 		waitChans[i], _ = rca.registerOwned(owned, key)
 	}
 
-	resps, err := rca.readMultiCache(ctx, rca.lockTTL, keys)
+	resps, bypassed, err := rca.readMultiCache(ctx, rca.lockTTL, keys, false)
 	if err != nil {
 		rca.logger.Error("waitForReadLocks read failed", "error", err)
 		return err
@@ -343,7 +352,7 @@ func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string, owne
 	defer stringPool.Put(lockedKeysP)
 	for i, key := range keys {
 		val, err := resps[i].ToString()
-		(*owned).rememberRead(key, resps[i])
+		(*owned).rememberRead(key, resps[i], bypassed.at(i))
 		if rueidis.IsRedisNil(err) {
 			continue
 		}
@@ -370,13 +379,13 @@ func (rca *cacheAside) waitForWriteLocksRelease(ctx context.Context, keys []stri
 }
 
 func (rca *cacheAside) anyWriteLocked(ctx context.Context, keys []string, owned entryOwner) (bool, error) {
-	resps, err := rca.readMultiCache(ctx, rca.lockTTL, keys)
+	resps, bypassed, err := rca.readMultiCache(ctx, rca.lockTTL, keys, false)
 	if err != nil {
 		return false, err
 	}
 	for i, key := range keys {
 		val, err := resps[i].ToString()
-		owned.rememberRead(key, resps[i])
+		owned.rememberRead(key, resps[i], bypassed.at(i))
 		if rueidis.IsRedisNil(err) {
 			continue
 		}

@@ -153,10 +153,10 @@ func (rca *cacheAside) waitForFailedKey(
 	owned *entryOwner,
 ) error {
 	waitChan, _ := rca.registerOwned(owned, firstFailed)
-	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(firstFailed).Cache(), rca.lockTTL)
+	resp, read := rca.readKey(ctx, rca.lockTTL, firstFailed, false)
 	val, rerr := resp.ToString()
 	val, rerr = rca.cachedReadValue(ctx, firstFailed, val, rerr)
-	(*owned).rememberRead(firstFailed, resp)
+	(*owned).rememberRead(firstFailed, resp, read)
 	if rueidis.IsRedisNil(rerr) {
 		return nil
 	}
@@ -502,7 +502,10 @@ func (rca *cacheAside) execCASSet(ctx context.Context, group []casSetEntry, ttlM
 			Args: argsBuf[i*3 : i*3+3 : i*3+3],
 		}
 	}
-	return setWithWriteLockScript.ExecMulti(ctx, rca.client, stmts...)
+	mark := rca.writeMarks.begin(keysBuf, time.Now(), writeMarkCap)
+	resps := setWithWriteLockScript.ExecMulti(ctx, rca.client, stmts...)
+	rca.writeMarks.finish(keysBuf, mark, time.Now(), successfulReplies(resps, casWrote))
+	return resps
 }
 
 // collectCASResults processes CAS responses, populating succeeded/failed.
@@ -541,13 +544,19 @@ func (rca *cacheAside) collectCASResults(
 
 // restoreMultiValues restores saved values or deletes keys for all held locks.
 func (rca *cacheAside) restoreMultiValues(ctx context.Context, lockValues map[string]string, savedValues map[string]savedValue) {
+	if len(lockValues) == 0 {
+		return
+	}
 	toCtx, cancel := rca.cleanupCtx(ctx)
 	defer cancel()
 
 	keys, execs := mapExecs(lockValues, func(key, lockVal string) rueidis.LuaExec {
 		return rueidis.LuaExec{Keys: []string{key}, Args: restoreArgs(lockVal, savedValues[key])}
 	})
-	for i, resp := range restoreValueOrDeleteScript.ExecMulti(toCtx, rca.client, execs...) {
+	mark := rca.writeMarks.begin(keys, time.Now(), writeMarkCap)
+	resps := restoreValueOrDeleteScript.ExecMulti(toCtx, rca.client, execs...)
+	rca.writeMarks.finish(keys, mark, time.Now(), successfulReplies(resps, casWrote))
+	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
 			rca.logger.Error("failed to restore value", "key", keys[i], "error", err)
 		}
@@ -567,8 +576,11 @@ func restoreArgs(lockVal string, saved savedValue) []string {
 // deletes the key if saved.present is false. Empty values with present=true
 // are restored as-is.
 func (rca *cacheAside) restoreValue(ctx context.Context, key, lockVal string, saved savedValue) {
-	err := restoreValueOrDeleteScript.Exec(ctx, rca.client, []string{key}, restoreArgs(lockVal, saved)).Error()
-	if err != nil {
+	keys := []string{key}
+	mark := rca.writeMarks.begin(keys, time.Now(), writeMarkCap)
+	resp := restoreValueOrDeleteScript.Exec(ctx, rca.client, keys, restoreArgs(lockVal, saved))
+	rca.writeMarks.finish(keys, mark, time.Now(), func(int) bool { return casWrote(resp) })
+	if err := resp.Error(); err != nil {
 		rca.logger.Error("failed to restore value", "key", key, "error", err)
 	}
 }

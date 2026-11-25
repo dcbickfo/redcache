@@ -337,15 +337,17 @@ func TestCluster_SlotMigrationFollowsASK(t *testing.T) {
 	assert.Equal(t, want, got)
 	assert.ElementsMatch(t, fresh, loaded, "only the new keys are loaded")
 
+	// Use a separate Conn to exercise cached ASK reads after publication.
+	reader, _ := makeClusterClient(t, redcache.WithMetrics(metrics))
 	if valkey9 {
 		before := len(readErrorOps())
-		v, err := client.Get(ctx, time.Minute, fresh[0], unexpectedLoader)
+		v, err := reader.Get(ctx, time.Minute, fresh[0], unexpectedLoader)
 		require.NoError(t, err)
 		require.Equal(t, want[fresh[0]], v)
 		assert.Equal(t, []string{"read_fallback"}, readErrorOps()[before:], "one event for a plain GET")
 	}
 	beforeBatch := len(readErrorOps())
-	got, err = client.GetMulti(ctx, time.Minute, keys, noLoader)
+	got, err = reader.GetMulti(ctx, time.Minute, keys, noLoader)
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 	if valkey9 {

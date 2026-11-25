@@ -11,7 +11,11 @@ import (
 
 // del removes a key, triggering invalidation on all subscribed clients.
 func (rca *cacheAside) del(ctx context.Context, key string) error {
-	if err := rca.client.Do(ctx, rca.client.B().Del().Key(key).Build()).Error(); err != nil {
+	keys := []string{key}
+	mark := rca.writeMarks.begin(keys, time.Now(), writeMarkCap)
+	err := rca.client.Do(ctx, rca.client.B().Del().Key(key).Build()).Error()
+	rca.writeMarks.finish(keys, mark, time.Now(), func(int) bool { return err == nil })
+	if err != nil {
 		rca.emitRedisError("del")
 		return fmt.Errorf("del key %q: %w", key, err)
 	}
@@ -28,7 +32,10 @@ func (rca *cacheAside) delMulti(ctx context.Context, keys ...string) error {
 		cmds = append(cmds, rca.client.B().Del().Key(key).Build())
 	}
 	var first firstKeyErr
-	for i, resp := range rca.client.DoMulti(ctx, cmds...) {
+	mark := rca.writeMarks.begin(keys, time.Now(), writeMarkCap)
+	resps := rca.client.DoMulti(ctx, cmds...)
+	rca.writeMarks.finish(keys, mark, time.Now(), successfulReplies(resps, writeReplied))
+	for i, resp := range resps {
 		if err := resp.Error(); err != nil {
 			rca.logger.Error("DelMulti key failed", "key", keys[i], "error", err)
 			rca.emitRedisError("del")

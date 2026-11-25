@@ -179,10 +179,10 @@ type cacheReadResult struct {
 }
 
 func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string) (cacheReadResult, error) {
-	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), ttl)
+	resp, read := rca.readKey(ctx, ttl, key, rca.refreshAfter > 0)
 	val, err := resp.ToString()
 	val, err = rca.cachedReadValue(ctx, key, val, err)
-	untracked := readUntracked(resp)
+	untracked := read.untracked(resp)
 	if rueidis.IsRedisNil(err) {
 		return cacheReadResult{untracked: untracked}, errNotFound
 	}
@@ -196,9 +196,22 @@ func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 	plain, delta := unwrapEnvelope(val)
 	var pttl int64
 	if rca.refreshAfter > 0 {
-		pttl = resp.CachePTTL()
+		pttl = read.ttl(resp)
 	}
 	return cacheReadResult{raw: val, val: plain, pttl: pttl, delta: delta, untracked: untracked}, nil
+}
+
+func (rca *cacheAside) readKey(ctx context.Context, ttl time.Duration, key string, refreshTTL bool) (rueidis.RedisResult, bypassRead) {
+	if rca.writeMarks.bypass(key) {
+		if rca.trackBypasses || refreshTTL {
+			replies, reads := rca.bypassReads(ctx, []string{key}, refreshTTL)
+			if len(replies) == 1 {
+				return replies[0], reads[0]
+			}
+		}
+		return rca.client.Do(ctx, rca.client.B().Get().Key(key).Build()), bypassRead{bypassed: true}
+	}
+	return rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), ttl), bypassRead{}
 }
 
 // cachedReadValue retries an aborted cached read in cluster mode with one plain
@@ -269,8 +282,13 @@ func (rca *cacheAside) tryLock(ctx context.Context, key string) (string, error) 
 	return "", fmt.Errorf("lock key %q: %w", key, err)
 }
 
+// setWithLock publishes an absent-key fill. SET NX only proves absence on
+// Redis. Tracking modes such as NOLOOP can leave an older user value cached.
 func (rca *cacheAside) setWithLock(ctx context.Context, ttl time.Duration, key string, valLock valAndLock) (string, error) {
-	resp := setKeyLua.Exec(ctx, rca.client, []string{key}, []string{valLock.lockVal, valLock.val, strconv.FormatInt(ttl.Milliseconds(), 10)})
+	keys := []string{key}
+	mark := rca.writeMarks.begin(keys, time.Now(), writeMarkCap)
+	resp := setKeyLua.Exec(ctx, rca.client, keys, []string{valLock.lockVal, valLock.val, strconv.FormatInt(ttl.Milliseconds(), 10)})
+	rca.writeMarks.finish(keys, mark, time.Now(), func(int) bool { return casWrote(resp) })
 	if err := resp.Error(); err != nil {
 		if !rueidis.IsRedisNil(err) {
 			rca.emitRedisError("set")
