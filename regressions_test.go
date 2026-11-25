@@ -21,7 +21,7 @@ import (
 // closing-flag/recover guard or Close's closeOnce would surface as a panic.
 func TestCache_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
 		redcache.WithLockTTL(2*time.Second),
@@ -83,7 +83,7 @@ func TestCache_Close_SafeUnderConcurrentRefresh(t *testing.T) {
 // to be misreported as a lost lock.
 func TestCache_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -112,7 +112,7 @@ func TestCache_Get_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 // counterpart: catches setMultiWithLock CAS-interpretation regressions.
 func TestCache_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -145,7 +145,7 @@ func TestCache_GetMulti_CleanMissEmitsNoFalseLockLost(t *testing.T) {
 // returned as a hit rather than treated as a miss.
 func TestCache_EmptyValueIsCacheHit(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -234,7 +234,7 @@ func TestCache_Set_RollbackPreservesPTTL(t *testing.T) {
 // with a stolen lock (CAS Lua returned 0) and emits LockLost.
 func TestCache_GetMulti_CASMismatchDropsKey(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -272,7 +272,7 @@ func TestCache_GetMulti_CASMismatchDropsKey(t *testing.T) {
 // completes under a cancelled caller ctx (bestEffortRestore uses cleanupCtx).
 func TestCache_Set_RollbackSurvivesContextCancel(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
 		redcache.WithLockTTL(5*time.Second),
@@ -347,7 +347,7 @@ func TestGetMulti_CancelMidPipelineDoesNotCrash(t *testing.T) {
 // local entry until lockTTL.
 func TestGet_ErroredLeaderDoesNotStallNextCaller(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}, redcache.WithLockTTL(3*time.Second))
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
@@ -382,7 +382,7 @@ func TestGet_ErroredLeaderDoesNotStallNextCaller(t *testing.T) {
 // entries from before it must not make the next miss wait out lockTTL.
 func TestGet_DisconnectInvalidatesLocalEntries(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}, redcache.WithLockTTL(3*time.Second))
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
@@ -416,7 +416,7 @@ func TestGet_DisconnectInvalidatesLocalEntries(t *testing.T) {
 // it created, or the next Get on the key parks on one until lockTTL.
 func TestSet_ErroredWriterDoesNotStallNextGet(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}, redcache.WithLockTTL(3*time.Second))
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)

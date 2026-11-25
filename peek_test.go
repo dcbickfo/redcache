@@ -19,7 +19,7 @@ import (
 // returns (_, false, nil); after a Get populates the key, Peek hits.
 func TestPeek_MissThenHit(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -56,7 +56,7 @@ func TestPeek_MissThenHit(t *testing.T) {
 // prefix is treated as not-found), and Peek does not run a loader to fill it.
 func TestPeek_LockValueReadsAsMiss(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},

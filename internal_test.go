@@ -263,9 +263,7 @@ func TestOnInvalidate_NilCancelsEveryLock(t *testing.T) {
 // and can read and write through it.
 func TestConn_SharesEngine(t *testing.T) {
 	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires Redis")
-	}
+	skipInShortMode(t)
 
 	conn, err := Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
@@ -548,16 +546,16 @@ func TestEnqueueRefresh_DropsInsteadOfQueueingAfterClose(t *testing.T) {
 
 var helperAddr = []string{"127.0.0.1:6379"}
 
-func skipIfShort(tb testing.TB) {
+func skipInShortMode(tb testing.TB) {
 	tb.Helper()
 	if testing.Short() {
-		tb.Skip("requires Redis")
+		tb.Skip("skipped by -short; without -short this test requires a server and fails if it is down")
 	}
 }
 
 func newHelperPCA(t *testing.T) *cacheAside {
 	t.Helper()
-	skipIfShort(t)
+	skipInShortMode(t)
 	pca, err := newCacheAside(
 		rueidis.ClientOption{InitAddress: helperAddr},
 		newConfig(WithLockTTL(2*time.Second)),

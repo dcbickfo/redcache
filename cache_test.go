@@ -22,12 +22,13 @@ import (
 
 var addr = []string{"127.0.0.1:6379"}
 
-// skipIfNoRedis skips integration tests that need a live Redis when run under
-// -short, so `go test -short ./...` exercises only the no-Redis unit subset.
-func skipIfNoRedis(tb testing.TB) {
+// skipInShortMode is the only way a test that needs a server may skip: under
+// -short, so `go test -short ./...` runs only the tests that need none. Without
+// -short a missing server fails the test; nothing skips because it is down.
+func skipInShortMode(tb testing.TB) {
 	tb.Helper()
 	if testing.Short() {
-		tb.Skip("requires Redis")
+		tb.Skip("skipped by -short; without -short this test requires a server and fails if it is down")
 	}
 }
 
@@ -36,7 +37,7 @@ func skipIfNoRedis(tb testing.TB) {
 // too for tests that inspect Redis directly (conn.Client()).
 func makeClient(t *testing.T, addr []string) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: addr,
@@ -191,7 +192,7 @@ func TestCache_GetMulti_Partial(t *testing.T) {
 
 func TestCache_GetMulti_IgnoresLoaderExtraKeys(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
@@ -609,7 +610,7 @@ func getConcurrently(
 // TestConcurrentRegisterRace stresses register() to guard the CompareAndDelete race.
 func TestConcurrentRegisterRace(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	// Minimum lock TTL forces expirations under contention.
 	conn, err := redcache.Open(
 		rueidis.ClientOption{
@@ -874,7 +875,7 @@ func TestCache_Close(t *testing.T) {
 
 func TestCache_CloseCancelsRefreshCallback(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -987,7 +988,7 @@ func TestOpen_Validation(t *testing.T) {
 // causes Get's CAS-set to fail and a subsequent read returns the forced value.
 func TestCache_Get_ErrLockLostRetry(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
 		redcache.WithLockTTL(time.Second*2),

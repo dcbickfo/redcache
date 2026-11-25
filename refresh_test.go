@@ -19,7 +19,7 @@ import (
 
 func makeRefreshClient(t *testing.T, addr []string, fraction float64) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: addr,
@@ -379,7 +379,7 @@ func TestRefreshAhead_DoesNotStompNewerRealValue(t *testing.T) {
 }
 
 func TestRefreshAhead_DoesNotReleaseNewerRefreshLock(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 
 	open := func(t *testing.T, lockTTL time.Duration) (*redcache.Cache, *redcache.Conn) {
 		t.Helper()
@@ -546,7 +546,7 @@ func TestRefreshAhead_GetMulti(t *testing.T) {
 }
 
 func TestRefreshAhead_Backpressure(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	// Tiny pool (1 worker, queue size 1) plus a sleeping callback so the queue fills fast.
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -651,7 +651,7 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	}
 	t.Run("valid fraction", func(t *testing.T) {
 		t.Parallel()
-		skipIfNoRedis(t)
+		skipInShortMode(t)
 		conn, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.WithRefreshAfterFraction(0.8),
@@ -661,7 +661,7 @@ func TestRefreshAhead_FractionValidation(t *testing.T) {
 	})
 	t.Run("custom workers and queue", func(t *testing.T) {
 		t.Parallel()
-		skipIfNoRedis(t)
+		skipInShortMode(t)
 		conn, err := redcache.Open(
 			rueidis.ClientOption{InitAddress: addr},
 			redcache.WithRefreshAfterFraction(0.8),

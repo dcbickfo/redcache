@@ -15,7 +15,7 @@ import (
 // hot-path call. Deriving needs a live Conn, so this needs Redis.
 func TestNew_NilCodecPanics(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	opt := rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}
 
 	conn, err := redcache.Open(opt)
