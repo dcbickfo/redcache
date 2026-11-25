@@ -35,6 +35,8 @@ make fmt
 make redis-up
 ```
 
+Test conventions (external tests through the public API by default; a thin `export_test.go` seam for internals; in-package tests only for direct engine state, with a reason comment at the top): see CONTRIBUTING.md.
+
 ## Architecture
 
 The library is a single-package Go module (`package redcache`) with internal helpers.

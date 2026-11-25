@@ -48,6 +48,15 @@ golangci-lint fmt
 go test -bench=. -benchmem ./...
 ```
 
+**Test conventions.** Tests are external by default: they live in
+`package redcache_test` and go through the public API. When a test needs an
+unexported detail, expose it through a thin seam in an in-package
+`export_test.go` (a file compiled only under `go test`, the pattern the Go
+standard library uses, for example `src/net/http/export_test.go`). A test that
+needs direct engine state may stay in package `redcache`; the file starts with
+a one-line comment saying why it cannot be external. Do not add production
+hooks, test-only options, or build tags.
+
 ## Conventions
 
 These are enforced by `.golangci.yml`; CI runs the same linter, so matching them
