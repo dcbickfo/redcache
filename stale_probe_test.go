@@ -70,13 +70,13 @@ func probeRun(t *testing.T, mode string, cache *redcache.Cache, conn *redcache.C
 			for i := 0; i < iters; i++ {
 				gen := "g" + strconv.Itoa(i)
 				if err := cache.ForceSetMulti(ctx, time.Minute, valuesFor(keys, gen)); err != nil {
-					t.Logf("PROBE_ERR mode=%s set: %v", mode, err)
+					t.Errorf("PROBE_ERR mode=%s set: %v", mode, err)
 					return
 				}
 				setDone := time.Now()
 				got, err := cache.GetMulti(ctx, time.Minute, keys, noLoad)
 				if err != nil {
-					t.Logf("PROBE_ERR mode=%s get: %v", mode, err)
+					t.Errorf("PROBE_ERR mode=%s get: %v", mode, err)
 					return
 				}
 				reads.Add(int64(len(keys)))
@@ -106,7 +106,7 @@ func probeRun(t *testing.T, mode string, cache *redcache.Cache, conn *redcache.C
 						}
 						time.Sleep(50 * time.Microsecond)
 					}
-					t.Logf("PROBE_STALE mode=%s iter=%d key=%s slot=%d node=%s sinceSet=%s got=%q want=%q recheckCacheHit=%v recheckPTTL=%d serverPlain=%q healedAfter=%s tries=%d",
+					t.Errorf("PROBE_STALE mode=%s iter=%d key=%s slot=%d node=%s sinceSet=%s got=%q want=%q recheckCacheHit=%v recheckPTTL=%d serverPlain=%q healedAfter=%s tries=%d",
 						mode, i, k, slot, node, time.Since(setDone), got[k], want, cached.IsCacheHit(), cached.CachePTTL(), plain, time.Since(start), tries)
 					_ = pttl
 				}
@@ -114,7 +114,7 @@ func probeRun(t *testing.T, mode string, cache *redcache.Cache, conn *redcache.C
 		}()
 	}
 	wg.Wait()
-	t.Logf("PROBE_SUMMARY mode=%s image=%s iters=%d workers=%d reads=%d stale=%d gomaxprocs_env=%q",
+	t.Errorf("PROBE_SUMMARY mode=%s image=%s iters=%d workers=%d reads=%d stale=%d gomaxprocs_env=%q",
 		mode, os.Getenv("REDCACHE_SERVER_IMAGE"), iters, workers, reads.Load(), stale.Load(), os.Getenv("GOMAXPROCS"))
 }
 
