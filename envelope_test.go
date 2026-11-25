@@ -1,8 +1,10 @@
-package redcache
+package redcache_test
 
 import (
 	"testing"
 	"time"
+
+	"github.com/dcbickfo/redcache"
 )
 
 func TestEnvelope_RoundTrip(t *testing.T) {
@@ -21,8 +23,8 @@ func TestEnvelope_RoundTrip(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			wrapped := wrapEnvelope(tc.val, tc.delta)
-			gotVal, gotDelta := unwrapEnvelope(wrapped)
+			wrapped := redcache.WrapEnvelope(tc.val, tc.delta)
+			gotVal, gotDelta := redcache.UnwrapEnvelope(wrapped)
 			if gotVal != tc.val {
 				t.Errorf("val = %q, want %q", gotVal, tc.val)
 			}
@@ -44,7 +46,7 @@ func TestEnvelope_LegacyValuePassthrough(t *testing.T) {
 		"__redcache:lock:1234", // lock-shaped values pass through as-is
 	}
 	for _, val := range cases {
-		gotVal, gotDelta := unwrapEnvelope(val)
+		gotVal, gotDelta := redcache.UnwrapEnvelope(val)
 		if gotVal != val {
 			t.Errorf("legacy %q lost: got %q", val, gotVal)
 		}
@@ -64,7 +66,7 @@ func TestEnvelope_MalformedFallsBack(t *testing.T) {
 		"__redcache:v1:nocolons",
 	}
 	for _, val := range cases {
-		gotVal, gotDelta := unwrapEnvelope(val)
+		gotVal, gotDelta := redcache.UnwrapEnvelope(val)
 		if gotVal != val {
 			t.Errorf("malformed %q got %q, want passthrough", val, gotVal)
 		}

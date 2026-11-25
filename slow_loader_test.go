@@ -15,24 +15,31 @@ import (
 	"github.com/dcbickfo/redcache"
 )
 
-// A loader slower than the lock TTL must keep its lock: Get returns after one
-// loader call instead of losing the lock and re-running the loader forever.
+const shortLockTTL = 200 * time.Millisecond
 
-func openShortLock(t *testing.T) (*redcache.Cache, *redcache.Conn) {
+func openShortLock(t *testing.T, lockTTL time.Duration) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
 	skipIfNoRedis(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
-		redcache.WithLockTTL(200*time.Millisecond),
+		redcache.WithLockTTL(lockTTL),
 	)
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
 	return redcache.New(conn, redcache.StringCodec{}), conn
 }
 
+// These loaders run for 2.5 seconds to exercise lock extension beyond the
+// initial TTL. A 1-second TTL gives the extension ticker room for scheduling
+// delays, and the 10-second context leaves 7.5 seconds beyond the loader sleep.
+const (
+	slowLoaderLockTTL = time.Second
+	slowLoaderTime    = 2500 * time.Millisecond
+)
+
 func TestGet_LoaderSlowerThanLockTTL(t *testing.T) {
 	t.Parallel()
-	client, _ := openShortLock(t)
+	client, _ := openShortLock(t, slowLoaderLockTTL)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	key := "slow:" + uuid.New().String()
@@ -40,7 +47,7 @@ func TestGet_LoaderSlowerThanLockTTL(t *testing.T) {
 	var calls atomic.Int32
 	got, err := client.Get(ctx, time.Minute, key, func(context.Context, string) (string, error) {
 		calls.Add(1)
-		time.Sleep(700 * time.Millisecond)
+		time.Sleep(slowLoaderTime)
 		return "v", nil
 	})
 	require.NoError(t, err)
@@ -55,7 +62,7 @@ func TestGet_LoaderSlowerThanLockTTL(t *testing.T) {
 
 func TestGetMulti_LoaderSlowerThanLockTTL(t *testing.T) {
 	t.Parallel()
-	client, _ := openShortLock(t)
+	client, _ := openShortLock(t, slowLoaderLockTTL)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	id := uuid.New().String()
@@ -64,7 +71,7 @@ func TestGetMulti_LoaderSlowerThanLockTTL(t *testing.T) {
 	var calls atomic.Int32
 	got, err := client.GetMulti(ctx, time.Minute, keys, func(_ context.Context, ks []string) (map[string]string, error) {
 		calls.Add(1)
-		time.Sleep(700 * time.Millisecond)
+		time.Sleep(slowLoaderTime)
 		out := make(map[string]string, len(ks))
 		for _, k := range ks {
 			out[k] = "v-" + k
@@ -87,7 +94,7 @@ func TestGetMulti_LoaderSlowerThanLockTTL(t *testing.T) {
 // fresh value is returned.
 func TestGet_DelMidLoadRerunsLoaderOnce(t *testing.T) {
 	t.Parallel()
-	client, _ := openShortLock(t)
+	client, _ := openShortLock(t, shortLockTTL)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	key := "delmid:" + uuid.New().String()
@@ -107,7 +114,7 @@ func TestGet_DelMidLoadRerunsLoaderOnce(t *testing.T) {
 
 func TestGetMulti_DelMidLoadRerunsLoaderOnce(t *testing.T) {
 	t.Parallel()
-	client, _ := openShortLock(t)
+	client, _ := openShortLock(t, shortLockTTL)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	id := uuid.New().String()
@@ -134,7 +141,7 @@ func TestGetMulti_DelMidLoadRerunsLoaderOnce(t *testing.T) {
 // A lock lost on every attempt returns ErrLockLost within the retry cap.
 func TestGet_RepeatedLockLossReturnsErrLockLost(t *testing.T) {
 	t.Parallel()
-	client, _ := openShortLock(t)
+	client, _ := openShortLock(t, shortLockTTL)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	key := "lost:" + uuid.New().String()
@@ -152,7 +159,7 @@ func TestGet_RepeatedLockLossReturnsErrLockLost(t *testing.T) {
 
 func TestGetMulti_RepeatedLockLossReturnsErrLockLost(t *testing.T) {
 	t.Parallel()
-	client, _ := openShortLock(t)
+	client, _ := openShortLock(t, shortLockTTL)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	key := "lostm:" + uuid.New().String()
@@ -172,7 +179,7 @@ func TestGetMulti_RepeatedLockLossReturnsErrLockLost(t *testing.T) {
 // Get loads normally, and the package's goroutine-leak check stays clean.
 func TestGet_PanickingLoaderStopsKeepAlive(t *testing.T) {
 	t.Parallel()
-	client, _ := openShortLock(t)
+	client, _ := openShortLock(t, shortLockTTL)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	key := "panic:" + uuid.New().String()
