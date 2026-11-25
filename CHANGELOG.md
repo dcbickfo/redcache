@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Reads through the same `Conn` bypass the local cache after a write until
+  Redis invalidates the key or a one-second deadline expires.
+
 ## [v0.4.2] - 2026-11-24
 
 ### Added

@@ -153,10 +153,10 @@ func (rca *cacheAside) waitForFailedKey(
 	owned *entryOwner,
 ) error {
 	waitChan, _ := rca.registerOwned(owned, firstFailed)
-	resp := rca.client.DoCache(ctx, rca.client.B().Get().Key(firstFailed).Cache(), rca.lockTTL)
+	resp, bypassed, _ := rca.readKey(ctx, rca.lockTTL, firstFailed, false)
 	val, rerr := resp.ToString()
 	val, rerr = rca.cachedReadValue(ctx, firstFailed, val, rerr)
-	(*owned).rememberRead(firstFailed, resp)
+	(*owned).rememberRead(firstFailed, resp, bypassed)
 	if rueidis.IsRedisNil(rerr) {
 		return nil
 	}
@@ -502,7 +502,10 @@ func (rca *cacheAside) execCASSet(ctx context.Context, group []casSetEntry, ttlM
 			Args: argsBuf[i*3 : i*3+3 : i*3+3],
 		}
 	}
-	return setWithWriteLockScript.ExecMulti(ctx, rca.client, stmts...)
+	mark := rca.writeMarks.begin(keysBuf, time.Now(), writeMarkCap)
+	resps := setWithWriteLockScript.ExecMulti(ctx, rca.client, stmts...)
+	rca.writeMarks.finish(keysBuf, mark, time.Now(), successfulReplies(resps, casWrote))
+	return resps
 }
 
 // collectCASResults processes CAS responses, populating succeeded/failed.

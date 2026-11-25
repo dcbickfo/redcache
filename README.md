@@ -370,6 +370,13 @@ Open one `Conn`, then construct one cache per codec pair the service needs.
 Every cache shares the Conn's client and invalidation stream, and a single
 JSON-backed cache serves any key and value types on each operation.
 
+Reads through the same `Conn` see its acknowledged writes. For a recently
+written key, redcache reads directly from Redis until it receives the
+invalidation or a fixed one-second deadline expires. An invalidation that
+arrives after that deadline can briefly expose an older cached value. A
+second `Conn`, even in the same process, is eventually consistent and sees
+the write when its own invalidation arrives.
+
 ```go
 conn, err := redcache.Open(
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},

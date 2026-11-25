@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,6 +64,8 @@ func (le *lockEntry) timerExpired() {
 // K/V and delegates here.
 type cacheAside struct {
 	client         rueidis.Client
+	writeMarks     writeMarks
+	trackBypasses  bool
 	locks          syncx.ShardedMap[*lockEntry]
 	lockPool       *lockpool.Pool
 	lockTTL        time.Duration
@@ -96,6 +100,7 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	_, isNoop := cfg.metrics.(NoopMetrics)
 	rca := &cacheAside{
 		lockPool:       lp,
+		trackBypasses:  canTrackBypasses(clientOption),
 		lockTTL:        cfg.lockTTL,
 		lockTTLMs:      strconv.FormatInt(cfg.lockTTL.Milliseconds(), 10),
 		logger:         cfg.logger,
@@ -130,6 +135,15 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	}
 
 	return rca, nil
+}
+
+func canTrackBypasses(opt rueidis.ClientOption) bool {
+	if opt.DisableCache || opt.AlwaysRESP2 || opt.SendToReplicas != nil {
+		return false
+	}
+	return len(opt.ClientTrackingOptions) == 0 || slices.ContainsFunc(opt.ClientTrackingOptions, func(s string) bool {
+		return strings.EqualFold(s, "OPTIN")
+	})
 }
 
 // Client returns the underlying rueidis.Client. Bypasses cache-aside semantics.
@@ -238,6 +252,7 @@ func (rca *cacheAside) awaitLockMultiOrPoll(ctx context.Context, chans []<-chan 
 // per-key message will follow for what changed meanwhile.
 func (rca *cacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 	if messages == nil {
+		rca.writeMarks.reset(time.Now())
 		rca.locks.Range(func(key string, entry *lockEntry) bool {
 			if rca.locks.CompareAndDelete(key, entry) {
 				entry.cancel()
@@ -253,6 +268,7 @@ func (rca *cacheAside) onInvalidate(messages []rueidis.RedisMessage) {
 			rca.emitInvalidationError()
 			continue
 		}
+		rca.writeMarks.invalidate(key)
 		entry, loaded := rca.locks.LoadAndDelete(key)
 		if loaded {
 			entry.cancel()
@@ -293,7 +309,10 @@ func readUntracked(resp rueidis.RedisResult) bool {
 	return resp.CachePXAT() == -1
 }
 
-func (o entryOwner) rememberRead(key string, resp rueidis.RedisResult) {
+func (o entryOwner) rememberRead(key string, resp rueidis.RedisResult, bypassed bool) {
+	if bypassed {
+		return
+	}
 	if entry, ok := o[key]; ok {
 		if untracked := readUntracked(resp); entry.untracked != untracked {
 			entry.untracked = untracked

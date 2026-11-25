@@ -119,6 +119,34 @@ type WriteMarkCountsForTest struct {
 	Live        int64
 }
 
-func WriteMarkStatsForTest(_ *Conn) WriteMarkCountsForTest {
-	return WriteMarkCountsForTest{}
+func WriteMarkStatsForTest(conn *Conn) WriteMarkCountsForTest {
+	return writeMarkCounts(&conn.core.(*cacheAside).writeMarks)
+}
+
+func writeMarkCounts(m *writeMarks) WriteMarkCountsForTest {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return WriteMarkCountsForTest{Invalidated: m.invalidated, Expired: m.expired, AtCap: m.atCap, Live: int64(len(m.marks))}
+}
+
+type WriteMarksForTest struct{ state writeMarks }
+
+func (m *WriteMarksForTest) Begin(keys []string, now time.Time, cap int) func(time.Time, bool) {
+	ticket := m.state.begin(keys, now, cap)
+	return func(end time.Time, success bool) {
+		m.state.finish(keys, ticket, end, func(int) bool { return success })
+	}
+}
+
+func (m *WriteMarksForTest) Bypass(key string, now time.Time) bool {
+	return m.state.bypassAt(key, now)
+}
+
+func (m *WriteMarksForTest) Invalidate(key string)          { m.state.invalidate(key) }
+func (m *WriteMarksForTest) Reset(now time.Time)            { m.state.reset(now) }
+func (m *WriteMarksForTest) Counts() WriteMarkCountsForTest { return writeMarkCounts(&m.state) }
+
+func HasWaitEntryForTest(conn *Conn, key string) bool {
+	_, ok := conn.core.(*cacheAside).locks.Load(key)
+	return ok
 }
