@@ -102,6 +102,7 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	_, isNoop := cfg.metrics.(NoopMetrics)
 	rca := &cacheAside{
 		lockPool:       lp,
+		writeMarks:     writeMarks{disabled: clientOption.DisableCache || clientOption.AlwaysRESP2},
 		trackBypasses:  canTrackBypasses(clientOption),
 		lockTTL:        cfg.lockTTL,
 		lockTTLMs:      strconv.FormatInt(cfg.lockTTL.Milliseconds(), 10),
@@ -369,12 +370,9 @@ func readUntracked(resp rueidis.RedisResult) bool {
 	return resp.CachePXAT() == -1
 }
 
-func (o entryOwner) rememberRead(key string, resp rueidis.RedisResult, bypassed bool) {
-	if bypassed {
-		return
-	}
+func (o entryOwner) rememberRead(key string, resp rueidis.RedisResult, read bypassRead) {
 	if entry, ok := o[key]; ok {
-		if untracked := readUntracked(resp); entry.untracked != untracked {
+		if untracked := read.untracked(resp); entry.untracked != untracked {
 			entry.untracked = untracked
 			o[key] = entry
 		}

@@ -18,13 +18,13 @@ import (
 
 func TestReadYourWritesAfterForceSetMulti(t *testing.T) {
 	t.Run("standalone", func(t *testing.T) {
-		var paths redcache.ReadPathCountsForTest
+		var paths readPathCounts
 		cache, conn := makeClient(t, addr)
 		paths.Observe(conn)
 		checkReadYourWrites(t, cache, conn, &paths)
 	})
 	t.Run("cluster", func(t *testing.T) {
-		var paths redcache.ReadPathCountsForTest
+		var paths readPathCounts
 		cache, conn := makeClusterClient(t)
 		paths.Observe(conn)
 		checkReadYourWrites(t, cache, conn, &paths)
@@ -32,25 +32,27 @@ func TestReadYourWritesAfterForceSetMulti(t *testing.T) {
 }
 
 func TestReadBarrierAfterFill(t *testing.T) {
-	cache, conn := makeClient(t, addr)
-	var paths redcache.ReadPathCountsForTest
-	paths.Observe(conn)
-	ctx := t.Context()
-	key := "barrier-fill:" + uuid.New().String()
-	load := func(context.Context, string) (string, error) { return "fresh", nil }
-	_, err := cache.Get(ctx, time.Minute, key, load)
-	require.NoError(t, err)
-	for range 4 {
-		got, hit, err := cache.Peek[string, string](ctx, time.Minute, key)
-		require.NoError(t, err)
-		require.True(t, hit)
-		require.Equal(t, "fresh", got)
+	for _, operation := range []string{"Get", "GetMulti", "Set", "SetMulti"} {
+		t.Run(operation, func(t *testing.T) {
+			cache, conn := makeClient(t, addr)
+			var paths readPathCounts
+			paths.Observe(conn)
+			ctx := t.Context()
+			key := "barrier-fill:" + uuid.New().String()
+			require.NoError(t, changeMarkedValue(ctx, cache, operation, key))
+			for range 4 {
+				got, hit, err := cache.Peek[string, string](ctx, time.Minute, key)
+				require.NoError(t, err)
+				require.True(t, hit)
+				require.Equal(t, "value", got)
+			}
+			require.EqualValues(t, 1, paths.Bypasses.Load(), "one plain GET should end the mark")
+			require.GreaterOrEqual(t, paths.CacheHits.Load(), int64(2))
+		})
 	}
-	require.EqualValues(t, 1, paths.Bypasses.Load(), "one plain GET should end the mark")
-	require.GreaterOrEqual(t, paths.CacheHits.Load(), int64(2))
 }
 
-func checkReadYourWrites(t *testing.T, cache *redcache.Cache, conn *redcache.Conn, paths *redcache.ReadPathCountsForTest) {
+func checkReadYourWrites(t *testing.T, cache *redcache.Cache, conn *redcache.Conn, paths *readPathCounts) {
 	t.Helper()
 	const workers, iterations, nkeys = 4, 5000, 64
 	var reads, stale atomic.Int64
@@ -67,6 +69,14 @@ func checkReadYourWrites(t *testing.T, cache *redcache.Cache, conn *redcache.Con
 				if err := runStaleReadIteration(ctx, cache, keys, i, &reads, &stale); err != nil {
 					t.Error(err)
 					return
+				}
+			}
+			// Keep the measured workload at one read per key-write. Once it
+			// ends, read again to prove that the local cache is being reused.
+			for range 2 {
+				_, hit, err := cache.Peek[string, string](ctx, time.Minute, keys[0])
+				if err != nil || !hit {
+					t.Errorf("post-workload read of %q: hit=%t, error=%v", keys[0], hit, err)
 				}
 			}
 		})
@@ -87,6 +97,8 @@ func checkReadYourWrites(t *testing.T, cache *redcache.Cache, conn *redcache.Con
 	if paths.Bypasses.Load() == 0 {
 		t.Error("expected plain bypass reads")
 	}
+	require.Positive(t, paths.CacheHits.Load(), "reads must return to rueidis's local cache")
+	require.Zero(t, stats.Expired, "the workload must clear marks before the deadline")
 	if 100*cleared < 99*total {
 		t.Errorf("expected invalidations and barriers to end at least 99%% of marks, got %d/%d", cleared, total)
 	}
@@ -191,8 +203,9 @@ func TestWriteMarkNilInvalidation(t *testing.T) {
 func TestWriteMarkBypassKeepsWaitEntry(t *testing.T) {
 	for _, multi := range []bool{false, true} {
 		t.Run(map[bool]string{false: "Get", true: "GetMulti"}[multi], func(t *testing.T) {
-			var paths redcache.ReadPathCountsForTest
-			cache, conn := makeClient(t, addr, paths.Option())
+			var paths readPathCounts
+			cache, conn := makeClient(t, addr)
+			paths.Observe(conn)
 			ctx := t.Context()
 			key := "bypass-wait:" + uuid.New().String()
 			require.NoError(t, cache.ForceSet(ctx, time.Minute, key, "fresh"))
@@ -435,4 +448,124 @@ func TestReadBarrierErroredGET(t *testing.T) {
 	_, _, err := cache.Peek[string, string](ctx, time.Minute, key)
 	require.ErrorContains(t, err, "WRONGTYPE")
 	require.Equal(t, redcache.WriteMarkCountsForTest{Live: 1}, redcache.WriteMarkStatsForTest(conn))
+}
+
+func TestUncachedWriteReadDeleteRefill(t *testing.T) {
+	for _, mode := range []string{"DisableCache", "RESP2", "builder"} {
+		t.Run(mode, func(t *testing.T) {
+			skipIfNoRedis(t)
+			opt := rueidis.ClientOption{InitAddress: addr, DisableCache: mode != "builder", AlwaysRESP2: mode == "RESP2"}
+			metrics := &capturingMetrics{}
+			opts := []redcache.Option{redcache.WithMetrics(metrics)}
+			if mode == "builder" {
+				opts = append(opts, redcache.WithClientBuilder(func(opt rueidis.ClientOption) (rueidis.Client, error) {
+					opt.DisableCache = true
+					return rueidis.NewClient(opt)
+				}))
+			}
+			conn, err := redcache.Open(opt, opts...)
+			require.NoError(t, err)
+			t.Cleanup(conn.Close)
+			checkUncachedRefill(t, conn, metrics)
+			if opt.DisableCache {
+				require.Equal(t, redcache.WriteMarkCountsForTest{}, redcache.WriteMarkStatsForTest(conn))
+			}
+		})
+	}
+}
+
+func checkUncachedRefill(t *testing.T, conn *redcache.Conn, metrics *capturingMetrics) {
+	t.Helper()
+	cache := redcache.New(conn, redcache.StringCodec{})
+	ctx := t.Context()
+	key := "uncached-refill:" + uuid.New().String()
+	require.NoError(t, cache.ForceSet(ctx, time.Minute, key, "written"))
+	load := func(context.Context, string) (string, error) { return "refilled", nil }
+	got, err := cache.Get(ctx, time.Minute, key, load)
+	require.NoError(t, err)
+	require.Equal(t, "written", got)
+	require.False(t, redcache.HasWaitEntryForTest(conn, key), "uncached hit must release its wait entry")
+	require.NoError(t, cache.Del(ctx, key))
+	got, err = cache.Get(ctx, time.Minute, key, load)
+	require.NoError(t, err)
+	require.Equal(t, "refilled", got)
+	require.Zero(t, metrics.contended.Load(), "the refill must not wait behind its own prior hit")
+	require.False(t, redcache.HasWaitEntryForTest(conn, key))
+}
+
+func TestPooledBypassReadsReleaseWaitEntries(t *testing.T) {
+	cache, conn := makeClient(t, addr)
+	ctx := t.Context()
+	prefix := "pooled-bypass:" + uuid.New().String() + ":"
+	keys := make([]string, rueidis.DefaultBlockingPipeline/2+1)
+	for i := range keys {
+		keys[i] = prefix + strconv.Itoa(i)
+	}
+	want := valuesFor(keys, "fresh")
+	require.NoError(t, cache.ForceSetMulti(ctx, time.Minute, want))
+	got, err := cache.GetMulti(ctx, time.Minute, keys, noLoader)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	for _, key := range keys {
+		require.False(t, redcache.HasWaitEntryForTest(conn, key), "pooled GET cannot wake this wait entry")
+	}
+	stats := redcache.WriteMarkStatsForTest(conn)
+	require.Zero(t, stats.Barrier, "pooled GET cannot end the mark")
+	require.EqualValues(t, len(keys), stats.Live)
+}
+
+type readPathCounts struct {
+	CacheHits atomic.Int64
+	Bypasses  atomic.Int64
+}
+
+func (c *readPathCounts) Observe(conn *redcache.Conn) {
+	redcache.WrapClientForTest(conn, func(client rueidis.Client) rueidis.Client {
+		return &countReadPaths{Client: client, counts: c}
+	})
+}
+
+type countReadPaths struct {
+	rueidis.Client
+	counts *readPathCounts
+}
+
+func (c *countReadPaths) DoCache(ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	result := c.Client.DoCache(ctx, cmd, ttl)
+	if result.IsCacheHit() {
+		c.counts.CacheHits.Add(1)
+	}
+	return result
+}
+
+func (c *countReadPaths) DoMultiCache(ctx context.Context, cmds ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	results := c.Client.DoMultiCache(ctx, cmds...)
+	var hits int64
+	for _, result := range results {
+		if result.IsCacheHit() {
+			hits++
+		}
+	}
+	c.counts.CacheHits.Add(hits)
+	return results
+}
+
+func (c *countReadPaths) Do(ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	if cmd.Commands()[0] == "GET" {
+		c.counts.Bypasses.Add(1)
+	}
+	return c.Client.Do(ctx, cmd)
+}
+
+func (c *countReadPaths) DoMulti(ctx context.Context, cmds ...rueidis.Completed) []rueidis.RedisResult {
+	var reads int64
+	for _, cmd := range cmds {
+		if cmd.Commands()[0] == "GET" {
+			reads++
+		}
+	}
+	if reads != 0 {
+		c.counts.Bypasses.Add(reads)
+	}
+	return c.Client.DoMulti(ctx, cmds...)
 }

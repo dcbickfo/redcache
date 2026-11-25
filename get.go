@@ -179,10 +179,10 @@ type cacheReadResult struct {
 }
 
 func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string) (cacheReadResult, error) {
-	resp, bypassed, pttl := rca.readKey(ctx, ttl, key, rca.refreshAfter > 0)
+	resp, read := rca.readKey(ctx, ttl, key, rca.refreshAfter > 0)
 	val, err := resp.ToString()
 	val, err = rca.cachedReadValue(ctx, key, val, err)
-	untracked := !bypassed && readUntracked(resp)
+	untracked := read.untracked(resp)
 	if rueidis.IsRedisNil(err) {
 		return cacheReadResult{untracked: untracked}, errNotFound
 	}
@@ -194,23 +194,24 @@ func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 		return cacheReadResult{untracked: untracked, locked: true}, errNotFound
 	}
 	plain, delta := unwrapEnvelope(val)
-	if !bypassed && rca.refreshAfter > 0 {
-		pttl = resp.CachePTTL()
+	var pttl int64
+	if rca.refreshAfter > 0 {
+		pttl = read.ttl(resp)
 	}
 	return cacheReadResult{raw: val, val: plain, pttl: pttl, delta: delta, untracked: untracked}, nil
 }
 
-func (rca *cacheAside) readKey(ctx context.Context, ttl time.Duration, key string, refreshTTL bool) (rueidis.RedisResult, bool, int64) {
+func (rca *cacheAside) readKey(ctx context.Context, ttl time.Duration, key string, refreshTTL bool) (rueidis.RedisResult, bypassRead) {
 	if rca.writeMarks.bypass(key) {
 		if rca.trackBypasses || refreshTTL {
-			replies, ttls := rca.bypassReads(ctx, []string{key}, refreshTTL)
+			replies, reads := rca.bypassReads(ctx, []string{key}, refreshTTL)
 			if len(replies) == 1 {
-				return replies[0], true, ttls.at(0)
+				return replies[0], reads[0]
 			}
 		}
-		return rca.client.Do(ctx, rca.client.B().Get().Key(key).Build()), true, 0
+		return rca.client.Do(ctx, rca.client.B().Get().Key(key).Build()), bypassRead{bypassed: true}
 	}
-	return rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), ttl), false, 0
+	return rca.client.DoCache(ctx, rca.client.B().Get().Key(key).Cache(), ttl), bypassRead{}
 }
 
 // cachedReadValue retries an aborted cached read in cluster mode with one plain

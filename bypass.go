@@ -7,21 +7,28 @@ import (
 	"github.com/redis/rueidis"
 )
 
-// bypassTTLs contains Redis TTLs for the plain reads, in their dispatch order.
-// A nil slice means refresh-ahead did not ask for TTLs.
-type bypassTTLs []int64
+// A zero bypassRead describes the ordinary cached path.
+type bypassRead struct {
+	pttl     int64
+	bypassed bool
+	tracked  bool
+}
 
-func (t bypassTTLs) at(i int) int64 {
-	if t == nil {
-		return 0
+func (r bypassRead) ttl(reply rueidis.RedisResult) int64 {
+	if !r.bypassed {
+		return reply.CachePTTL()
 	}
-	return t[i]
+	return r.pttl
+}
+
+func (r bypassRead) untracked(reply rueidis.RedisResult) bool {
+	return !r.tracked && readUntracked(reply)
 }
 
 // bypassReads gets values directly from Redis. Opting in on the same pipe
 // re-arms the invalidation for a later write, even if all current reads bypass
 // the local cache. No bypass reply is installed in rueidis's cache.
-func (rca *cacheAside) bypassReads(ctx context.Context, keys []string, refreshTTL bool) ([]rueidis.RedisResult, bypassTTLs) {
+func (rca *cacheAside) bypassReads(ctx context.Context, keys []string, refreshTTL bool) ([]rueidis.RedisResult, []bypassRead) {
 	getOffset := 0
 	if rca.trackBypasses {
 		getOffset = 1
@@ -41,7 +48,8 @@ func (rca *cacheAside) bypassReads(ctx context.Context, keys []string, refreshTT
 		}
 	}
 	var barriers []readBarrier
-	if rca.trackBypasses && rca.writeMarks.onTrackingPipe(len(cmds)) {
+	trackedPipe := rca.trackBypasses && rca.writeMarks.onTrackingPipe(len(cmds))
+	if trackedPipe {
 		barriers = rca.writeMarks.readBarriers(keys, len(cmds), time.Now())
 	}
 	// CLIENT CACHING YES is not retryable in rueidis. Its presence makes the
@@ -51,17 +59,18 @@ func (rca *cacheAside) bypassReads(ctx context.Context, keys []string, refreshTT
 	if len(replies) != len(cmds) {
 		return nil, nil
 	}
-	return rca.unpackBypassReads(keys, replies, barriers, stride, getOffset, refreshTTL)
+	return rca.unpackBypassReads(keys, replies, barriers, stride, getOffset, refreshTTL, trackedPipe)
 }
 
-func (rca *cacheAside) unpackBypassReads(keys []string, replies []rueidis.RedisResult, barriers []readBarrier, stride, getOffset int, refreshTTL bool) ([]rueidis.RedisResult, bypassTTLs) {
-	var ttls bypassTTLs
-	if refreshTTL {
-		ttls = make(bypassTTLs, len(keys))
-	}
+func (rca *cacheAside) unpackBypassReads(keys []string, replies []rueidis.RedisResult, barriers []readBarrier, stride, getOffset int, refreshTTL, trackedPipe bool) ([]rueidis.RedisResult, []bypassRead) {
+	reads := make([]bypassRead, len(keys))
 	for i := range keys {
 		index := i*stride + getOffset
-		if barriers != nil && replies[index-1].Error() == nil && replies[index].Error() == nil {
+		// Pooled reads and routes without proven tracking use the normal
+		// untracked-waiter path, even if the opt-in command itself succeeded.
+		tracked := trackedPipe && replies[index-1].Error() == nil
+		reads[i] = bypassRead{bypassed: true, tracked: tracked}
+		if tracked && barriers != nil && replies[index].Error() == nil {
 			// The write had completed before dispatch. The read loop delivered
 			// any preceding push on this pipe before delivering the GET reply.
 			rca.writeMarks.finishBarrier(keys[i], barriers[i])
@@ -70,9 +79,9 @@ func (rca *cacheAside) unpackBypassReads(keys []string, replies []rueidis.RedisR
 		if refreshTTL {
 			ttl, err := replies[index+1].AsInt64()
 			if err == nil {
-				ttls[i] = ttl
+				reads[i].pttl = ttl
 			}
 		}
 	}
-	return replies[:len(keys)], ttls
+	return replies[:len(keys)], reads
 }

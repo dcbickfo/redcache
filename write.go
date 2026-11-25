@@ -120,10 +120,10 @@ func (rca *cacheAside) acquireSingleWriteLock(
 ) (saved savedValue, retry bool, err error) {
 	waitChan, _ := rca.registerOwned(owned, key)
 
-	resp, bypassed, _ := rca.readKey(ctx, rca.lockTTL, key, false)
+	resp, read := rca.readKey(ctx, rca.lockTTL, key, false)
 	val, rerr := resp.ToString()
 	val, rerr = rca.cachedReadValue(ctx, key, val, rerr)
-	(*owned).rememberRead(key, resp, bypassed)
+	(*owned).rememberRead(key, resp, read)
 	if rerr != nil && !rueidis.IsRedisNil(rerr) {
 		rca.emitRedisError("read")
 		return savedValue{}, false, fmt.Errorf("read key %q: %w", key, rerr)
@@ -158,10 +158,10 @@ func (rca *cacheAside) waitForWriteLockRelease(ctx context.Context, key string, 
 }
 
 func (rca *cacheAside) isWriteLocked(ctx context.Context, key string, owned entryOwner) (bool, error) {
-	resp, bypassed, _ := rca.readKey(ctx, rca.lockTTL, key, false)
+	resp, read := rca.readKey(ctx, rca.lockTTL, key, false)
 	val, err := resp.ToString()
 	val, err = rca.cachedReadValue(ctx, key, val, err)
-	owned.rememberRead(key, resp, bypassed)
+	owned.rememberRead(key, resp, read)
 	if rueidis.IsRedisNil(err) {
 		return false, nil
 	}
@@ -352,7 +352,7 @@ func (rca *cacheAside) waitForReadLocks(ctx context.Context, keys []string, owne
 	defer stringPool.Put(lockedKeysP)
 	for i, key := range keys {
 		val, err := resps[i].ToString()
-		(*owned).rememberRead(key, resps[i], bypassed.has(i))
+		(*owned).rememberRead(key, resps[i], bypassed.at(i))
 		if rueidis.IsRedisNil(err) {
 			continue
 		}
@@ -385,7 +385,7 @@ func (rca *cacheAside) anyWriteLocked(ctx context.Context, keys []string, owned 
 	}
 	for i, key := range keys {
 		val, err := resps[i].ToString()
-		owned.rememberRead(key, resps[i], bypassed.has(i))
+		owned.rememberRead(key, resps[i], bypassed.at(i))
 		if rueidis.IsRedisNil(err) {
 			continue
 		}

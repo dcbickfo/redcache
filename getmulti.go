@@ -256,13 +256,13 @@ func (rca *cacheAside) tryGetMulti(
 	for i, key := range keys {
 		var pttl int64
 		if needRefreshP != nil {
-			pttl = bypassed.ttl(i, resps[i])
+			pttl = bypassed.at(i).ttl(resps[i])
 		}
 		needRefresh, needRefreshExpected = rca.collectGetMultiResponse(
 			ttl,
 			key,
 			resps[i],
-			bypassed.has(i),
+			bypassed.at(i),
 			pttl,
 			res,
 			needRefresh,
@@ -277,17 +277,16 @@ func (rca *cacheAside) tryGetMulti(
 	return resps, needRefreshExpected, nil
 }
 
-// bypassedKeys is nil for a cached batch. In a mixed batch zero identifies
-// cached replies and -1 identifies plain replies without TTL metadata.
-type bypassedKeys []int64
+// bypassedKeys is nil when all replies come from the ordinary cached path.
+type bypassedKeys []bypassRead
 
-func (b bypassedKeys) has(i int) bool { return b != nil && b[i] != 0 }
+func (b bypassedKeys) has(i int) bool { return b.at(i).bypassed }
 
-func (b bypassedKeys) ttl(i int, cached rueidis.RedisResult) int64 {
-	if b.has(i) {
-		return b[i]
+func (b bypassedKeys) at(i int) bypassRead {
+	if b == nil {
+		return bypassRead{}
 	}
-	return cached.CachePTTL()
+	return b[i]
 }
 
 // On success, readMultiCache returns replies decodable as strings and Redis nil replies.
@@ -327,7 +326,7 @@ func (rca *cacheAside) readMulti(ctx context.Context, ttl time.Duration, keys []
 			if bypassed == nil {
 				bypassed = make(bypassedKeys, len(keys))
 			}
-			bypassed[i] = -1
+			bypassed[i].bypassed = true
 			plain = append(plain, key)
 			continue
 		}
@@ -340,25 +339,23 @@ func (rca *cacheAside) readMulti(ctx context.Context, ttl time.Duration, keys []
 	if cached == len(keys) {
 		return rca.client.DoMultiCache(ctx, multi...), nil
 	}
-	plainReplies, ttls := rca.bypassReads(ctx, plain, refreshTTL)
-	bypassed.setTTLs(ttls)
+	plainReplies, reads := rca.bypassReads(ctx, plain, refreshTTL)
 	if cached == 0 {
-		return plainReplies, bypassed
+		return plainReplies, reads
 	}
+	bypassed.setReads(reads)
 	cacheReplies := rca.client.DoMultiCache(ctx, multi[:cached]...)
 	return mergeMultiReads(cacheReplies, plainReplies, bypassed, cached), bypassed
 }
 
-func (b bypassedKeys) setTTLs(ttls bypassTTLs) {
-	if ttls == nil {
+func (b bypassedKeys) setReads(reads []bypassRead) {
+	if reads == nil {
 		return
 	}
 	plain := 0
 	for i := range b {
 		if b.has(i) {
-			if ttls[plain] > 0 {
-				b[i] = ttls[plain]
-			}
+			b[i] = reads[plain]
 			plain++
 		}
 	}
@@ -403,7 +400,7 @@ func (rca *cacheAside) collectGetMultiResponse(
 	ttl time.Duration,
 	key string,
 	resp rueidis.RedisResult,
-	bypassed bool,
+	read bypassRead,
 	pttl int64,
 	res map[string]string,
 	needRefresh []string,
@@ -412,7 +409,7 @@ func (rca *cacheAside) collectGetMultiResponse(
 	owned entryOwner,
 ) ([]string, map[string]string) {
 	val, err := resp.ToString()
-	owned.rememberRead(key, resp, bypassed)
+	owned.rememberRead(key, resp, read)
 	if rueidis.IsRedisNil(err) {
 		return needRefresh, needRefreshExpected
 	}
@@ -420,9 +417,7 @@ func (rca *cacheAside) collectGetMultiResponse(
 		return needRefresh, needRefreshExpected
 	}
 
-	if !bypassed {
-		rca.releaseUntracked(owned, key)
-	}
+	rca.releaseUntracked(owned, key)
 	plain, delta := unwrapEnvelope(val)
 	res[key] = plain
 	if !rca.shouldRefresh(pttl, ttl, delta) {

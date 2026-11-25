@@ -375,8 +375,11 @@ written key, redcache reads directly from Redis until invalidation clears the
 mark or a fixed one-second deadline expires. On a standalone tracking pipe,
 a successful bypass GET sent after the write can clear the mark sooner.
 An invalidation that arrives after the deadline can briefly expose an older
-cached value. A second `Conn`, even in the same process, is eventually
-consistent and sees the write when its own invalidation arrives.
+cached value. With concurrent writers, a read already underway can refill
+the cache after an earlier invalidation. If that invalidation ends the later
+write's mark, reads can briefly see the refilled value until the later
+invalidation arrives. A second `Conn`, even in the same process, is
+eventually consistent and sees the write when its own invalidation arrives.
 
 ```go
 conn, err := redcache.Open(

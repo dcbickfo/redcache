@@ -330,8 +330,9 @@ func BenchmarkCache_GetMulti_Refresh(b *testing.B) {
 
 // BenchmarkForceSetThenGet measures an acknowledged write immediately followed by a same-key read.
 func BenchmarkForceSetThenGet(b *testing.B) {
-	var paths redcache.ReadPathCountsForTest
-	cache, _ := makeBenchClient(b, paths.Option())
+	var paths readPathCounts
+	cache, conn := makeBenchClient(b)
+	paths.Observe(conn)
 	ctx := b.Context()
 	key := "write-then-read:" + uuid.New().String()
 	noLoad := func(context.Context, string) (string, error) {

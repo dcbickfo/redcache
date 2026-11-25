@@ -153,10 +153,10 @@ func (rca *cacheAside) waitForFailedKey(
 	owned *entryOwner,
 ) error {
 	waitChan, _ := rca.registerOwned(owned, firstFailed)
-	resp, bypassed, _ := rca.readKey(ctx, rca.lockTTL, firstFailed, false)
+	resp, read := rca.readKey(ctx, rca.lockTTL, firstFailed, false)
 	val, rerr := resp.ToString()
 	val, rerr = rca.cachedReadValue(ctx, firstFailed, val, rerr)
-	(*owned).rememberRead(firstFailed, resp, bypassed)
+	(*owned).rememberRead(firstFailed, resp, read)
 	if rueidis.IsRedisNil(rerr) {
 		return nil
 	}

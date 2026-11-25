@@ -39,10 +39,11 @@ type readBarrier struct {
 }
 
 type writeMarks struct {
-	active atomic.Bool
-	wire   atomic.Uint64
-	mu     sync.RWMutex
-	marks  map[string]writeMark
+	disabled bool
+	active   atomic.Bool
+	wire     atomic.Uint64
+	mu       sync.RWMutex
+	marks    map[string]writeMark
 	// Zero disables barriers. A negative limit means rueidis has no batch cutoff.
 	pipeLimit int
 
@@ -61,6 +62,9 @@ type writeMarks struct {
 }
 
 func (m *writeMarks) begin(keys []string, now time.Time, limit int) writeTicket {
+	if m.disabled {
+		return writeTicket{}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.active.Store(true)
@@ -94,6 +98,9 @@ func (m *writeMarks) begin(keys []string, now time.Time, limit int) writeTicket 
 }
 
 func (m *writeMarks) finish(keys []string, ticket writeTicket, now time.Time, succeeded func(int) bool) {
+	if m.disabled {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.inFlight--
@@ -147,6 +154,9 @@ func (m *writeMarks) invalidate(key string) {
 }
 
 func (m *writeMarks) reset(now time.Time) {
+	if m.disabled {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.marks) > 0 {
