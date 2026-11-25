@@ -1,4 +1,4 @@
-package redcache
+package redcache_test
 
 import (
 	"bytes"
