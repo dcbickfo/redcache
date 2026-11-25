@@ -1,7 +1,13 @@
 // This file stays in package redcache: it exposes unexported functions, types and scripts to the external tests as thin aliases and accessors.
 package redcache
 
-import "github.com/redis/rueidis"
+import (
+	"context"
+	"sync/atomic"
+	"time"
+
+	"github.com/redis/rueidis"
+)
 
 type EngineBatchError = batchError
 
@@ -45,3 +51,74 @@ var (
 	RedisMessageForTest       = redisMessage
 	RedisStringMessageForTest = redisStringMessage
 )
+
+type ReadPathCountsForTest struct {
+	CacheHits atomic.Int64
+	Bypasses  atomic.Int64
+}
+
+func (c *ReadPathCountsForTest) Option() Option {
+	return WithClientBuilder(func(opt rueidis.ClientOption) (rueidis.Client, error) {
+		client, err := rueidis.NewClient(opt)
+		if err != nil {
+			return nil, err
+		}
+		return &countReadPaths{Client: client, counts: c}, nil
+	})
+}
+
+type countReadPaths struct {
+	rueidis.Client
+	counts *ReadPathCountsForTest
+}
+
+func (c *countReadPaths) DoCache(ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	result := c.Client.DoCache(ctx, cmd, ttl)
+	if result.IsCacheHit() {
+		c.counts.CacheHits.Add(1)
+	}
+	return result
+}
+
+func (c *countReadPaths) DoMultiCache(ctx context.Context, cmds ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	results := c.Client.DoMultiCache(ctx, cmds...)
+	var hits int64
+	for _, result := range results {
+		if result.IsCacheHit() {
+			hits++
+		}
+	}
+	c.counts.CacheHits.Add(hits)
+	return results
+}
+
+func (c *countReadPaths) Do(ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	if cmd.Commands()[0] == "GET" {
+		c.counts.Bypasses.Add(1)
+	}
+	return c.Client.Do(ctx, cmd)
+}
+
+func (c *countReadPaths) DoMulti(ctx context.Context, cmds ...rueidis.Completed) []rueidis.RedisResult {
+	var reads int64
+	for _, cmd := range cmds {
+		if cmd.Commands()[0] == "GET" {
+			reads++
+		}
+	}
+	if reads != 0 {
+		c.counts.Bypasses.Add(reads)
+	}
+	return c.Client.DoMulti(ctx, cmds...)
+}
+
+type WriteMarkCountsForTest struct {
+	Invalidated int64
+	Expired     int64
+	AtCap       int64
+	Live        int64
+}
+
+func WriteMarkStatsForTest(_ *Conn) WriteMarkCountsForTest {
+	return WriteMarkCountsForTest{}
+}
