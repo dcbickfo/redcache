@@ -18,24 +18,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalidation no longer ends a mark there. Each fill or write now costs one
   direct GET for its next read. If the invalidation arrives after the
   deadline, the cache can serve the older entry once until it arrives.
-- Connections without that GET (Sentinel, a custom `ClientBuilder`, and
-  settings that suppress or redirect invalidations, such as `NOLOOP`,
+- Connections without that GET (cluster, Sentinel, a custom `ClientBuilder`,
+  and settings that suppress or redirect invalidations, such as `NOLOOP`,
   `BCAST`, `OPTOUT`, and replica routing) still end a mark on invalidation or
   the deadline. `DisableCache` and RESP2 have no marks. A delayed read can
   refill an older value between two close writes, from concurrent writers or
   from one writer's back-to-back writes, and an earlier write's invalidation
-  can end the later mark.
-- Cluster is supported and has no stale reads. After every fill, and after
-  every `Set` or `ForceSet` on a key this connection has not read, that key
-  is read directly from the server for one second, one network round trip
-  per read, and then served from the local cache. Standalone ends the window
-  after one read. Measured on a Redis 7.2 cluster over 500 fills:
+  can end the later mark. Cluster is supported with this residual.
+- Cluster marks end when an invalidation push for the key arrives or at the
+  one-second deadline, whichever comes first. After a read-through fill, and
+  after `Set*` or `ForceSet*` on a key this connection has not read, no
+  invalidation arrives for this connection: it does not track a key it has not
+  read, and a miss's tracking is used up by the lock write. In practice the
+  key is read directly from the server for the full second, one network round
+  trip per read, and then served from the local cache. When this connection is
+  tracking the key at the time of the write, such as after a tracked read just
+  before it, the mark ends in about one round trip. `Del*` sets and ends marks
+  by the same code path as `ForceSet*`, and was not measured separately.
+  Standalone ends the window after one read. Measured on 2026-11-25 on a
+  Redis 7.2 cluster, 500 fills per case, on a loaded shared host, at commit
+  5fa92130, whose cluster path is unchanged at 1e9ac296. The baseline is main
+  at 4cc10985, which has no marks:
 
-  | Case | Time to first local hit (median) |
-  | --- | --- |
-  | Read-through fill, mark ended by deadline | 1.000 s |
-  | Read-through fill, before this fix | 123 µs |
-  | Tracked read, then `ForceSet` | 119 µs |
+  | Measurement | Median time to first local hit | How the mark ended |
+  | --- | --- | --- |
+  | Read-through fill, this version | 1.000 s | Deadline, 500 of 500 |
+  | Read-through fill, baseline (no marks) | 123 µs | No mark |
+  | Tracked read, then `ForceSet`, this version | 119 µs | Invalidation, 497 of 500 |
 
   Arming tracking before the write is a planned follow-up.
 - A bypass read of a batch large enough that rueidis sends it to a pooled
