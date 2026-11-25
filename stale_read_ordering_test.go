@@ -78,7 +78,7 @@ func TestStandaloneNoStaleReadThroughBarrier(t *testing.T) {
 			// Conns that have no barrier, such as cluster.
 			off := replayDelayedPush(t, tc.sameWriter, true)
 			require.Equal(t, "V1", off.value)
-			require.Empty(t, off.commands)
+			require.Empty(t, off.commands, "the read dispatched a barrier with the barrier off")
 			require.Equal(t, redcache.WriteMarkCountsForTest{Invalidated: 1}, off.marks)
 		})
 	}
@@ -99,6 +99,7 @@ type peekResult struct {
 
 func replayDelayedPush(t *testing.T, sameWriter, barrierOff bool) delayedPushOutcome {
 	t.Helper()
+	skipIfNoRedis(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	const ttl = time.Minute
@@ -168,7 +169,13 @@ func replayDelayedPush(t *testing.T, sameWriter, barrierOff bool) delayedPushOut
 	if barrierOff {
 		got := awaitLockRecoveryTest(t, read)
 		require.NoError(t, got.err)
-		return delayedPushOutcome{key: key, value: got.value, marks: redcache.WriteMarkStatsForTest(conn)}
+		// Record any barrier the read dispatched. It is a local hit, so none.
+		var commands [][]string
+		select {
+		case commands = <-client.dispatched:
+		default:
+		}
+		return delayedPushOutcome{key: key, value: got.value, commands: commands, marks: redcache.WriteMarkStatsForTest(conn)}
 	}
 	// The barrier reply queues behind V2's push, so the read cannot finish
 	// before the pipe evicts V1.
