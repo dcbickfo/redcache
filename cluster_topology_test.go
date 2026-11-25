@@ -60,9 +60,10 @@ func do(t *testing.T, c rueidis.Client, args ...string) rueidis.RedisResult {
 func topologyTest(t *testing.T, opts ...redcache.Option) (context.Context, *redcache.Cache, *redcache.Conn, []clusterNode) {
 	t.Helper()
 	client, conn := makeClusterClient(t, opts...)
-	info, err := do(t, adminClient(t, "127.0.0.1:30001"), "CLUSTER", "INFO").ToString()
-	require.NoError(t, err)
-	require.Contains(t, info, "cluster_state:ok", "cluster is unhealthy; reset it with `docker compose up -d --force-recreate --wait redis-cluster`")
+	// A failover test's cleanup can leave the view settling for a few seconds.
+	eventuallyWithStatus(t, 20*time.Second, "30001 to report cluster_state:ok (reset it with `docker compose up -d --force-recreate --wait redis-cluster`)",
+		func() bool { return clusterStateOK("127.0.0.1:30001") },
+		func() string { return clusterInfo(t, "127.0.0.1:30001") })
 	nodes := clusterNodes(t, "127.0.0.1:30001")
 	var primaries int
 	for _, n := range nodes {
@@ -74,6 +75,28 @@ func topologyTest(t *testing.T, opts ...redcache.Option) (context.Context, *redc
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 	return ctx, client, conn, nodes
+}
+
+// clusterInfo returns node addr's CLUSTER INFO text, or the error as text.
+func clusterInfo(t *testing.T, addr string) string {
+	t.Helper()
+	info, err := do(t, adminClient(t, addr), "CLUSTER", "INFO").ToString()
+	if err != nil {
+		return "CLUSTER INFO error: " + err.Error()
+	}
+	return info
+}
+
+func clusterStateOK(addr string) bool {
+	c, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{addr}, ForceSingleClient: true, DisableCache: true})
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	info, err := c.Do(ctx, c.B().Arbitrary("CLUSTER", "INFO").Build()).ToString()
+	return err == nil && strings.Contains(info, "cluster_state:ok")
 }
 
 // clusterNodes reads the topology as seen by node addr.
@@ -770,6 +793,13 @@ func TestCluster_PrimaryFailover(t *testing.T) {
 			}
 			return victimPrimary && !replicaPrimary
 		})
+		// Leave every node reporting a healthy cluster, or fail here with the
+		// state instead of poisoning the tests that share the cluster.
+		for _, n := range nodes {
+			eventuallyWithStatus(t, 30*time.Second, n.addr+" to report cluster_state:ok",
+				func() bool { return clusterStateOK(n.addr) },
+				func() string { return clusterInfo(t, n.addr) })
+		}
 	})
 	eventually(t, 20*time.Second, replica.addr+" to be promoted", func() bool { return role(t, replica.addr) == "master" })
 
@@ -791,7 +821,10 @@ func TestCluster_PrimaryFailover(t *testing.T) {
 	require.NoError(t, client.SetMulti(opCtx, time.Minute, keys, exactLoader(after)))
 	fresh := taggedKeys(uuid.New().String(), 2)
 	freshWant := valuesFor(fresh, "load")
-	got, err = client.GetMulti(opCtx, time.Minute, fresh, exactLoader(freshWant))
+	// A broken cluster must fail in seconds, not block until opCtx expires.
+	freshCtx, freshCancel := context.WithTimeout(opCtx, 10*time.Second)
+	defer freshCancel()
+	got, err = client.GetMulti(freshCtx, time.Minute, fresh, exactLoader(freshWant))
 	require.NoError(t, err)
 	assert.Equal(t, freshWant, got)
 	require.NoError(t, client.DelMulti(opCtx, append(keys, fresh...)))
