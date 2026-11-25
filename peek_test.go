@@ -2,11 +2,14 @@ package redcache_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 	"uuid"
 
 	"github.com/redis/rueidis"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dcbickfo/redcache"
@@ -91,4 +94,118 @@ func TestPeek_LockValueReadsAsMiss(t *testing.T) {
 	close(proceed)
 	<-done
 	require.NoError(t, <-errCh)
+}
+
+func TestCachedReadRetriesOnlyRueidisAbort(t *testing.T) {
+	t.Parallel()
+
+	const key = "read:{3560}" // Slot zero matches the fake client's zero-value builder.
+	const want = "retried value"
+	client := &redcache.ReadTestClient{
+		ClientMode: rueidis.ClientModeCluster,
+		Single:     redcache.RedisResultForTest(t, redcache.RedisStringMessageForTest(t, want), nil),
+	}
+	client.Cached = []rueidis.RedisResult{redcache.RedisResultForTest(t, rueidis.RedisMessage{}, rueidis.ErrDoCacheAborted)}
+	cache := openReadTestCache(t, client)
+	val, hit, err := cache.Peek[string, string](t.Context(), time.Minute, key)
+	require.NoError(t, err)
+	require.True(t, hit)
+	require.Equal(t, want, val)
+	require.Equal(t, [][]string{{"GET", key}}, client.Commands)
+
+	sameText := errors.New(rueidis.ErrDoCacheAborted.Error())
+	client.Cached[0] = redcache.RedisResultForTest(t, rueidis.RedisMessage{}, sameText)
+	_, _, err = cache.Peek[string, string](t.Context(), time.Minute, key)
+	require.ErrorIs(t, err, sameText)
+	require.Len(t, client.Commands, 1)
+}
+
+func TestCachedReadFallbackRequiresCluster(t *testing.T) {
+	t.Parallel()
+
+	const key = "read:{3560}"
+	const want = "fallback value"
+	abortErr := fmt.Errorf("cache transaction: %w", rueidis.ErrDoCacheAborted)
+	abort := redcache.RedisResultForTest(t, rueidis.RedisMessage{}, abortErr)
+	plain := redcache.RedisResultForTest(t, redcache.RedisStringMessageForTest(t, want), nil)
+	for _, mode := range []rueidis.ClientMode{rueidis.ClientModeStandalone, rueidis.ClientModeSentinel, rueidis.ClientModeCluster} {
+		t.Run(string(mode), func(t *testing.T) {
+			client := &redcache.ReadTestClient{
+				ClientMode: mode,
+				Cached:     []rueidis.RedisResult{abort},
+				Plain:      []rueidis.RedisResult{plain},
+				Single:     plain,
+			}
+			cache := openReadTestCache(t, client)
+			got, hit, singleErr := cache.Peek[string, string](t.Context(), time.Minute, key)
+			results, multiErr := cache.GetMulti(t.Context(), time.Minute, []string{key}, unexpectedReadLoader(t))
+			if mode == rueidis.ClientModeCluster {
+				require.NoError(t, singleErr)
+				require.NoError(t, multiErr)
+				require.True(t, hit)
+				require.Equal(t, want, got)
+				require.Equal(t, map[string]string{key: want}, results)
+				require.Equal(t, [][]string{{"GET", key}}, client.Commands)
+				require.Equal(t, [][][]string{{{"GET", key}}}, client.MultiCommands)
+				return
+			}
+			assert.Empty(t, got)
+			assert.Empty(t, results)
+			assert.Empty(t, client.Commands)
+			assert.Empty(t, client.MultiCommands)
+			require.Error(t, singleErr)
+			require.Error(t, multiErr)
+			require.Same(t, abortErr, errors.Unwrap(singleErr))
+			require.Same(t, abortErr, errors.Unwrap(multiErr))
+		})
+	}
+}
+
+func TestCachedReadPreservesFallbackError(t *testing.T) {
+	t.Parallel()
+
+	const key = "read:{3560}"
+	const serverError = "OOM command not allowed"
+	abort := redcache.RedisResultForTest(t, rueidis.RedisMessage{}, rueidis.ErrDoCacheAborted)
+	errReply := redcache.RedisResultForTest(t, redcache.RedisMessageForTest(t, '-', uint64(len(serverError)), []byte(serverError)), nil)
+	client := &redcache.ReadTestClient{
+		ClientMode: rueidis.ClientModeCluster,
+		Cached:     []rueidis.RedisResult{abort},
+		Plain:      []rueidis.RedisResult{errReply},
+		Single:     errReply,
+	}
+	cache := openReadTestCache(t, client)
+
+	_, _, singleErr := cache.Peek[string, string](t.Context(), time.Minute, key)
+	_, multiErr := cache.GetMulti(t.Context(), time.Minute, []string{key}, unexpectedReadLoader(t))
+	for name, err := range map[string]error{"single": singleErr, "batch": multiErr} {
+		t.Run(name, func(t *testing.T) {
+			var redisErr *rueidis.RedisError
+			require.ErrorAs(t, err, &redisErr)
+			require.EqualError(t, redisErr, serverError)
+			require.ErrorIs(t, err, rueidis.ErrDoCacheAborted)
+		})
+	}
+	require.Len(t, client.Commands, 1)
+	require.Len(t, client.MultiCommands, 1)
+}
+
+func openReadTestCache(t *testing.T, client *redcache.ReadTestClient) *redcache.Cache {
+	t.Helper()
+	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: addr}, redcache.WithClientBuilder(
+		func(rueidis.ClientOption) (rueidis.Client, error) {
+			return client, nil
+		},
+	))
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	return redcache.New(conn, redcache.StringCodec{})
+}
+
+func unexpectedReadLoader(t *testing.T) func(context.Context, []string) (map[string]string, error) {
+	t.Helper()
+	return func(context.Context, []string) (map[string]string, error) {
+		t.Fatal("loader should not run during a cached read")
+		return nil, nil
+	}
 }

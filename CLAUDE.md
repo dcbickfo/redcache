@@ -35,6 +35,8 @@ make fmt
 make redis-up
 ```
 
+Test conventions (external tests through the public API by default; a thin `export_test.go` seam for internals; in-package tests only for direct engine state, with a reason comment at the top): see CONTRIBUTING.md.
+
 ## Architecture
 
 The library is a single-package Go module (`package redcache`) with internal helpers.
@@ -73,7 +75,7 @@ The key insight: because `tryGet` uses `DoCache`, any client that reads a lock v
 ## Code Conventions
 
 - **Import ordering** (enforced by `gci`): standard library, third-party, then `github.com/dcbickfo/redcache` internal packages
-- Tests are integration tests requiring a running Redis instance at `127.0.0.1:6379`; `cluster_test.go` and `cluster_topology_test.go` run against the `redis-cluster` compose service (the topology tests move slots and fail over a primary, so they are not parallel) (skipped locally when `REDCACHE_CLUSTER_ADDRS` is unset, required under CI)
+- Tests are integration tests requiring a running Redis instance at `127.0.0.1:6379`; `cluster_test.go` and `cluster_topology_test.go` run against the `redis-cluster` compose service (the topology tests move slots and fail over a primary, so they are not parallel) (they fail when `REDCACHE_CLUSTER_ADDRS` is unset; only `-short` skips)
 - Tests use UUID-based keys to avoid collisions between test runs
 - Linting config is in `.golangci.yml` (v2 format); `make lint` runs the pinned
   golangci-lint v2.15.0 with Go 1.27 generic-method support.
