@@ -1,9 +1,11 @@
 package redcache_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +20,99 @@ import (
 
 	"github.com/dcbickfo/redcache"
 )
+
+func TestRestoreValue_LogsErrorOnClientFailure(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+
+	var logs bytes.Buffer
+	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(2*time.Second),
+		redcache.WithLogger(slog.New(slog.NewTextHandler(&logs, nil))),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+
+	cache := redcache.New(conn, redcache.StringCodec{})
+	key := "restore:" + uuid.New().String()
+	require.NoError(t, cache.ForceSet(t.Context(), time.Minute, key, "saved"))
+
+	callbackErr := errors.New("setter failed")
+	err = cache.Set(t.Context(), time.Minute, key, func(context.Context, string) (string, error) {
+		conn.Client().Close()
+		return "", callbackErr
+	})
+	require.ErrorIs(t, err, callbackErr)
+	require.Contains(t, logs.String(), fmt.Sprintf("level=ERROR msg=%q key=%s error=%q",
+		"failed to restore value", key, rueidis.ErrClosing.Error()))
+}
+
+// closeDuringAcquireClient runs the first acquire, then disconnects before
+// the second one so rollback tries to unlock with a closed client.
+type closeDuringAcquireClient struct {
+	rueidis.Client
+}
+
+func (c closeDuringAcquireClient) DoMulti(ctx context.Context, cmds ...rueidis.Completed) []rueidis.RedisResult {
+	if len(cmds) != 2 {
+		return c.Client.DoMulti(ctx, cmds...)
+	}
+	replies := c.Client.DoMulti(ctx, cmds[:1]...)
+	if err, ok := rueidis.IsRedisErr(replies[0].Error()); ok && err.IsNoScript() {
+		// The script is missing on this server. Let the cache retry both with EVAL.
+		return append(replies, replies[0])
+	}
+	c.Close()
+	return append(replies, c.Do(ctx, cmds[1]))
+}
+
+func TestBestEffortUnlock_LogsErrorOnClientFailure(t *testing.T) {
+	t.Parallel()
+	skipIfNoRedis(t)
+
+	var logs bytes.Buffer
+	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: addr},
+		redcache.WithLockTTL(2*time.Second),
+		redcache.WithLogger(slog.New(slog.NewTextHandler(&logs, nil))),
+		redcache.WithClientBuilder(func(opts rueidis.ClientOption) (rueidis.Client, error) {
+			client, err := rueidis.NewClient(opts)
+			if err != nil {
+				return nil, err
+			}
+			return closeDuringAcquireClient{Client: client}, nil
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+
+	cache := redcache.New(conn, redcache.StringCodec{})
+	prefix := "unlock:" + uuid.New().String()
+	first, second := prefix+":a", prefix+":b"
+	err = cache.SetMulti(t.Context(), time.Minute, []string{first, second}, func(context.Context, []string) (map[string]string, error) {
+		t.Fatal("setter should not run after lock acquisition fails")
+		return nil, nil
+	})
+	require.ErrorIs(t, err, rueidis.ErrClosing)
+	require.ErrorContains(t, err, second)
+	require.Contains(t, logs.String(), fmt.Sprintf("level=ERROR msg=%q key=%s error=%q",
+		"failed to unlock key", first, rueidis.ErrClosing.Error()))
+}
+
+// waitForReadLocks must surface real Redis errors with the offending key.
+func TestWaitForReadLocks_SurfacesRedisError(t *testing.T) {
+	t.Parallel()
+	cache, conn := makeClient(t, addr)
+	conn.Client().Close()
+
+	key := "wait-readlock-err:" + uuid.New().String()
+	err := cache.SetMulti(t.Context(), time.Minute, []string{key}, func(context.Context, []string) (map[string]string, error) {
+		t.Fatal("setter should not run after a read error")
+		return nil, nil
+	})
+	require.Error(t, err, "broken client should surface error from waitForReadLocks")
+	require.Contains(t, err.Error(), "read key", "error should be wrapped with read key context")
+	require.Contains(t, err.Error(), key, "error should be tagged with the offending key")
+}
 
 func requireEventuallyPeekString(
 	t *testing.T,

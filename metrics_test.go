@@ -1,18 +1,20 @@
-package redcache
+package redcache_test
 
 import (
 	"testing"
 	"time"
 
 	"github.com/redis/rueidis"
+
+	"github.com/dcbickfo/redcache"
 )
 
 // Compile-time interface check.
-var _ Metrics = NoopMetrics{}
+var _ redcache.Metrics = redcache.NoopMetrics{}
 
 func TestNoopMetrics_AllMethodsSafe(t *testing.T) {
 	t.Parallel()
-	m := NoopMetrics{}
+	m := redcache.NoopMetrics{}
 	m.CacheHits(1)
 	m.CacheMisses(1)
 	m.LockContended(1)
@@ -31,21 +33,21 @@ func TestNoopMetrics_AllMethodsSafe(t *testing.T) {
 
 func TestValidateAndApplyDefaults_DefaultsToNoopMetrics(t *testing.T) {
 	t.Parallel()
-	cfg := config{}
 	clientOpt := rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}}
-	if err := cfg.applyDefaults(clientOpt); err != nil {
+	metrics, err := redcache.DefaultedMetrics(clientOpt)
+	if err != nil {
 		t.Fatalf("applyDefaults: %v", err)
 	}
-	if cfg.metrics == nil {
+	if metrics == nil {
 		t.Fatal("metrics not defaulted")
 	}
-	if _, ok := cfg.metrics.(NoopMetrics); !ok {
-		t.Fatalf("default metrics is %T, want NoopMetrics", cfg.metrics)
+	if _, ok := metrics.(redcache.NoopMetrics); !ok {
+		t.Fatalf("default metrics is %T, want NoopMetrics", metrics)
 	}
 }
 
-type countingMetrics struct {
-	NoopMetrics
+type metricsTestCounter struct {
+	redcache.NoopMetrics
 	Hits, Misses, Contended, Lost int
 	Triggered, Skipped, Dropped   int
 	Panics                        int
@@ -53,18 +55,18 @@ type countingMetrics struct {
 	InvalidationErrors            int
 }
 
-func (c *countingMetrics) CacheHits(n int64)        { c.Hits += int(n) }
-func (c *countingMetrics) CacheMisses(n int64)      { c.Misses += int(n) }
-func (c *countingMetrics) LockContended(n int64)    { c.Contended += int(n) }
-func (c *countingMetrics) LockLost(string)          { c.Lost++ }
-func (c *countingMetrics) RefreshTriggered(n int64) { c.Triggered += int(n) }
-func (c *countingMetrics) RefreshSkipped(n int64)   { c.Skipped += int(n) }
-func (c *countingMetrics) RefreshDropped(n int64)   { c.Dropped += int(n) }
-func (c *countingMetrics) RefreshPanicked(string)   { c.Panics++ }
-func (c *countingMetrics) RefreshError(string)      { c.RefreshErrors++ }
-func (c *countingMetrics) InvalidationError()       { c.InvalidationErrors++ }
+func (c *metricsTestCounter) CacheHits(n int64)        { c.Hits += int(n) }
+func (c *metricsTestCounter) CacheMisses(n int64)      { c.Misses += int(n) }
+func (c *metricsTestCounter) LockContended(n int64)    { c.Contended += int(n) }
+func (c *metricsTestCounter) LockLost(string)          { c.Lost++ }
+func (c *metricsTestCounter) RefreshTriggered(n int64) { c.Triggered += int(n) }
+func (c *metricsTestCounter) RefreshSkipped(n int64)   { c.Skipped += int(n) }
+func (c *metricsTestCounter) RefreshDropped(n int64)   { c.Dropped += int(n) }
+func (c *metricsTestCounter) RefreshPanicked(string)   { c.Panics++ }
+func (c *metricsTestCounter) RefreshError(string)      { c.RefreshErrors++ }
+func (c *metricsTestCounter) InvalidationError()       { c.InvalidationErrors++ }
 
 func TestCountingMetrics_ImplementsInterface(t *testing.T) {
 	t.Parallel()
-	var _ Metrics = &countingMetrics{}
+	var _ redcache.Metrics = &metricsTestCounter{}
 }

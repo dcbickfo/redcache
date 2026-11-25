@@ -12,7 +12,8 @@ type Metrics interface {
 	CacheMisses(n int64)
 	LockContended(n int64)
 	// LockWaitDuration fires once per resolved wait, regardless of outcome
-	// (invalidation, ctx cancel, or lockTTL). Typically histogrammed.
+	// (invalidation, ctx cancel, lockTTL, or a poll that found a hit or an
+	// absent key). Typically histogrammed.
 	LockWaitDuration(d time.Duration)
 	// LoaderDuration measures foreground origin-loader latency (Get/GetMulti
 	// miss, Set/SetMulti). Background refresh is excluded. Typically histogrammed.

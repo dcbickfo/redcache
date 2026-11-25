@@ -40,7 +40,7 @@ test-short: ## Run tests with -short
 
 .PHONY: test-server
 test-server: ## Run root package tests against the configured server
-	$(GO) test -count=1 .
+	$(GO) test -count=1 $(TESTFLAGS) .
 
 .PHONY: test-race
 test-race: ## Run tests with the race detector
