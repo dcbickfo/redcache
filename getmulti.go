@@ -72,7 +72,7 @@ retry:
 	leaderKeys := rca.registerPending(pending, chans, (*leaderKeysP)[:0], owned)
 	*leaderKeysP = leaderKeys
 
-	if err := rca.readGetMultiHits(ctx, ttl, pending, res, needRefreshP, *owned, fn); err != nil {
+	if _, err := rca.readGetMultiHits(ctx, ttl, pending, res, needRefreshP, *owned, fn); err != nil {
 		return nil, err
 	}
 
@@ -127,33 +127,17 @@ func (rca *cacheAside) readGetMultiHits(
 	needRefreshP *[]string,
 	owned entryOwner,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
-) error {
+) ([]rueidis.RedisResult, error) {
 	hitsBefore := len(res)
-	needRefresh := resetNeedRefresh(needRefreshP)
-	needRefresh, needRefreshExpected, err := rca.tryGetMulti(ctx, ttl, pending, res, needRefresh, owned)
+	reads, needRefreshExpected, err := rca.tryGetMulti(ctx, ttl, pending, res, needRefreshP, owned)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	storeNeedRefresh(needRefreshP, needRefresh)
 	rca.emitCacheHits(len(res) - hitsBefore)
-	if len(needRefresh) > 0 {
-		rca.triggerMultiRefresh(ctx, ttl, needRefresh, needRefreshExpected, fn)
+	if needRefreshP != nil && len(*needRefreshP) > 0 {
+		rca.triggerMultiRefresh(ctx, ttl, *needRefreshP, needRefreshExpected, fn)
 	}
-	return nil
-}
-
-func resetNeedRefresh(needRefreshP *[]string) []string {
-	if needRefreshP == nil {
-		return nil
-	}
-	*needRefreshP = (*needRefreshP)[:0]
-	return *needRefreshP
-}
-
-func storeNeedRefresh(needRefreshP *[]string, needRefresh []string) {
-	if needRefreshP != nil {
-		*needRefreshP = needRefresh
-	}
+	return reads, nil
 }
 
 func (rca *cacheAside) waitForGetMulti(
@@ -166,8 +150,8 @@ func (rca *cacheAside) waitForGetMulti(
 	owned entryOwner,
 	fn func(ctx context.Context, keys []string) (map[string]string, error),
 ) ([]string, []<-chan struct{}, bool, error) {
-	// Followers + leaders whose NX lost: wait for the holder's invalidation
-	// (or the jittered poll fallback / lockTTL).
+	// Followers and leaders whose NX lost wait for invalidation and poll
+	// with jitter for hits or absent keys.
 	rca.emitLockContended(len(pending))
 	polled, err := rca.awaitGetMulti(ctx, ttl, pending, chans, res, needRefreshP, owned, fn)
 	if err != nil {
@@ -192,10 +176,18 @@ func (rca *cacheAside) awaitGetMulti(
 ) (bool, error) {
 	return rca.awaitLockMultiOrPoll(ctx, chans, func() (bool, error) {
 		hitsBefore := len(res)
-		if err := rca.readGetMultiHits(ctx, ttl, pending, res, needRefreshP, owned, fn); err != nil {
+		reads, err := rca.readGetMultiHits(ctx, ttl, pending, res, needRefreshP, owned, fn)
+		if err != nil {
 			return false, err
 		}
-		return len(res) > hitsBefore, nil
+		retry := len(res) > hitsBefore
+		for i, read := range reads {
+			if rueidis.IsRedisNil(read.Error()) {
+				rca.release(pending[i], chans[i])
+				retry = true
+			}
+		}
+		return retry, nil
 	})
 }
 
@@ -242,21 +234,24 @@ func filterResolved(
 }
 
 // tryGetMulti reads keys via DoMultiCache, writes non-lock values into res,
-// and appends refresh-ahead candidates onto needRefresh (returned so callers
-// can update their pool handle).
+// and records refresh-ahead candidates in the pooled slice, when provided.
 func (rca *cacheAside) tryGetMulti(
 	ctx context.Context,
 	ttl time.Duration,
 	keys []string,
 	res map[string]string,
-	needRefresh []string,
+	needRefreshP *[]string,
 	owned entryOwner,
-) ([]string, map[string]string, error) {
+) ([]rueidis.RedisResult, map[string]string, error) {
 	resps, err := rca.readMultiCache(ctx, ttl, keys)
 	if err != nil {
-		return needRefresh, nil, err
+		return nil, nil, err
 	}
 
+	var needRefresh []string
+	if needRefreshP != nil {
+		needRefresh = (*needRefreshP)[:0]
+	}
 	var needRefreshExpected map[string]string
 	for i, key := range keys {
 		needRefresh, needRefreshExpected = rca.collectGetMultiResponse(
@@ -270,7 +265,10 @@ func (rca *cacheAside) tryGetMulti(
 			owned,
 		)
 	}
-	return needRefresh, needRefreshExpected, nil
+	if needRefreshP != nil {
+		*needRefreshP = needRefresh
+	}
+	return resps, needRefreshExpected, nil
 }
 
 // On success, readMultiCache returns replies decodable as strings and Redis nil replies.

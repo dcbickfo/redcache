@@ -9,7 +9,10 @@ non-trivial before sending a large PR.
 - Go 1.27+ (the module requires Go 1.27.0; `.tool-versions` pins the toolchain CI also uses).
 - Docker, to run a local Redis. The tests are integration tests that need a
   real Redis at `127.0.0.1:6379` — they exercise RESP3 client-side
-  invalidation, which can't be faked.
+  invalidation, which can't be faked. Without a server they fail rather than
+  skip; `-short` (`make test-short`) runs only the tests that need none.
+  Cluster tests also need `REDCACHE_CLUSTER_ADDRS` (`make` exports
+  `127.0.0.1:30001`; start the cluster with `docker compose up -d --wait`).
 
 Go and golangci-lint are pinned in `.tool-versions`. With
 [asdf](https://asdf-vm.com) installed, `make setup` installs the exact versions

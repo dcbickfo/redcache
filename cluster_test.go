@@ -25,17 +25,17 @@ import (
 const clusterKeyCount = 64
 
 // makeClusterClient opens a Conn against the Redis Cluster named by
-// REDCACHE_CLUSTER_ADDRS (comma-separated, e.g. 127.0.0.1:30001). It skips
-// when unset, except under CI, where a missing cluster is a setup failure.
+// REDCACHE_CLUSTER_ADDRS (comma-separated, e.g. 127.0.0.1:30001). Under -short
+// it skips; otherwise an unset variable fails the test, so a missing cluster is
+// never reported as a pass.
 func makeClusterClient(t *testing.T, opts ...redcache.Option) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
 	skipIfNoRedis(t)
 	addrs := os.Getenv("REDCACHE_CLUSTER_ADDRS")
 	if addrs == "" {
-		if os.Getenv("CI") != "" {
-			t.Fatal("REDCACHE_CLUSTER_ADDRS must be set in CI")
-		}
-		t.Skip("REDCACHE_CLUSTER_ADDRS not set; run `docker compose up -d --wait redis-cluster`")
+		t.Fatal("REDCACHE_CLUSTER_ADDRS is not set; start the cluster with " +
+			"`docker compose up -d --wait redis-cluster` and set " +
+			"REDCACHE_CLUSTER_ADDRS=127.0.0.1:30001 (`make` exports it), or run with -short")
 	}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: strings.Split(addrs, ",")},
