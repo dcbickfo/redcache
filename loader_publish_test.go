@@ -108,6 +108,7 @@ func (m *fillWaits) LockContended(int64) {
 
 type fillEvidence struct {
 	fills, reads, stale atomic.Int64
+	readerLoads         atomic.Int64 // keys a reader led and loaded because the publisher had not locked them
 	maxWait             atomic.Int64
 }
 
@@ -120,8 +121,8 @@ func checkConcurrentLoaderRefills(t *testing.T, mode string) {
 	const totalFills int64 = rounds * workers * (1 + batchWidth)
 	evidence := &fillEvidence{}
 	t.Cleanup(func() {
-		t.Logf("fills=%d reader_keys=%d stale=%d max_wait=%s",
-			evidence.fills.Load(), evidence.reads.Load(), evidence.stale.Load(), time.Duration(evidence.maxWait.Load()))
+		t.Logf("fills=%d reader_keys=%d stale=%d reader_loaded_keys=%d max_wait=%s",
+			evidence.fills.Load(), evidence.reads.Load(), evidence.stale.Load(), evidence.readerLoads.Load(), time.Duration(evidence.maxWait.Load()))
 		if !testing.Short() {
 			require.Equal(t, totalFills, evidence.fills.Load())
 			require.Equal(t, 2*totalFills, evidence.reads.Load())
@@ -183,7 +184,9 @@ func checkLoaderFill(parent context.Context, cache *redcache.Cache, waiter *fill
 	}
 	locked, publish := make(chan struct{}), make(chan struct{})
 	var once sync.Once
+	ledger := &loadLedger{loads: make(map[string][]string)}
 	load := func(ctx context.Context, requested []string) (map[string]string, error) {
+		ledger.record("publisher", requested)
 		once.Do(func() { close(locked) })
 		select {
 		case <-publish:
@@ -192,36 +195,54 @@ func checkLoaderFill(parent context.Context, cache *redcache.Cache, waiter *fill
 			return nil, ctx.Err()
 		}
 	}
+	// Name any double load in whichever error ends the phase first.
+	fail := func(err error) error {
+		if doubled := ledger.doubleLoads(keys); doubled != "" {
+			return fmt.Errorf("%w; %s", err, doubled)
+		}
+		return err
+	}
+	// A call's loader gets only the keys that call locked, so one caller may
+	// legitimately load a key another did not. The invariant is that no key is
+	// loaded twice in one phase.
+	followerLoad := func(who string) fillLoader {
+		return func(_ context.Context, requested []string) (map[string]string, error) {
+			ledger.record(who, requested)
+			return filledValues(requested, want), nil
+		}
+	}
 	multi := len(keys) > 1
 	written := startRecoveryGet(ctx, cache, keys, multi, load)
 	select {
 	case <-locked:
 	case <-ctx.Done():
-		return fmt.Errorf("loader did not acquire locks for %q: %w", want, ctx.Err())
+		return fail(fmt.Errorf("loader did not acquire locks for %q: %w", want, ctx.Err()))
 	}
 	start := time.Now()
-	noLoad := func(context.Context, []string) (map[string]string, error) {
-		return nil, errors.New("a follower attempted to load a key already held by the publisher")
-	}
 	readers := []<-chan recoveryGetResult{
-		startRecoveryGet(ctx, cache, keys, multi, noLoad),
-		startRecoveryGet(ctx, cache, keys, multi, noLoad),
+		startRecoveryGet(ctx, cache, keys, multi, followerLoad("reader0")),
+		startRecoveryGet(ctx, cache, keys, multi, followerLoad("reader1")),
 	}
 	select {
 	case <-waiter.contended:
 	case <-ctx.Done():
-		return fmt.Errorf("follower did not observe a held lock during %q: %w", want, ctx.Err())
+		return fail(fmt.Errorf("follower did not observe a held lock during %q: %w", want, ctx.Err()))
 	}
 	close(publish)
 	if err := checkFillReply(ctx, written, keys, want, nil); err != nil {
-		return err
+		return fail(err)
 	}
-	evidence.fills.Add(int64(len(keys)))
 	for _, reader := range readers {
 		if err := checkFillReply(ctx, reader, keys, want, evidence); err != nil {
-			return err
+			return fail(err)
 		}
 	}
+	loaded, err := ledger.checkLoadedOnce(keys, want)
+	if err != nil {
+		return err
+	}
+	evidence.fills.Add(int64(loaded))
+	evidence.readerLoads.Add(ledger.loadedByReaders())
 	observed := int64(time.Since(start))
 	for previous := evidence.maxWait.Load(); observed > previous; previous = evidence.maxWait.Load() {
 		if evidence.maxWait.CompareAndSwap(previous, observed) {
@@ -229,6 +250,62 @@ func checkLoaderFill(parent context.Context, cache *redcache.Cache, waiter *fill
 		}
 	}
 	return nil
+}
+
+// loadLedger records, per key, which callers' loaders were asked to load it
+// within one phase.
+type loadLedger struct {
+	mu    sync.Mutex
+	loads map[string][]string
+}
+
+func (l *loadLedger) record(who string, keys []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, key := range keys {
+		l.loads[key] = append(l.loads[key], who)
+	}
+}
+
+// doubleLoads describes every key loaded more than once, or "" when none was.
+func (l *loadLedger) doubleLoads(keys []string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out string
+	for _, key := range keys {
+		if who := l.loads[key]; len(who) > 1 {
+			out += fmt.Sprintf("key %q loaded %d times, by %v; ", key, len(who), who)
+		}
+	}
+	return out
+}
+
+func (l *loadLedger) loadedByReaders() int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var n int64
+	for _, who := range l.loads {
+		if len(who) == 1 && who[0] != "publisher" {
+			n++
+		}
+	}
+	return n
+}
+
+// checkLoadedOnce fails unless every key was loaded exactly once, by whichever
+// caller won its lock. It returns the number of keys loaded.
+func (l *loadLedger) checkLoadedOnce(keys []string, want string) (int, error) {
+	if doubled := l.doubleLoads(keys); doubled != "" {
+		return 0, fmt.Errorf("a key was loaded twice during %q: %s", want, doubled)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, key := range keys {
+		if len(l.loads[key]) == 0 {
+			return 0, fmt.Errorf("key %q was never loaded during %q", key, want)
+		}
+	}
+	return len(l.loads), nil
 }
 
 func checkFillReply(ctx context.Context, done <-chan recoveryGetResult, keys []string, want string, evidence *fillEvidence) error {
