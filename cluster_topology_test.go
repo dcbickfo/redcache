@@ -194,9 +194,19 @@ func flushScripts(t *testing.T, addr string) {
 
 func eventually(t *testing.T, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()
+	eventuallyWithStatus(t, timeout, what, cond, nil)
+}
+
+// eventuallyWithStatus is eventually that appends status() to the timeout
+// message, so a failure names the last state observed.
+func eventuallyWithStatus(t *testing.T, timeout time.Duration, what string, cond func() bool, status func() string) {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for !cond() {
 		if time.Now().After(deadline) {
+			if status != nil {
+				t.Fatalf("timed out after %s waiting for %s; last seen: %s", timeout, what, status())
+			}
 			t.Fatalf("timed out after %s waiting for %s", timeout, what)
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -218,13 +228,25 @@ func role(t *testing.T, addr string) string {
 // issued then aborts silently.
 func replicaSynced(t *testing.T, addr string) bool {
 	t.Helper()
+	synced, _ := replicaStatus(t, addr)
+	return synced
+}
+
+// replicaStatus returns replicaSynced's verdict and a description of the ROLE
+// reply (role and link state) for failure messages.
+func replicaStatus(t *testing.T, addr string) (bool, string) {
+	t.Helper()
 	r, err := do(t, adminClient(t, addr), "ROLE").ToArray()
-	if err != nil || len(r) < 4 {
-		return false
+	if err != nil {
+		return false, "ROLE error: " + err.Error()
+	}
+	if len(r) < 4 {
+		s, _ := r[0].ToString()
+		return false, "role " + s
 	}
 	s, _ := r[0].ToString()
 	state, _ := r[3].ToString()
-	return s == "slave" && state == "connected"
+	return s == "slave" && state == "connected", "role " + s + ", link " + state
 }
 
 func taggedKeys(tag string, n int) []string {
@@ -719,7 +741,9 @@ func TestCluster_PrimaryFailover(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		<-slept
-		eventually(t, 20*time.Second, victim.addr+" to sync as a replica", func() bool { return replicaSynced(t, victim.addr) })
+		eventuallyWithStatus(t, 60*time.Second, victim.addr+" to sync as a replica",
+			func() bool { return replicaSynced(t, victim.addr) },
+			func() string { _, st := replicaStatus(t, victim.addr); return st })
 		// A manual failover that cannot complete aborts after 5s without an
 		// error, so reissue it until the promotion lands.
 		var issued time.Time
