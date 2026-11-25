@@ -39,6 +39,8 @@ jobs:
         run: |
           set -o pipefail
           go test -race -count=1 -json ./... | tee TestResults.json
+      - name: Fail on skipped or missing tests
+        run: scripts/check-test-results.sh TestResults.json
       - name: Upload Go test results
         if: always()
         uses: actions/upload-artifact@v7
@@ -97,4 +99,8 @@ jobs:
       - name: Run server tests
         env:
           GOFLAGS: ${{ matrix.image == 'valkey/valkey:9.2' && '-race' || '' }}
-        run: make test-server GO=go
+        run: |
+          set -o pipefail
+          make test-server GO=go TESTFLAGS=-json | tee ServerResults.json
+      - name: Fail on skipped or missing tests
+        run: scripts/check-test-results.sh ServerResults.json
