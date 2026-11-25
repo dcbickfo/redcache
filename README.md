@@ -372,12 +372,27 @@ JSON-backed cache serves any key and value types on each operation.
 
 Reads through the same `Conn` see its acknowledged writes. For a recently
 written key, redcache reads directly from Redis until invalidation clears the
-mark or a fixed one-second deadline expires. On a standalone tracking pipe,
-a successful bypass GET sent after the write can clear the mark sooner.
-An invalidation that arrives after the deadline can briefly expose an older
-cached value. With concurrent writers, a read already underway can refill
-the cache after an earlier invalidation. If that invalidation ends the later
-write's mark, reads can briefly see the refilled value until the later
+mark or a fixed one-second deadline expires. The table shows the cost for
+reads started after a fill or explicit write completes.
+
+| Connection | After a `Get` or `GetMulti` loader fill | After `Set`, `SetMulti`, `ForceSet*`, or `Del*` |
+| --- | --- | --- |
+| Standalone, default tracking | Usually one direct Redis GET, then local caching resumes. | Local caching resumes after invalidation or the first eligible direct GET. |
+| Cluster | Direct Redis GETs for up to one second, unless invalidation clears the mark sooner. | Direct Redis GETs for up to one second, unless invalidation clears the mark sooner. |
+| Sentinel | Direct Redis GETs until invalidation or the one-second deadline. | Direct Redis GETs until invalidation or the one-second deadline. |
+| Custom `ClientBuilder` | Direct Redis GETs until invalidation or the one-second deadline. | Direct Redis GETs until invalidation or the one-second deadline. |
+| Explicit `DisableCache` or RESP2 | Ordinary Redis reads with no marks. | Ordinary Redis reads with no marks. |
+
+The standalone shortcut requires a successful GET on the same tracking pipe
+after the write. Unsupported tracking settings, pool routing, or a pipe
+change can leave the deadline in effect. Concurrent first reads can each
+issue a GET before the first reply clears the mark.
+
+If invalidation arrives late or is suppressed, the deadline can expose an
+older value until the local entry is evicted or expires. With concurrent
+writers, a read already underway can refill the cache after an earlier
+invalidation. If that invalidation ends the later write's mark, reads can
+briefly see the refilled value until the later
 invalidation arrives. A second `Conn`, even in the same process, is
 eventually consistent and sees the write when its own invalidation arrives.
 

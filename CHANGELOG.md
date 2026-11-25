@@ -10,7 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Reads through the same `Conn` bypass the local cache after a write until
-  Redis invalidates the key or a one-second deadline expires.
+  Redis invalidates the key or a one-second deadline expires. A successful
+  post-write Redis read on an eligible standalone tracking pipe can end the
+  bypass sooner. In cluster mode, a fresh loader fill can bypass for up to
+  one second.
 
 ## [v0.4.2] - 2026-11-24
 

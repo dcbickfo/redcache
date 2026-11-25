@@ -282,6 +282,8 @@ func (rca *cacheAside) tryLock(ctx context.Context, key string) (string, error) 
 	return "", fmt.Errorf("lock key %q: %w", key, err)
 }
 
+// setWithLock publishes an absent-key fill. SET NX only proves absence on
+// Redis. Tracking modes such as NOLOOP can leave an older user value cached.
 func (rca *cacheAside) setWithLock(ctx context.Context, ttl time.Duration, key string, valLock valAndLock) (string, error) {
 	keys := []string{key}
 	mark := rca.writeMarks.begin(keys, time.Now(), writeMarkCap)

@@ -17,18 +17,23 @@ import (
 )
 
 func TestReadYourWritesAfterForceSetMulti(t *testing.T) {
-	t.Run("standalone", func(t *testing.T) {
-		var paths readPathCounts
-		cache, conn := makeClient(t, addr)
-		paths.Observe(conn)
-		checkReadYourWrites(t, cache, conn, &paths)
-	})
-	t.Run("cluster", func(t *testing.T) {
-		var paths readPathCounts
-		cache, conn := makeClusterClient(t)
-		paths.Observe(conn)
-		checkReadYourWrites(t, cache, conn, &paths)
-	})
+	for _, mode := range []string{"standalone", "cluster"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Run("writes", func(t *testing.T) {
+				var cache *redcache.Cache
+				var conn *redcache.Conn
+				if mode == "cluster" {
+					cache, conn = makeClusterClient(t)
+				} else {
+					cache, conn = makeClient(t, addr)
+				}
+				var paths readPathCounts
+				paths.Observe(conn)
+				checkReadYourWrites(t, cache, conn, &paths)
+			})
+			t.Run("fills", func(t *testing.T) { checkConcurrentLoaderRefills(t, mode) })
+		})
+	}
 }
 
 func TestReadBarrierAfterFill(t *testing.T) {

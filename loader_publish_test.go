@@ -1,0 +1,357 @@
+package redcache_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+	"uuid"
+
+	"github.com/redis/rueidis"
+	"github.com/stretchr/testify/require"
+
+	"github.com/dcbickfo/redcache"
+)
+
+// A successful SET NX proves the key was absent at Redis. With NOLOOP, it
+// cannot prove this Conn's earlier user value was evicted from its local cache.
+func TestLoaderPublishProtectsUninvalidatedValue(t *testing.T) {
+	for _, name := range []string{"Get", "GetMulti"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cache, conn := openNoLoopClient(t, redcache.WithLockTTL(5*time.Second))
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			key := "publish-noloop:" + uuid.New().String()
+			client := conn.Client()
+			const ttl = time.Minute
+			require.NoError(t, client.Do(ctx, client.B().Set().Key(key).Value("previous").Px(ttl).Build()).Error())
+			require.NoError(t, client.DoCache(ctx, client.B().Get().Key(key).Cache(), ttl).Error())
+			cached := client.DoCache(ctx, client.B().Get().Key(key).Cache(), ttl)
+			require.NoError(t, cached.Error())
+			require.True(t, cached.IsCacheHit(), "prime the earlier local user value")
+			require.NoError(t, cache.Del(ctx, key))
+			locked, publish := make(chan struct{}), make(chan struct{})
+			keys := []string{key}
+			if name == "GetMulti" {
+				keys = append(keys, key+":second")
+			}
+			done := startRecoveryGet(ctx, cache, keys, len(keys) > 1, func(ctx context.Context, keys []string) (map[string]string, error) {
+				close(locked)
+				select {
+				case <-publish:
+					return filledValues(keys, "reloaded"), nil
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			})
+			awaitLockRecoveryTest(t, locked)
+			// The loader already acquired the absent key. Let the older Del
+			// mark expire while the prior cached user value remains alive.
+			expiry := time.NewTimer(time.Second)
+			defer expiry.Stop()
+			awaitLockRecoveryTest(t, expiry.C)
+			close(publish)
+			written := awaitLockRecoveryTest(t, done)
+			require.NoError(t, written.err)
+			require.Equal(t, "reloaded", written.values[key])
+			raw, err := client.Do(ctx, client.B().Get().Key(key).Build()).ToString()
+			require.NoError(t, err)
+			value, _ := redcache.UnwrapEnvelope(raw)
+			require.Equal(t, "reloaded", value)
+
+			got, hit, err := cache.Peek[string, string](ctx, ttl, key)
+			require.NoError(t, err)
+			require.True(t, hit)
+			require.Equal(t, "reloaded", got, "stale user value after acknowledged loader publication")
+		})
+	}
+}
+
+type fillLoader func(context.Context, []string) (map[string]string, error)
+
+func runLoaderFill(ctx context.Context, cache *redcache.Cache, keys []string, ttl time.Duration, load fillLoader) (map[string]string, error) {
+	if len(keys) != 1 {
+		return cache.GetMulti(ctx, ttl, keys, load)
+	}
+	key := keys[0]
+	v, err := cache.Get(ctx, ttl, key, func(ctx context.Context, k string) (string, error) {
+		got, err := load(ctx, []string{k})
+		return got[k], err
+	})
+	return map[string]string{key: v}, err
+}
+
+func filledValues(keys []string, value string) map[string]string {
+	values := make(map[string]string, len(keys))
+	for _, key := range keys {
+		values[key] = value
+	}
+	return values
+}
+
+type fillWaits struct {
+	redcache.NoopMetrics
+	contended chan struct{}
+}
+
+func (m *fillWaits) LockContended(int64) {
+	select {
+	case m.contended <- struct{}{}:
+	default:
+	}
+}
+
+type fillEvidence struct {
+	fills, reads, stale atomic.Int64
+	maxWait             atomic.Int64
+}
+
+// Each worker has one fill goroutine and two concurrent readers using its Conn.
+func checkConcurrentLoaderRefills(t *testing.T, mode string) {
+	t.Helper()
+	const workers = 4
+	const rounds = 20
+	const batchWidth = 16
+	const totalFills int64 = rounds * workers * (1 + batchWidth)
+	evidence := &fillEvidence{}
+	t.Cleanup(func() {
+		t.Logf("fills=%d reader_keys=%d stale=%d max_wait=%s",
+			evidence.fills.Load(), evidence.reads.Load(), evidence.stale.Load(), time.Duration(evidence.maxWait.Load()))
+		if !testing.Short() {
+			require.Equal(t, totalFills, evidence.fills.Load())
+			require.Equal(t, 2*totalFills, evidence.reads.Load())
+			require.Zero(t, evidence.stale.Load())
+		}
+	})
+	for worker := range workers {
+		t.Run(strconv.Itoa(worker), func(t *testing.T) {
+			t.Parallel()
+			waiter := &fillWaits{contended: make(chan struct{}, 4)}
+			cache, conn := openFillClient(t, mode, waiter)
+			width := batchWidth
+			if worker%2 == 0 {
+				width = 1
+			}
+			for round := range rounds {
+				keys := fillKeys(width)
+				if err := checkLoaderFill(t.Context(), cache, waiter, evidence, keys, "initial"); err != nil {
+					t.Fatal(err)
+				}
+				if err := retireFillKeys(t.Context(), cache, conn.Client(), keys, round%2 != 0); err != nil {
+					t.Fatal(err)
+				}
+				if err := checkLoaderFill(t.Context(), cache, waiter, evidence, keys, "refilled"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func openFillClient(t *testing.T, mode string, waiter *fillWaits) (*redcache.Cache, *redcache.Conn) {
+	t.Helper()
+	opts := []redcache.Option{redcache.WithMetrics(waiter)}
+	if mode == "cluster" {
+		return makeClusterClient(t, opts...)
+	}
+	// A builder keeps the same real RESP3 client and its invalidations while
+	// making the standalone barrier ineligible.
+	opts = append(opts, redcache.WithClientBuilder(rueidis.NewClient))
+	return makeClient(t, addr, opts...)
+}
+
+func fillKeys(width int) []string {
+	prefix := "concurrent-fill:" + uuid.New().String() + ":"
+	keys := make([]string, width)
+	for i := range keys {
+		keys[i] = prefix + strconv.Itoa(i)
+	}
+	return keys
+}
+
+func checkLoaderFill(parent context.Context, cache *redcache.Cache, waiter *fillWaits, evidence *fillEvidence, keys []string, want string) error {
+	const bound = 2 * time.Second
+	ctx, cancel := context.WithTimeout(parent, bound)
+	defer cancel()
+	for len(waiter.contended) > 0 {
+		<-waiter.contended
+	}
+	locked, publish := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	load := func(ctx context.Context, requested []string) (map[string]string, error) {
+		once.Do(func() { close(locked) })
+		select {
+		case <-publish:
+			return filledValues(requested, want), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	multi := len(keys) > 1
+	written := startRecoveryGet(ctx, cache, keys, multi, load)
+	select {
+	case <-locked:
+	case <-ctx.Done():
+		return fmt.Errorf("loader did not acquire locks for %q: %w", want, ctx.Err())
+	}
+	start := time.Now()
+	noLoad := func(context.Context, []string) (map[string]string, error) {
+		return nil, errors.New("a follower attempted to load a key already held by the publisher")
+	}
+	readers := []<-chan recoveryGetResult{
+		startRecoveryGet(ctx, cache, keys, multi, noLoad),
+		startRecoveryGet(ctx, cache, keys, multi, noLoad),
+	}
+	select {
+	case <-waiter.contended:
+	case <-ctx.Done():
+		return fmt.Errorf("follower did not observe a held lock during %q: %w", want, ctx.Err())
+	}
+	close(publish)
+	if err := checkFillReply(ctx, written, keys, want, nil); err != nil {
+		return err
+	}
+	evidence.fills.Add(int64(len(keys)))
+	for _, reader := range readers {
+		if err := checkFillReply(ctx, reader, keys, want, evidence); err != nil {
+			return err
+		}
+	}
+	observed := int64(time.Since(start))
+	for previous := evidence.maxWait.Load(); observed > previous; previous = evidence.maxWait.Load() {
+		if evidence.maxWait.CompareAndSwap(previous, observed) {
+			break
+		}
+	}
+	return nil
+}
+
+func checkFillReply(ctx context.Context, done <-chan recoveryGetResult, keys []string, want string, evidence *fillEvidence) error {
+	var result recoveryGetResult
+	select {
+	case result = <-done:
+	case <-ctx.Done():
+		return fmt.Errorf("fill or follower timed out during %q: %w", want, ctx.Err())
+	}
+	if result.err != nil {
+		return result.err
+	}
+	for _, key := range keys {
+		if evidence != nil {
+			evidence.reads.Add(1)
+		}
+		if got := result.values[key]; got != want {
+			if evidence != nil {
+				evidence.stale.Add(1)
+			}
+			return fmt.Errorf("stale value for %q: got %q, want %q", key, got, want)
+		}
+	}
+	return nil
+}
+
+func retireFillKeys(ctx context.Context, cache *redcache.Cache, client rueidis.Client, keys []string, expire bool) error {
+	if !expire {
+		return cache.DelMulti(ctx, keys)
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	cmds := make(rueidis.Commands, len(keys))
+	for i, key := range keys {
+		cmds[i] = client.B().Pexpire().Key(key).Milliseconds(5).Build()
+	}
+	for _, reply := range client.DoMulti(ctx, cmds...) {
+		if err := reply.Error(); err != nil {
+			return err
+		}
+	}
+	for {
+		cmds = make(rueidis.Commands, len(keys))
+		for i, key := range keys {
+			cmds[i] = client.B().Get().Key(key).Build()
+		}
+		absent := 0
+		for _, reply := range client.DoMulti(ctx, cmds...) {
+			if rueidis.IsRedisNil(reply.Error()) {
+				absent++
+			} else if err := reply.Error(); err != nil {
+				return err
+			}
+		}
+		if absent == len(keys) {
+			return nil
+		}
+	}
+}
+
+func openNoLoopClient(t *testing.T, opts ...redcache.Option) (*redcache.Cache, *redcache.Conn) {
+	t.Helper()
+	builder := redcache.WithClientBuilder(func(opt rueidis.ClientOption) (rueidis.Client, error) {
+		opt.ClientTrackingOptions = []string{"OPTIN", "NOLOOP"}
+		return rueidis.NewClient(opt)
+	})
+	return makeClient(t, addr, append(opts, builder)...)
+}
+
+func TestRefreshPublishProtectsPreviousValue(t *testing.T) {
+	for _, width := range []int{1, 2} {
+		t.Run(strconv.Itoa(width), func(t *testing.T) {
+			cache, conn := openNoLoopClient(t, redcache.WithRefreshAfterFraction(0.25), redcache.WithRefreshBeta(0))
+			ctx := t.Context()
+			raw := conn.Client()
+			keys := fillKeys(width)
+			for _, key := range keys {
+				require.NoError(t, raw.Do(ctx, raw.B().Set().Key(key).Value("previous").Px(time.Minute).Build()).Error())
+			}
+			fill, err := runLoaderFill(ctx, cache, keys, 2*time.Minute, func(_ context.Context, requested []string) (map[string]string, error) {
+				return filledValues(requested, "refreshed"), nil
+			})
+			require.NoError(t, err)
+			require.Equal(t, filledValues(keys, "previous"), fill)
+			for _, key := range keys {
+				require.Eventually(t, func() bool {
+					reply, err := raw.Do(ctx, raw.B().Get().Key(key).Build()).ToString()
+					value, _ := redcache.UnwrapEnvelope(reply)
+					return err == nil && value == "refreshed"
+				}, 2*time.Second, time.Millisecond, "refresh must publish to Redis")
+				value, hit, err := cache.Peek[string, string](ctx, 2*time.Minute, key)
+				require.NoError(t, err)
+				require.True(t, hit)
+				require.Equal(t, "refreshed", value, "refresh publish must protect the previous cached value")
+			}
+		})
+	}
+}
+
+func TestWriteRestoreKeepsMark(t *testing.T) {
+	for _, name := range []string{"Set", "SetMulti"} {
+		t.Run(name, func(t *testing.T) {
+			cache, conn := openNoLoopClient(t)
+			ctx := t.Context()
+			raw := conn.Client()
+			key := "restore-mark:" + uuid.New().String()
+			require.NoError(t, raw.Do(ctx, raw.B().Set().Key(key).Value("previous").Px(time.Minute).Build()).Error())
+			loadErr := errors.New("rollback the write")
+			var err error
+			if name == "Set" {
+				err = cache.Set(ctx, time.Minute, key, func(context.Context, string) (string, error) {
+					return "", loadErr
+				})
+			} else {
+				err = cache.SetMulti(ctx, time.Minute, []string{key}, func(context.Context, []string) (map[string]string, error) {
+					return nil, loadErr
+				})
+			}
+			require.ErrorIs(t, err, loadErr)
+			value, err := raw.Do(ctx, raw.B().Get().Key(key).Build()).ToString()
+			require.NoError(t, err)
+			require.Equal(t, "previous", value)
+			require.EqualValues(t, 1, redcache.WriteMarkStatsForTest(conn).Live)
+		})
+	}
+}
