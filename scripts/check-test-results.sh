@@ -5,8 +5,10 @@
 set -euo pipefail
 file=${1:?usage: check-test-results.sh TestResults.json}
 [ -s "$file" ] || { echo "no test results in $file" >&2; exit 1; }
-passed=$(jq -s '[.[] | select(.Test != null and .Action == "pass")] | length' "$file")
-skipped=$(jq -rs '[.[] | select(.Test != null and .Action == "skip") | "\(.Package) \(.Test)"] | unique | .[]' "$file")
+# Lines that are not JSON (a make echo, a tool banner) are ignored.
+events() { jq -nR '[inputs | fromjson? | select(type == "object")]' "$file"; }
+passed=$(events | jq '[.[] | select(.Test != null and .Action == "pass")] | length')
+skipped=$(events | jq -r '[.[] | select(.Test != null and .Action == "skip") | "\(.Package) \(.Test)"] | unique | .[]')
 [ "$passed" -gt 0 ] || { echo "no tests passed in $file" >&2; exit 1; }
 if [ -n "$skipped" ]; then
   echo "skipped tests (a server was unreachable or -short was set):" >&2

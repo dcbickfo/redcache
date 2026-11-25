@@ -101,6 +101,6 @@ jobs:
           GOFLAGS: ${{ matrix.image == 'valkey/valkey:9.2' && '-race' || '' }}
         run: |
           set -o pipefail
-          make test-server GO=go TESTFLAGS=-json | tee ServerResults.json
+          make -s test-server GO=go TESTFLAGS=-json | tee ServerResults.json
       - name: Fail on skipped or missing tests
         run: scripts/check-test-results.sh ServerResults.json
