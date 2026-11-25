@@ -109,6 +109,15 @@ func (m *WriteMarksForTest) ReadBarrier(key string, commands int, now time.Time)
 
 func (m *WriteMarksForTest) Redial() { m.state.wire.Add(1) }
 
+// DisableReadBarrierForTest makes a Conn retire marks by invalidation, as a
+// cluster or custom-builder Conn does. Call it before issuing traffic.
+func DisableReadBarrierForTest(conn *Conn) {
+	marks := &conn.core.(*cacheAside).writeMarks
+	marks.mu.Lock()
+	defer marks.mu.Unlock()
+	marks.pipeLimit = 0
+}
+
 func HasWaitEntryForTest(conn *Conn, key string) bool {
 	_, ok := conn.core.(*cacheAside).locks.Load(key)
 	return ok

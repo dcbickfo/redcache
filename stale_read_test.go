@@ -302,6 +302,41 @@ func TestWriteMarkBarrierOrdering(t *testing.T) {
 	require.Equal(t, redcache.WriteMarkCountsForTest{Barrier: 1}, marks.Counts())
 }
 
+func TestWriteMarkInvalidationAndBarrier(t *testing.T) {
+	const key = "pushed"
+	for _, tc := range []struct {
+		name      string
+		pipeLimit int
+		want      redcache.WriteMarkCountsForTest
+	}{
+		{name: "barrier", pipeLimit: 10, want: redcache.WriteMarkCountsForTest{Live: 1}},
+		{name: "no barrier", pipeLimit: 0, want: redcache.WriteMarkCountsForTest{Invalidated: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			marks := redcache.NewWriteMarksForTest(tc.pipeLimit)
+
+			// A push handled while a write is in flight, then back-to-back writes.
+			first := marks.Begin([]string{key}, now, 10)
+			marks.Invalidate(key)
+			first(now, true)
+			require.Equal(t, tc.want, marks.Counts(), "push before the acknowledgement")
+
+			marks.Begin([]string{key}, now, 10)(now, true)
+			next := marks.Begin([]string{key}, now, 10)
+			marks.Invalidate(key)
+			next(now, true)
+			marks.Invalidate(key)
+			if tc.pipeLimit != 0 {
+				require.Equal(t, redcache.WriteMarkCountsForTest{Live: 1}, marks.Counts(), "pushes around a re-armed mark")
+				require.True(t, marks.Bypass(key, now))
+				marks.ReadBarrier(key, 2, now)()
+				require.Equal(t, redcache.WriteMarkCountsForTest{Barrier: 1}, marks.Counts())
+			}
+		})
+	}
+}
+
 func TestWriteMarkBarrierAfterResetOrRedial(t *testing.T) {
 	const key = "reset"
 	for _, name := range []string{"nil invalidation", "redial before nil callback"} {
@@ -455,6 +490,24 @@ func TestReadBarrierErroredGET(t *testing.T) {
 	require.Equal(t, redcache.WriteMarkCountsForTest{Live: 1}, redcache.WriteMarkStatsForTest(conn))
 }
 
+func TestReadBarrierAfterDelete(t *testing.T) {
+	for _, name := range []string{"Del", "DelMulti"} {
+		t.Run(name, func(t *testing.T) {
+			cache, conn := makeClient(t, addr)
+			ctx := t.Context()
+			key := "barrier-delete:" + uuid.New().String()
+			raw := conn.Client()
+			require.NoError(t, raw.Do(ctx, raw.B().Set().Key(key).Value("old").Px(time.Minute).Build()).Error())
+			require.NoError(t, changeMarkedValue(ctx, cache, name, key))
+			_, hit, err := cache.Peek[string, string](ctx, time.Minute, key)
+			require.NoError(t, err)
+			require.False(t, hit)
+			require.Equal(t, redcache.WriteMarkCountsForTest{Barrier: 1}, redcache.WriteMarkStatsForTest(conn),
+				"a missing-key reply is a valid barrier reply")
+		})
+	}
+}
+
 func TestUncachedWriteReadDeleteRefill(t *testing.T) {
 	for _, mode := range []string{"DisableCache", "RESP2", "builder"} {
 		t.Run(mode, func(t *testing.T) {
@@ -507,16 +560,42 @@ func TestPooledBypassReadsReleaseWaitEntries(t *testing.T) {
 		keys[i] = prefix + strconv.Itoa(i)
 	}
 	want := valuesFor(keys, "fresh")
+	// Track one key so that its push can reach this Conn. The write replies
+	// before its push, and a reply on the same pipe shows the push was handled.
+	raw := conn.Client()
+	require.NoError(t, raw.Do(ctx, raw.B().Set().Key(keys[0]).Value("old").Px(time.Minute).Build()).Error())
+	require.NoError(t, raw.DoCache(ctx, raw.B().Get().Key(keys[0]).Cache(), time.Minute).Error())
 	require.NoError(t, cache.ForceSetMulti(ctx, time.Minute, want))
+	require.NoError(t, raw.Do(ctx, raw.B().Ping().Build()).Error())
+	require.Equal(t, redcache.WriteMarkCountsForTest{Live: int64(len(keys))}, redcache.WriteMarkStatsForTest(conn),
+		"a push cannot end a mark where only a barrier read can")
+
+	observer := &optInObserver{Client: raw}
+	redcache.WrapClientForTest(conn, func(rueidis.Client) rueidis.Client { return observer })
 	got, err := cache.GetMulti(ctx, time.Minute, keys, noLoader)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
+	require.Zero(t, observer.optIns.Load(), "the batch reaches the blocking-pipeline cutoff with opt-ins")
 	for _, key := range keys {
 		require.False(t, redcache.HasWaitEntryForTest(conn, key), "pooled GET cannot wake this wait entry")
 	}
 	stats := redcache.WriteMarkStatsForTest(conn)
 	require.Zero(t, stats.Barrier, "pooled GET cannot end the mark")
 	require.EqualValues(t, len(keys), stats.Live)
+}
+
+type optInObserver struct {
+	rueidis.Client
+	optIns atomic.Int64
+}
+
+func (c *optInObserver) DoMulti(ctx context.Context, cmds ...rueidis.Completed) []rueidis.RedisResult {
+	for _, cmd := range cmds {
+		if words := cmd.Commands(); len(words) == 3 && words[0] == "CLIENT" && words[1] == "CACHING" && words[2] == "YES" {
+			c.optIns.Add(1)
+		}
+	}
+	return c.Client.DoMulti(ctx, cmds...)
 }
 
 type readPathCounts struct {

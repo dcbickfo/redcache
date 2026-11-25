@@ -68,6 +68,7 @@ type cacheAside struct {
 	client         rueidis.Client
 	writeMarks     writeMarks
 	trackBypasses  bool
+	poolCutoff     int // batch size at which rueidis uses a pooled connection; <0 never, 1 always.
 	locks          syncx.ShardedMap[*lockEntry]
 	lockPool       *lockpool.Pool
 	lockTTL        time.Duration
@@ -100,10 +101,17 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 
 	lp := lockpool.New(cfg.lockPrefix)
 	_, isNoop := cfg.metrics.(NoopMetrics)
+	poolCutoff := clientOption.BlockingPipeline
+	if clientOption.DisableAutoPipelining {
+		poolCutoff = 1
+	} else if poolCutoff == 0 {
+		poolCutoff = rueidis.DefaultBlockingPipeline
+	}
 	rca := &cacheAside{
 		lockPool:       lp,
 		writeMarks:     writeMarks{disabled: clientOption.DisableCache || clientOption.AlwaysRESP2},
 		trackBypasses:  canTrackBypasses(clientOption),
+		poolCutoff:     poolCutoff,
 		lockTTL:        cfg.lockTTL,
 		lockTTLMs:      strconv.FormatInt(cfg.lockTTL.Milliseconds(), 10),
 		logger:         cfg.logger,
@@ -163,10 +171,7 @@ func (rca *cacheAside) readBarrierPipeLimit(opt rueidis.ClientOption, cfg config
 			return 0
 		}
 	}
-	if opt.BlockingPipeline == 0 {
-		return rueidis.DefaultBlockingPipeline
-	}
-	return opt.BlockingPipeline
+	return rca.poolCutoff
 }
 
 func (rca *cacheAside) watchBarrierDials(opt *rueidis.ClientOption) {

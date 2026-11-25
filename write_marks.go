@@ -123,7 +123,9 @@ func (m *writeMarks) finishKey(key string, now time.Time, succeeded bool, wire u
 	mark.failed = mark.failed || !succeeded
 	mark.noBarrier = mark.noBarrier || wire != m.wire.Load()
 	if mark.inFlight == 0 {
-		if mark.invalidated && !mark.overlapped && !mark.failed {
+		// Where a barrier is available, only a barrier read (or the deadline,
+		// a reset, or the cap) ends the mark; see invalidate.
+		if m.pipeLimit == 0 && mark.invalidated && !mark.overlapped && !mark.failed {
 			m.removeInvalidated(key)
 			return
 		}
@@ -134,7 +136,11 @@ func (m *writeMarks) finishKey(key string, now time.Time, succeeded bool, wire u
 }
 
 func (m *writeMarks) invalidate(key string) {
-	if !m.active.Load() {
+	// Rueidis already evicted the key. Where a barrier is available, a push
+	// cannot identify the write a mark protects: it can belong to an earlier
+	// write by this Conn or by another client, and the push for a Conn's own
+	// write arrives after its reply. Only the barrier read ends the mark.
+	if !m.active.Load() || m.pipeLimit != 0 {
 		return
 	}
 	m.mu.Lock()

@@ -30,16 +30,21 @@ func (r bypassRead) untracked(reply rueidis.RedisResult) bool {
 // the local cache. No bypass reply is installed in rueidis's cache.
 func (rca *cacheAside) bypassReads(ctx context.Context, keys []string, refreshTTL bool) ([]rueidis.RedisResult, []bypassRead) {
 	getOffset := 0
-	if rca.trackBypasses {
-		getOffset = 1
-	}
-	stride := 1 + getOffset
+	stride := 1
 	if refreshTTL {
+		stride++
+	}
+	// rueidis sends a batch at or over its blocking-pipeline cutoff to a pooled
+	// connection, where CLIENT CACHING YES would outlive this call and apply to
+	// that connection's next command. Count the opt-ins toward the cutoff and
+	// send plain GETs when the batch would reach it.
+	if rca.trackBypasses && (rca.poolCutoff < 0 || len(keys)*(stride+1) < rca.poolCutoff) {
+		getOffset = 1
 		stride++
 	}
 	cmds := make(rueidis.Commands, 0, stride*len(keys))
 	for _, key := range keys {
-		if rca.trackBypasses {
+		if getOffset != 0 {
 			cmds = append(cmds, rca.client.B().ClientCaching().Yes().Build().SetSlot(key))
 		}
 		cmds = append(cmds, rca.client.B().Get().Key(key).Build())
@@ -48,7 +53,7 @@ func (rca *cacheAside) bypassReads(ctx context.Context, keys []string, refreshTT
 		}
 	}
 	var barriers []readBarrier
-	trackedPipe := rca.trackBypasses && rca.writeMarks.onTrackingPipe(len(cmds))
+	trackedPipe := getOffset != 0 && rca.writeMarks.onTrackingPipe(len(cmds))
 	if trackedPipe {
 		barriers = rca.writeMarks.readBarriers(keys, len(cmds), time.Now())
 	}
@@ -70,10 +75,12 @@ func (rca *cacheAside) unpackBypassReads(keys []string, replies []rueidis.RedisR
 		// untracked-waiter path, even if the opt-in command itself succeeded.
 		tracked := trackedPipe && replies[index-1].Error() == nil
 		reads[i] = bypassRead{bypassed: true, tracked: tracked}
-		if tracked && barriers != nil && replies[index].Error() == nil {
+		if tracked && barriers != nil {
 			// The write had completed before dispatch. The read loop delivered
-			// any preceding push on this pipe before delivering the GET reply.
-			rca.writeMarks.finishBarrier(keys[i], barriers[i])
+			// any preceding push before delivering the value or missing-key reply.
+			if err := replies[index].Error(); err == nil || rueidis.IsRedisNil(err) {
+				rca.writeMarks.finishBarrier(keys[i], barriers[i])
+			}
 		}
 		replies[i] = replies[index]
 		if refreshTTL {
