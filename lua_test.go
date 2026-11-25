@@ -1,4 +1,4 @@
-package redcache
+package redcache_test
 
 import (
 	"context"
@@ -11,12 +11,15 @@ import (
 
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/require"
+
+	"github.com/dcbickfo/redcache"
 )
 
 var scriptLoadCalls = regexp.MustCompile(`cmdstat_script\|load:calls=(\d+)`)
 
 func TestLuaScript_ExecMultiFallsBackToEvalWithoutScriptLoad(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	ctx := t.Context()
 	client, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}})
 	require.NoError(t, err)
@@ -46,7 +49,7 @@ func TestLuaScript_ExecMultiFallsBackToEvalWithoutScriptLoad(t *testing.T) {
 	before := loads()
 
 	for range 2 {
-		for i, resp := range touchScript.ExecMulti(ctx, client, execs...) {
+		for i, resp := range redcache.TouchScriptExecMulti(ctx, client, execs...) {
 			n, err := resp.AsInt64()
 			require.NoError(t, err, keys[i])
 			require.Equal(t, int64(1), n, keys[i])
@@ -79,8 +82,8 @@ func BenchmarkLuaScript_ExecMulti(b *testing.B) {
 				name string
 				exec func(context.Context, rueidis.Client, ...rueidis.LuaExec) []rueidis.RedisResult
 			}{
-				{"rueidis", delKeyLua.Lua.ExecMulti},
-				{"redcache", delKeyLua.ExecMulti},
+				{"rueidis", redcache.DelScriptRueidisExecMulti},
+				{"redcache", redcache.DelScriptExecMulti},
 			} {
 				b.Run(target.name+"/keys="+strconv.Itoa(n)+"/"+impl.name, func(b *testing.B) {
 					b.ReportAllocs()
@@ -101,6 +104,7 @@ func BenchmarkLuaScript_ExecMulti(b *testing.B) {
 // not persist it; -1 (no expiry) stays persistent and a positive PTTL is kept.
 func TestRestoreValueOrDeleteScript_BackupPTTL(t *testing.T) {
 	t.Parallel()
+	skipIfNoRedis(t)
 	ctx := t.Context()
 	client, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}})
 	require.NoError(t, err)
@@ -120,7 +124,7 @@ func TestRestoreValueOrDeleteScript_BackupPTTL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			key := "restore-pttl:" + uuid.New().String()
 			require.NoError(t, client.Do(ctx, client.B().Set().Key(key).Value("lock").Px(time.Minute).Build()).Error())
-			n, err := restoreValueOrDeleteScript.Exec(ctx, client, []string{key}, []string{"lock", "1", "prior", tc.pttl}).AsInt64()
+			n, err := redcache.RestoreValueOrDeleteScriptExec(ctx, client, []string{key}, []string{"lock", "1", "prior", tc.pttl}).AsInt64()
 			require.NoError(t, err)
 			require.EqualValues(t, 1, n)
 

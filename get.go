@@ -128,18 +128,24 @@ func (rca *cacheAside) returnGetHit(
 
 func (rca *cacheAside) awaitGet(ctx context.Context, ttl time.Duration, key string, wait <-chan struct{}) (cacheReadResult, bool, error) {
 	var polled cacheReadResult
-	ok, err := rca.awaitLockOrPoll(ctx, wait, func() (bool, error) {
+	hit := false
+	_, err := rca.awaitLockOrPoll(ctx, wait, func() (bool, error) {
 		res, err := rca.tryGet(ctx, ttl, key)
 		if errors.Is(err, errNotFound) {
-			return false, nil
+			if res.locked {
+				return false, nil
+			}
+			// Wake followers and let one retry SET NX against the absent key.
+			rca.release(key, wait)
+			return true, nil
 		}
 		if err != nil {
 			return false, err
 		}
-		polled = res
+		polled, hit = res, true
 		return true, nil
 	})
-	return polled, ok, err
+	return polled, hit, err
 }
 
 // peek is a read-only client-side-cached lookup: no loader, no lock. It reuses
@@ -169,6 +175,7 @@ type cacheReadResult struct {
 	pttl      int64
 	delta     time.Duration
 	untracked bool
+	locked    bool
 }
 
 func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string) (cacheReadResult, error) {
@@ -176,12 +183,15 @@ func (rca *cacheAside) tryGet(ctx context.Context, ttl time.Duration, key string
 	val, err := resp.ToString()
 	val, err = rca.cachedReadValue(ctx, key, val, err)
 	untracked := readUntracked(resp)
-	if rueidis.IsRedisNil(err) || strings.HasPrefix(val, rca.lockPrefix) {
+	if rueidis.IsRedisNil(err) {
 		return cacheReadResult{untracked: untracked}, errNotFound
 	}
 	if err != nil {
 		rca.emitRedisError("read")
 		return cacheReadResult{}, fmt.Errorf("read key %q: %w", key, err)
+	}
+	if strings.HasPrefix(val, rca.lockPrefix) {
+		return cacheReadResult{untracked: untracked, locked: true}, errNotFound
 	}
 	plain, delta := unwrapEnvelope(val)
 	var pttl int64

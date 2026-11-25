@@ -9,7 +9,10 @@ non-trivial before sending a large PR.
 - Go 1.27+ (the module requires Go 1.27.0; `.tool-versions` pins the toolchain CI also uses).
 - Docker, to run a local Redis. The tests are integration tests that need a
   real Redis at `127.0.0.1:6379` — they exercise RESP3 client-side
-  invalidation, which can't be faked.
+  invalidation, which can't be faked. Without a server they fail rather than
+  skip; `-short` (`make test-short`) runs only the tests that need none.
+  Cluster tests also need `REDCACHE_CLUSTER_ADDRS` (`make` exports
+  `127.0.0.1:30001`; start the cluster with `docker compose up -d --wait`).
 
 Go and golangci-lint are pinned in `.tool-versions`. With
 [asdf](https://asdf-vm.com) installed, `make setup` installs the exact versions
@@ -47,6 +50,15 @@ golangci-lint fmt
 # Benchmarks
 go test -bench=. -benchmem ./...
 ```
+
+**Test conventions.** Tests are external by default: they live in
+`package redcache_test` and go through the public API. When a test needs an
+unexported detail, expose it through a thin seam in an in-package
+`export_test.go` (a file compiled only under `go test`, the pattern the Go
+standard library uses, for example `src/net/http/export_test.go`). A test that
+needs direct engine state may stay in package `redcache`; the file starts with
+a one-line comment saying why it cannot be external. Do not add production
+hooks, test-only options, or build tags.
 
 ## Conventions
 
