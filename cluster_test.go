@@ -30,7 +30,7 @@ const clusterKeyCount = 64
 // never reported as a pass.
 func makeClusterClient(t *testing.T, opts ...redcache.Option) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	addrs := os.Getenv("REDCACHE_CLUSTER_ADDRS")
 	if addrs == "" {
 		t.Fatal("REDCACHE_CLUSTER_ADDRS is not set; start the cluster with " +

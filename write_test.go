@@ -23,7 +23,7 @@ import (
 
 func TestRestoreValue_LogsErrorOnClientFailure(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 
 	var logs bytes.Buffer
 	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: addr},
@@ -68,7 +68,7 @@ func (c closeDuringAcquireClient) DoMulti(ctx context.Context, cmds ...rueidis.C
 
 func TestBestEffortUnlock_LogsErrorOnClientFailure(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 
 	var logs bytes.Buffer
 	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: addr},

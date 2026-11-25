@@ -16,9 +16,7 @@ import (
 // client cleanly and is idempotent (the engine guards on closeOnce).
 func TestConn_ClosesCleanly(t *testing.T) {
 	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires Redis")
-	}
+	skipInShortMode(t)
 
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
@@ -43,9 +41,7 @@ func TestConn_ClosesCleanly(t *testing.T) {
 // forever. TestMain checks the whole run; this pins the check to Close with a
 // refresh worker live.
 func TestConn_Close_LeaksNoGoroutines(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires Redis")
-	}
+	skipInShortMode(t)
 
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},

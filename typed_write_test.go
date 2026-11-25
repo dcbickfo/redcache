@@ -16,7 +16,7 @@ import (
 
 func newTypedCache(t *testing.T, valCodec redcache.Codec) *redcache.Cache {
 	t.Helper()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.WithLockTTL(2*time.Second),
@@ -143,7 +143,7 @@ func (maybeStringCodec) Decode(b []byte, dst any) error {
 
 func newIntKeyCache(t *testing.T, valCodec redcache.Codec) *redcache.Cache {
 	t.Helper()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	prefix := uuid.New().String() + ":"
 	codec := redcache.KeyCodecFunc[int](func(i int) (string, error) {
 		return prefix + strconv.Itoa(i), nil
@@ -348,7 +348,7 @@ func TestTyped_ForceSetMulti_IntKeys_PartialEncodeFailure(t *testing.T) {
 }
 
 func TestTyped_ForceSetMulti_IntKeys_PartialKeyEncodeFailure(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	wantErr := errors.New("key encode failed")
 	prefix := uuid.New().String() + ":"
 	codec := redcache.KeyCodecFunc[int](func(i int) (string, error) {
@@ -398,7 +398,7 @@ func TestTyped_ForceSetMulti_IntKeys_PartialKeyEncodeFailure(t *testing.T) {
 }
 
 func TestTyped_ForceSetMulti_IntKeys_DuplicateEncodedKeyFailure(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.WithLockTTL(2*time.Second),

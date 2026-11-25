@@ -71,7 +71,7 @@ func (m *capturingMetrics) RedisError(op string) {
 
 func TestMetrics_HitAndMiss(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -102,7 +102,7 @@ func TestMetrics_HitAndMiss(t *testing.T) {
 // Refresh metric tests use wall-clock Redis TTL transitions and run serially
 // so package-wide load cannot turn a refresh assertion into foreground expiry.
 func TestMetrics_RefreshTriggered(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -136,7 +136,7 @@ func TestMetrics_RefreshTriggered(t *testing.T) {
 }
 
 func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -181,7 +181,7 @@ func TestMetrics_RefreshPanickedIncludesKey(t *testing.T) {
 // TestMetrics_RefreshErrorOnCallbackError verifies a failing refresh-ahead callback
 // emits RefreshError tagged with the affected key.
 func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -226,7 +226,7 @@ func TestMetrics_RefreshErrorOnCallbackError(t *testing.T) {
 // TestMetrics_RefreshDroppedUnderBackpressure verifies RefreshDropped fires when
 // the refresh queue saturates.
 func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -281,7 +281,7 @@ func TestMetrics_RefreshDroppedUnderBackpressure(t *testing.T) {
 func TestMetrics_LockWaitDuration(t *testing.T) {
 	// This assertion uses a real wall-clock hold; keep it isolated from the
 	// package's other parallel Redis timing tests.
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -351,7 +351,7 @@ func TestMetrics_LockWaitDuration(t *testing.T) {
 // LoaderDuration with a non-zero accumulated time.
 func TestMetrics_LoaderDuration(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -380,7 +380,7 @@ func TestMetrics_LoaderDuration(t *testing.T) {
 // LoaderDuration and LoaderErrors(1).
 func TestMetrics_LoaderErrors(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -408,7 +408,7 @@ func TestMetrics_LoaderErrors(t *testing.T) {
 // emits RedisError tagged with the failing op.
 func TestMetrics_RedisError(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -436,7 +436,7 @@ func TestMetrics_RedisError(t *testing.T) {
 
 func TestMetrics_RedisErrorOnGetMultiReadFailure(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
@@ -463,7 +463,7 @@ func TestMetrics_RedisErrorOnGetMultiReadFailure(t *testing.T) {
 
 func TestMetrics_RedisErrorOnSetReadFailure(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	metrics := &capturingMetrics{}
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},

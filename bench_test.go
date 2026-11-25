@@ -17,7 +17,7 @@ import (
 // plus the Conn for benches that need the raw client.
 func makeBenchClient(b *testing.B) (*redcache.Cache, *redcache.Conn) {
 	b.Helper()
-	skipIfNoRedis(b)
+	skipInShortMode(b)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: []string{"127.0.0.1:6379"},
@@ -263,7 +263,7 @@ func BenchmarkForceSetMulti(b *testing.B) {
 // BenchmarkCache_Get_Refresh measures the refresh-ahead-triggering path.
 func BenchmarkCache_Get_Refresh(b *testing.B) {
 	b.ReportAllocs()
-	skipIfNoRedis(b)
+	skipInShortMode(b)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.WithLockTTL(5*time.Second),
@@ -297,7 +297,7 @@ func BenchmarkCache_Get_Refresh(b *testing.B) {
 // BenchmarkCache_GetMulti_Refresh measures the multi-key refresh-ahead path.
 func BenchmarkCache_GetMulti_Refresh(b *testing.B) {
 	b.ReportAllocs()
-	skipIfNoRedis(b)
+	skipInShortMode(b)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.WithLockTTL(5*time.Second),

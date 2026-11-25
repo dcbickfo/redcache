@@ -19,7 +19,7 @@ const reloadedValue = "reloaded"
 
 func openLockRecoveryCache(t *testing.T, opts ...redcache.Option) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(rueidis.ClientOption{InitAddress: addr},
 		append([]redcache.Option{redcache.WithLockTTL(recoveryLockTTL)}, opts...)...)
 	require.NoError(t, err)

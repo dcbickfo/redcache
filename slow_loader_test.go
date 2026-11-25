@@ -19,7 +19,7 @@ const shortLockTTL = 200 * time.Millisecond
 
 func openShortLock(t *testing.T, lockTTL time.Duration) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: addr},
 		redcache.WithLockTTL(lockTTL),

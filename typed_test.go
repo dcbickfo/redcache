@@ -41,7 +41,7 @@ func TestCache_InfersValueTypesPerOperation(t *testing.T) {
 }
 
 func TestCache_StoresDifferentValueTypesWithOneJSONCodec(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.WithLockTTL(2*time.Second),
@@ -85,7 +85,7 @@ func TestCache_StoresDifferentValueTypesWithOneJSONCodec(t *testing.T) {
 }
 
 func TestCache_ReturnsCodecTypeMismatch(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.WithLockTTL(2*time.Second),
@@ -144,7 +144,7 @@ func TestTyped_Get_LoadsAndCaches(t *testing.T) {
 }
 
 func TestTyped_Get_DecodeErrorIsWrapped(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.WithLockTTL(2*time.Second),
@@ -171,7 +171,7 @@ func TestTyped_Get_DecodeErrorIsWrapped(t *testing.T) {
 }
 
 func TestTyped_Get_DecodeErrorPreservesUnderlying(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.WithLockTTL(2*time.Second),
@@ -202,7 +202,7 @@ func TestTyped_Get_DecodeErrorPreservesUnderlying(t *testing.T) {
 }
 
 func TestNewBytes_EmptyPayloadRoundTrip(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.WithLockTTL(2*time.Second),
@@ -284,7 +284,7 @@ func TestTyped_Touch_ExtendsTTL(t *testing.T) {
 }
 
 func TestTyped_RefreshAhead_FiresThroughTypedView(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},
 		redcache.WithLockTTL(500*time.Millisecond),
@@ -370,7 +370,7 @@ func TestTyped_GetMulti_LoadsAndCaches(t *testing.T) {
 }
 
 func TestTyped_GetMulti_IntKeys(t *testing.T) {
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	prefix := uuid.New().String() + ":"
 	codec := redcache.KeyCodecFunc[int](func(i int) (string, error) {
 		return prefix + strconv.Itoa(i), nil

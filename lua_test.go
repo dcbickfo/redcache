@@ -19,7 +19,7 @@ var scriptLoadCalls = regexp.MustCompile(`cmdstat_script\|load:calls=(\d+)`)
 
 func TestLuaScript_ExecMultiFallsBackToEvalWithoutScriptLoad(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	ctx := t.Context()
 	client, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}})
 	require.NoError(t, err)
@@ -104,7 +104,7 @@ func BenchmarkLuaScript_ExecMulti(b *testing.B) {
 // not persist it; -1 (no expiry) stays persistent and a positive PTTL is kept.
 func TestRestoreValueOrDeleteScript_BackupPTTL(t *testing.T) {
 	t.Parallel()
-	skipIfNoRedis(t)
+	skipInShortMode(t)
 	ctx := t.Context()
 	client, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}})
 	require.NoError(t, err)
