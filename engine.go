@@ -2,8 +2,10 @@ package redcache
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -116,6 +118,10 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	// invalidation stream share a pipe. ClientBuilder can override.
 	clientOption.PipelineMultiplex = -1
 	clientOption.OnInvalidations = rca.onInvalidate
+	pipeLimit := rca.readBarrierPipeLimit(clientOption, cfg)
+	if pipeLimit != 0 {
+		rca.watchBarrierDials(&clientOption)
+	}
 
 	var err error
 	if cfg.clientBuilder != nil {
@@ -126,6 +132,12 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	if err != nil {
 		return nil, err
 	}
+	// Cluster replies in rueidis v1.0.75 hide MOVED/ASK and the serving
+	// pipe, and a slot can move between live pipes without a nil push.
+	// Sentinel can switch masters as well. Both keep the deadline fallback.
+	if rca.client.Mode() == rueidis.ClientModeStandalone {
+		rca.writeMarks.pipeLimit = pipeLimit
+	}
 
 	if rca.refreshAfter > 0 {
 		rca.refreshCtx, rca.refreshCancel = context.WithCancel(context.Background())
@@ -135,6 +147,54 @@ func newCacheAside(clientOption rueidis.ClientOption, cfg config) (*cacheAside, 
 	}
 
 	return rca, nil
+}
+
+func (rca *cacheAside) readBarrierPipeLimit(opt rueidis.ClientOption, cfg config) int {
+	// Builders can change the multiplexing, routing or callbacks. The
+	// returned Client does not expose its effective options.
+	if cfg.clientBuilder != nil || !rca.trackBypasses || opt.DisableAutoPipelining || opt.ConnLifetime != 0 || opt.Standalone.EnableRedirect {
+		return 0
+	}
+	// NOLOOP suppresses our own pushes. BCAST, OPTOUT and REDIRECT do not
+	// provide the required OPTIN tracking on this pipeline.
+	for _, option := range opt.ClientTrackingOptions {
+		if !strings.EqualFold(option, "OPTIN") {
+			return 0
+		}
+	}
+	if opt.BlockingPipeline == 0 {
+		return rueidis.DefaultBlockingPipeline
+	}
+	return opt.BlockingPipeline
+}
+
+func (rca *cacheAside) watchBarrierDials(opt *rueidis.ClientOption) {
+	dialCtx, dial := opt.DialCtxFn, opt.DialFn
+	opt.DialCtxFn = func(ctx context.Context, addr string, dialer *net.Dialer, config *tls.Config) (net.Conn, error) {
+		conn, err := dialRedis(ctx, addr, dialer, config, dialCtx, dial)
+		if err == nil {
+			// The mux may install a new socket before the old reader delivers
+			// its nil callback. Change the wire stamp before exposing it.
+			rca.writeMarks.wire.Add(1)
+		}
+		return conn, err
+	}
+}
+
+func dialRedis(ctx context.Context, addr string, dialer *net.Dialer, config *tls.Config,
+	dialCtx func(context.Context, string, *net.Dialer, *tls.Config) (net.Conn, error),
+	dial func(string, *net.Dialer, *tls.Config) (net.Conn, error),
+) (net.Conn, error) {
+	switch {
+	case dialCtx != nil:
+		return dialCtx(ctx, addr, dialer, config)
+	case dial != nil:
+		return dial(addr, dialer, config)
+	case config != nil:
+		return (&tls.Dialer{NetDialer: dialer, Config: config}).DialContext(ctx, "tcp", addr)
+	default:
+		return dialer.DialContext(ctx, "tcp", addr)
+	}
 }
 
 func canTrackBypasses(opt rueidis.ClientOption) bool {

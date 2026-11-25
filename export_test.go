@@ -67,6 +67,11 @@ func (c *ReadPathCountsForTest) Option() Option {
 	})
 }
 
+func (c *ReadPathCountsForTest) Observe(conn *Conn) {
+	engine := conn.core.(*cacheAside)
+	engine.client = &countReadPaths{Client: engine.client, counts: c}
+}
+
 type countReadPaths struct {
 	rueidis.Client
 	counts *ReadPathCountsForTest
@@ -114,8 +119,10 @@ func (c *countReadPaths) DoMulti(ctx context.Context, cmds ...rueidis.Completed)
 
 type WriteMarkCountsForTest struct {
 	Invalidated int64
+	Barrier     int64
 	Expired     int64
 	AtCap       int64
+	Reset       int64
 	Live        int64
 }
 
@@ -126,7 +133,10 @@ func WriteMarkStatsForTest(conn *Conn) WriteMarkCountsForTest {
 func writeMarkCounts(m *writeMarks) WriteMarkCountsForTest {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return WriteMarkCountsForTest{Invalidated: m.invalidated, Expired: m.expired, AtCap: m.atCap, Live: int64(len(m.marks))}
+	return WriteMarkCountsForTest{
+		Invalidated: m.invalidated, Barrier: m.barrier, Expired: m.expired,
+		AtCap: m.atCap, Reset: m.resetCount, Live: int64(len(m.marks)),
+	}
 }
 
 type WriteMarksForTest struct{ state writeMarks }
@@ -145,6 +155,21 @@ func (m *WriteMarksForTest) Bypass(key string, now time.Time) bool {
 func (m *WriteMarksForTest) Invalidate(key string)          { m.state.invalidate(key) }
 func (m *WriteMarksForTest) Reset(now time.Time)            { m.state.reset(now) }
 func (m *WriteMarksForTest) Counts() WriteMarkCountsForTest { return writeMarkCounts(&m.state) }
+
+func NewWriteMarksForTest(pipeLimit int) *WriteMarksForTest {
+	return &WriteMarksForTest{state: writeMarks{pipeLimit: pipeLimit}}
+}
+
+func (m *WriteMarksForTest) ReadBarrier(key string, commands int, now time.Time) func() {
+	barriers := m.state.readBarriers([]string{key}, commands, now)
+	return func() {
+		if len(barriers) != 0 {
+			m.state.finishBarrier(key, barriers[0])
+		}
+	}
+}
+
+func (m *WriteMarksForTest) Redial() { m.state.wire.Add(1) }
 
 func HasWaitEntryForTest(conn *Conn, key string) bool {
 	_, ok := conn.core.(*cacheAside).locks.Load(key)

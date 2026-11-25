@@ -347,3 +347,19 @@ func BenchmarkForceSetThenGet(b *testing.B) {
 	}
 	b.ReportMetric(float64(paths.Bypasses.Load())/float64(b.N), "bypass_reads/write")
 }
+
+// BenchmarkForceSetParallel measures shared-Conn write contention.
+func BenchmarkForceSetParallel(b *testing.B) {
+	cache, _ := makeBenchClient(b)
+	ctx := b.Context()
+	b.SetParallelism(2)
+	runBenchParallel(b, func(pb *testing.PB) error {
+		key := "parallel-write:" + uuid.New().String()
+		for pb.Next() {
+			if err := cache.ForceSet(ctx, time.Minute, key, "value"); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}

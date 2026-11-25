@@ -371,11 +371,12 @@ Every cache shares the Conn's client and invalidation stream, and a single
 JSON-backed cache serves any key and value types on each operation.
 
 Reads through the same `Conn` see its acknowledged writes. For a recently
-written key, redcache reads directly from Redis until it receives the
-invalidation or a fixed one-second deadline expires. An invalidation that
-arrives after that deadline can briefly expose an older cached value. A
-second `Conn`, even in the same process, is eventually consistent and sees
-the write when its own invalidation arrives.
+written key, redcache reads directly from Redis until invalidation clears the
+mark or a fixed one-second deadline expires. On a standalone tracking pipe,
+a successful bypass GET sent after the write can clear the mark sooner.
+An invalidation that arrives after the deadline can briefly expose an older
+cached value. A second `Conn`, even in the same process, is eventually
+consistent and sees the write when its own invalidation arrives.
 
 ```go
 conn, err := redcache.Open(

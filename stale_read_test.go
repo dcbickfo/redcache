@@ -19,14 +19,35 @@ import (
 func TestReadYourWritesAfterForceSetMulti(t *testing.T) {
 	t.Run("standalone", func(t *testing.T) {
 		var paths redcache.ReadPathCountsForTest
-		cache, conn := makeClient(t, addr, paths.Option())
+		cache, conn := makeClient(t, addr)
+		paths.Observe(conn)
 		checkReadYourWrites(t, cache, conn, &paths)
 	})
 	t.Run("cluster", func(t *testing.T) {
 		var paths redcache.ReadPathCountsForTest
-		cache, conn := makeClusterClient(t, paths.Option())
+		cache, conn := makeClusterClient(t)
+		paths.Observe(conn)
 		checkReadYourWrites(t, cache, conn, &paths)
 	})
+}
+
+func TestReadBarrierAfterFill(t *testing.T) {
+	cache, conn := makeClient(t, addr)
+	var paths redcache.ReadPathCountsForTest
+	paths.Observe(conn)
+	ctx := t.Context()
+	key := "barrier-fill:" + uuid.New().String()
+	load := func(context.Context, string) (string, error) { return "fresh", nil }
+	_, err := cache.Get(ctx, time.Minute, key, load)
+	require.NoError(t, err)
+	for range 4 {
+		got, hit, err := cache.Peek[string, string](ctx, time.Minute, key)
+		require.NoError(t, err)
+		require.True(t, hit)
+		require.Equal(t, "fresh", got)
+	}
+	require.EqualValues(t, 1, paths.Bypasses.Load(), "one plain GET should end the mark")
+	require.GreaterOrEqual(t, paths.CacheHits.Load(), int64(2))
 }
 
 func checkReadYourWrites(t *testing.T, cache *redcache.Cache, conn *redcache.Conn, paths *redcache.ReadPathCountsForTest) {
@@ -55,9 +76,10 @@ func checkReadYourWrites(t *testing.T, cache *redcache.Cache, conn *redcache.Con
 	stats := redcache.WriteMarkStatsForTest(conn)
 	// Include writes that reused an existing mark in the denominator so a hot
 	// key that stays marked across many writes cannot inflate the share.
-	total := max(int64(workers*iterations*nkeys), stats.Invalidated+stats.Expired+stats.AtCap+stats.Live)
-	t.Logf("reads=%d stale=%d cache_hits=%d bypass_reads=%d invalidated=%d expired=%d cap=%d live=%d",
-		reads.Load(), stale.Load(), paths.CacheHits.Load(), paths.Bypasses.Load(), stats.Invalidated, stats.Expired, stats.AtCap, stats.Live)
+	cleared := stats.Invalidated + stats.Barrier
+	total := max(int64(workers*iterations*nkeys), cleared+stats.Expired+stats.AtCap+stats.Reset+stats.Live)
+	t.Logf("reads=%d stale=%d cache_hits=%d bypass_reads=%d invalidated=%d barrier=%d expired=%d cap=%d reset=%d live=%d",
+		reads.Load(), stale.Load(), paths.CacheHits.Load(), paths.Bypasses.Load(), stats.Invalidated, stats.Barrier, stats.Expired, stats.AtCap, stats.Reset, stats.Live)
 	require.EqualValues(t, workers*iterations*nkeys, reads.Load())
 	if stale.Load() != 0 {
 		t.Errorf("read %d stale values after acknowledged writes", stale.Load())
@@ -65,8 +87,8 @@ func checkReadYourWrites(t *testing.T, cache *redcache.Cache, conn *redcache.Con
 	if paths.Bypasses.Load() == 0 {
 		t.Error("expected plain bypass reads")
 	}
-	if 10*stats.Invalidated < 9*total {
-		t.Errorf("expected invalidations to end at least 90%% of marks, got %d/%d", stats.Invalidated, total)
+	if 100*cleared < 99*total {
+		t.Errorf("expected invalidations and barriers to end at least 99%% of marks, got %d/%d", cleared, total)
 	}
 }
 
@@ -155,7 +177,7 @@ func TestWriteMarkNilInvalidation(t *testing.T) {
 	now := time.Now()
 	finish := marks.Begin([]string{"in-flight", "another-slot"}, now, 10)
 	marks.Reset(now)
-	require.Equal(t, redcache.WriteMarkCountsForTest{Invalidated: 2}, marks.Counts())
+	require.Equal(t, redcache.WriteMarkCountsForTest{Reset: 2}, marks.Counts())
 
 	// A nil callback can come from one node. Other nodes' active writes stay
 	// covered even though the per-key table has been cleared.
@@ -240,4 +262,177 @@ func changeMarkedValue(ctx context.Context, cache *redcache.Cache, name, key str
 	default:
 		panic("unknown cache operation: " + name)
 	}
+}
+
+func TestWriteMarkBarrierOrdering(t *testing.T) {
+	const key = "ordered"
+	marks := redcache.NewWriteMarksForTest(10)
+	now := time.Now()
+	marks.Begin([]string{key}, now, 10)(now, true)
+	oldRead := marks.ReadBarrier(key, 2, now)
+
+	next := marks.Begin([]string{key}, now, 10)
+	oldRead()
+	require.True(t, marks.Bypass(key, now), "another write is in flight")
+	readDuringWrite := marks.ReadBarrier(key, 2, now)
+	next(now, true)
+
+	oldRead()
+	readDuringWrite()
+	require.True(t, marks.Bypass(key, now), "both GETs preceded the last acknowledgement")
+	marks.ReadBarrier(key, 2, now)()
+	require.Equal(t, redcache.WriteMarkCountsForTest{Barrier: 1}, marks.Counts())
+}
+
+func TestWriteMarkBarrierAfterResetOrRedial(t *testing.T) {
+	const key = "reset"
+	for _, name := range []string{"nil invalidation", "redial before nil callback"} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Now()
+			marks := redcache.NewWriteMarksForTest(10)
+			marks.Begin([]string{key}, now, 10)(now, true)
+			oldRead := marks.ReadBarrier(key, 2, now)
+			if name == "nil invalidation" {
+				marks.Reset(now)
+			} else {
+				marks.Redial()
+			}
+			oldRead()
+			require.True(t, marks.Bypass(key, now))
+			require.Zero(t, marks.Counts().Barrier)
+			require.False(t, marks.Bypass(key, now.Add(time.Second)))
+		})
+	}
+}
+
+func TestWriteMarkBarrierBlockingPipeline(t *testing.T) {
+	now := time.Now()
+	const key = "pooled"
+	marks := redcache.NewWriteMarksForTest(2)
+	marks.Begin([]string{key, "second-key"}, now, 10)(now, true)
+	marks.ReadBarrier(key, 1, now)()
+	require.True(t, marks.Bypass(key, now), "the write used the pool")
+	marks.Begin([]string{key}, now, 10)(now, true)
+	marks.ReadBarrier(key, 2, now)()
+	require.True(t, marks.Bypass(key, now), "the GET used the pool")
+	marks.ReadBarrier(key, 1, now)()
+	require.False(t, marks.Bypass(key, now))
+}
+
+func TestReadBarrierFIFO(t *testing.T) {
+	for _, mode := range []string{"standalone", "cluster"} {
+		t.Run(mode, func(t *testing.T) {
+			const iterations = 2000
+			ctx := t.Context()
+			key := "barrier-fifo:" + uuid.New().String()
+			var pushes atomic.Int64
+			opt := redcache.WithClientBuilder(func(opt rueidis.ClientOption) (rueidis.Client, error) {
+				opt.OnInvalidations = func(messages []rueidis.RedisMessage) {
+					for _, msg := range messages {
+						if k, err := msg.ToString(); err == nil && k == key {
+							pushes.Add(1)
+						}
+					}
+				}
+				return rueidis.NewClient(opt)
+			})
+			var conn *redcache.Conn
+			if mode == "cluster" {
+				_, conn = makeClusterClient(t, opt)
+			} else {
+				_, conn = makeClient(t, addr, opt)
+			}
+			client := conn.Client()
+			require.NoError(t, client.Do(ctx, client.B().Set().Key(key).Value("initial").Px(time.Minute).Build()).Error())
+			first := trackedGET(t, client, key, "initial")
+			for i := range iterations {
+				value := strconv.Itoa(i)
+				replies := client.DoMulti(ctx,
+					client.B().ClientId().Build().SetSlot(key),
+					client.B().Set().Key(key).Value(value).Px(time.Minute).Build(),
+				)
+				writerID, err := replies[0].AsInt64()
+				require.NoError(t, err)
+				require.NoError(t, replies[1].Error())
+				readerID := trackedGET(t, client, key, value)
+				require.Equal(t, first, writerID)
+				require.Equal(t, writerID, readerID)
+				require.EqualValues(t, i+1, pushes.Load(), "push must precede the post-ack GET reply")
+			}
+			t.Logf("same-pipe post-ack GETs with preceding pushes = %d", pushes.Load())
+		})
+	}
+}
+
+func trackedGET(t *testing.T, client rueidis.Client, key, want string) int64 {
+	t.Helper()
+	replies := client.DoMulti(t.Context(),
+		client.B().ClientId().Build().SetSlot(key),
+		client.B().ClientCaching().Yes().Build().SetSlot(key),
+		client.B().Get().Key(key).Build(),
+	)
+	id, err := replies[0].AsInt64()
+	require.NoError(t, err)
+	require.NoError(t, replies[1].Error())
+	value, err := replies[2].ToString()
+	require.NoError(t, err)
+	require.Equal(t, want, value)
+	return id
+}
+
+func TestReadBarrierIneligibleConnections(t *testing.T) {
+	cases := []struct {
+		name string
+		opt  rueidis.ClientOption
+	}{
+		{name: "NOLOOP", opt: rueidis.ClientOption{ClientTrackingOptions: []string{"OPTIN", "NOLOOP"}}},
+		{name: "BCAST", opt: rueidis.ClientOption{ClientTrackingOptions: []string{"BCAST"}}},
+		{name: "OPTOUT", opt: rueidis.ClientOption{ClientTrackingOptions: []string{"OPTOUT"}}},
+		{name: "cache disabled", opt: rueidis.ClientOption{DisableCache: true}},
+		{name: "pipelining disabled", opt: rueidis.ClientOption{DisableAutoPipelining: true}},
+		{name: "pooled GET", opt: rueidis.ClientOption{BlockingPipeline: 2}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			skipIfNoRedis(t)
+			tc.opt.InitAddress = addr
+			conn, err := redcache.Open(tc.opt)
+			require.NoError(t, err)
+			t.Cleanup(conn.Close)
+			assertNoReadBarrier(t, redcache.New(conn, redcache.StringCodec{}), conn)
+		})
+	}
+	t.Run("multiplexed builder", func(t *testing.T) {
+		builder := redcache.WithClientBuilder(func(opt rueidis.ClientOption) (rueidis.Client, error) {
+			opt.PipelineMultiplex = 2
+			return rueidis.NewClient(opt)
+		})
+		cache, conn := makeClient(t, addr, builder)
+		assertNoReadBarrier(t, cache, conn)
+	})
+}
+
+func assertNoReadBarrier(t *testing.T, cache *redcache.Cache, conn *redcache.Conn) {
+	t.Helper()
+	ctx := t.Context()
+	key := "barrier-config:" + uuid.New().String()
+	require.NoError(t, cache.ForceSet(ctx, time.Minute, key, "value"))
+	value, hit, err := cache.Peek[string, string](ctx, time.Minute, key)
+	require.NoError(t, err)
+	require.True(t, hit)
+	require.Equal(t, "value", value)
+	require.Zero(t, redcache.WriteMarkStatsForTest(conn).Barrier)
+}
+
+func TestReadBarrierErroredGET(t *testing.T) {
+	cache, conn := makeClient(t, addr)
+	raw := conn.Client()
+	ctx := t.Context()
+	key := "barrier-error:" + uuid.New().String()
+	require.NoError(t, cache.ForceSet(ctx, time.Minute, key, "value"))
+	require.NoError(t, raw.Do(ctx, raw.B().Del().Key(key).Build()).Error())
+	require.NoError(t, raw.Do(ctx, raw.B().Lpush().Key(key).Element("list").Build()).Error())
+	_, _, err := cache.Peek[string, string](ctx, time.Minute, key)
+	require.ErrorContains(t, err, "WRONGTYPE")
+	require.Equal(t, redcache.WriteMarkCountsForTest{Live: 1}, redcache.WriteMarkStatsForTest(conn))
 }

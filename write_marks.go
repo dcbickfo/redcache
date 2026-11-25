@@ -19,29 +19,45 @@ type writeMark struct {
 	invalidated bool
 	overlapped  bool
 	failed      bool
+	noBarrier   bool
+	ack         uint64
+	wire        uint64
 }
 
 // writeTicket describes a batch's tracked prefix. The remaining keys use the
 // global bypass. A reset moves every outstanding ticket to the global bypass.
 type writeTicket struct {
 	epoch uint64
+	wire  uint64
 	keys  int
+}
+
+type readBarrier struct {
+	epoch uint64
+	wire  uint64
+	ack   uint64
 }
 
 type writeMarks struct {
 	active atomic.Bool
+	wire   atomic.Uint64
 	mu     sync.RWMutex
 	marks  map[string]writeMark
+	// Zero disables barriers. A negative limit means rueidis has no batch cutoff.
+	pipeLimit int
 
 	epoch       uint64
+	ack         uint64
 	inFlight    int
 	global      int
 	bypassUntil time.Time
 	nextSweep   time.Time
 
 	invalidated int64
+	barrier     int64
 	expired     int64
 	atCap       int64
+	resetCount  int64
 }
 
 func (m *writeMarks) begin(keys []string, now time.Time, limit int) writeTicket {
@@ -55,12 +71,15 @@ func (m *writeMarks) begin(keys []string, now time.Time, limit int) writeTicket 
 	if !now.Before(m.nextSweep) {
 		m.sweep(now)
 	}
+	ticket := writeTicket{epoch: m.epoch, wire: m.wire.Load(), keys: len(keys)}
+	noBarrier := !m.onTrackingPipe(len(keys))
 	for i, key := range keys {
 		mark, exists := m.marks[key]
 		if !exists && len(m.marks) == limit {
 			m.global++
 			m.atCap += int64(len(keys) - i)
-			return writeTicket{epoch: m.epoch, keys: i}
+			ticket.keys = i
+			return ticket
 		}
 		if mark.inFlight == 0 {
 			mark = writeMark{}
@@ -68,9 +87,10 @@ func (m *writeMarks) begin(keys []string, now time.Time, limit int) writeTicket 
 			mark.overlapped = true
 		}
 		mark.inFlight++
+		mark.noBarrier = mark.noBarrier || noBarrier
 		m.marks[key] = mark
 	}
-	return writeTicket{epoch: m.epoch, keys: len(keys)}
+	return ticket
 }
 
 func (m *writeMarks) finish(keys []string, ticket writeTicket, now time.Time, succeeded func(int) bool) {
@@ -82,23 +102,26 @@ func (m *writeMarks) finish(keys []string, ticket writeTicket, now time.Time, su
 		m.extendGlobalBypass(now)
 	}
 	if ticket.epoch == m.epoch {
+		m.ack++
 		for i, key := range keys[:ticket.keys] {
-			m.finishKey(key, now, succeeded(i))
+			m.finishKey(key, now, succeeded(i), ticket.wire)
 		}
 	}
 	m.updateActive()
 }
 
-func (m *writeMarks) finishKey(key string, now time.Time, succeeded bool) {
+func (m *writeMarks) finishKey(key string, now time.Time, succeeded bool, wire uint64) {
 	mark := m.marks[key]
 	mark.inFlight--
 	mark.failed = mark.failed || !succeeded
+	mark.noBarrier = mark.noBarrier || wire != m.wire.Load()
 	if mark.inFlight == 0 {
 		if mark.invalidated && !mark.overlapped && !mark.failed {
 			m.removeInvalidated(key)
 			return
 		}
 		mark.deadline = now.Add(writeMarkTTL)
+		mark.ack, mark.wire = m.ack, wire
 	}
 	m.marks[key] = mark
 }
@@ -131,11 +154,53 @@ func (m *writeMarks) reset(now time.Time) {
 		// Keep the same grace period for keys past the cleared pipe.
 		m.extendGlobalBypass(now)
 	}
-	m.invalidated += int64(len(m.marks))
+	m.resetCount += int64(len(m.marks))
 	m.marks = nil
 	m.epoch++
 	m.global = m.inFlight
 	m.updateActive()
+}
+
+func (m *writeMarks) onTrackingPipe(commands int) bool {
+	// At the cutoff either a writer or a bypass batch can use the blocking pool.
+	return m.pipeLimit < 0 || commands < m.pipeLimit
+}
+
+func (m *writeMarks) readBarriers(keys []string, commands int, now time.Time) []readBarrier {
+	if !m.onTrackingPipe(commands) {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.global > 0 || now.Before(m.bypassUntil) {
+		return nil
+	}
+	wire := m.wire.Load()
+	var barriers []readBarrier
+	for i, key := range keys {
+		mark, exists := m.marks[key]
+		if exists && mark.inFlight == 0 && !mark.failed && !mark.noBarrier && mark.wire == wire && now.Before(mark.deadline) {
+			if barriers == nil {
+				barriers = make([]readBarrier, len(keys))
+			}
+			barriers[i] = readBarrier{epoch: m.epoch, wire: wire, ack: mark.ack}
+		}
+	}
+	return barriers
+}
+
+func (m *writeMarks) finishBarrier(key string, barrier readBarrier) {
+	if barrier.ack == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mark, exists := m.marks[key]
+	if exists && mark.inFlight == 0 && mark.ack == barrier.ack && m.epoch == barrier.epoch && m.wire.Load() == barrier.wire {
+		delete(m.marks, key)
+		m.barrier++
+		m.updateActive()
+	}
 }
 
 func (m *writeMarks) bypass(key string) bool {

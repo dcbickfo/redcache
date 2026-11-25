@@ -2,6 +2,7 @@ package redcache
 
 import (
 	"context"
+	"time"
 
 	"github.com/redis/rueidis"
 )
@@ -39,16 +40,32 @@ func (rca *cacheAside) bypassReads(ctx context.Context, keys []string, refreshTT
 			cmds = append(cmds, rca.client.B().Pttl().Key(key).Build())
 		}
 	}
+	var barriers []readBarrier
+	if rca.trackBypasses && rca.writeMarks.onTrackingPipe(len(cmds)) {
+		barriers = rca.writeMarks.readBarriers(keys, len(cmds), time.Now())
+	}
+	// CLIENT CACHING YES is not retryable in rueidis. Its presence makes the
+	// standalone pipeline non-retryable. The config check excludes ConnLifetime
+	// (which otherwise retries expired pipes) and all implicit routing changes.
 	replies := rca.client.DoMulti(ctx, cmds...)
 	if len(replies) != len(cmds) {
 		return nil, nil
 	}
+	return rca.unpackBypassReads(keys, replies, barriers, stride, getOffset, refreshTTL)
+}
+
+func (rca *cacheAside) unpackBypassReads(keys []string, replies []rueidis.RedisResult, barriers []readBarrier, stride, getOffset int, refreshTTL bool) ([]rueidis.RedisResult, bypassTTLs) {
 	var ttls bypassTTLs
 	if refreshTTL {
 		ttls = make(bypassTTLs, len(keys))
 	}
 	for i := range keys {
 		index := i*stride + getOffset
+		if barriers != nil && replies[index-1].Error() == nil && replies[index].Error() == nil {
+			// The write had completed before dispatch. The read loop delivered
+			// any preceding push on this pipe before delivering the GET reply.
+			rca.writeMarks.finishBarrier(keys[i], barriers[i])
+		}
 		replies[i] = replies[index]
 		if refreshTTL {
 			ttl, err := replies[index+1].AsInt64()
