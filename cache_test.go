@@ -34,14 +34,14 @@ func skipIfNoRedis(tb testing.TB) {
 // makeClient opens a Conn and derives a string view over it. The Conn is closed
 // via t.Cleanup, so callers need no teardown of their own. The Conn is returned
 // too for tests that inspect Redis directly (conn.Client()).
-func makeClient(t *testing.T, addr []string) (*redcache.Cache, *redcache.Conn) {
+func makeClient(t *testing.T, addr []string, opts ...redcache.Option) (*redcache.Cache, *redcache.Conn) {
 	t.Helper()
 	skipIfNoRedis(t)
 	conn, err := redcache.Open(
 		rueidis.ClientOption{
 			InitAddress: addr,
 		},
-		redcache.WithLockTTL(time.Second),
+		append([]redcache.Option{redcache.WithLockTTL(time.Second)}, opts...)...,
 	)
 	if err != nil {
 		t.Fatal(err)

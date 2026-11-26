@@ -370,6 +370,82 @@ Open one `Conn`, then construct one cache per codec pair the service needs.
 Every cache shares the Conn's client and invalidation stream, and a single
 JSON-backed cache serves any key and value types on each operation.
 
+Reads through the same `Conn` see its acknowledged writes. For a recently
+written key, redcache bypasses the local cache and reads directly from Redis
+until the key's mark ends. A mark also expires one second after the write
+completes. The table shows the cost for reads started after a fill or explicit
+write completes.
+
+| Connection | After a `Get` or `GetMulti` loader fill | After `Set`, `SetMulti`, `ForceSet*`, or `Del*` |
+| --- | --- | --- |
+| Standalone, default tracking | One direct Redis GET, then local caching resumes. | One direct Redis GET, including a missing-key reply after `Del` or `DelMulti`, then local caching resumes. |
+| Cluster | Direct Redis reads until an invalidation for the key arrives or one second passes. Measured at the full second. | The same rule. Measured at the full second after `Set*`, and after `ForceSet*` on a key this Conn is not tracking. About one round trip after `ForceSet*` on a key it is tracking. `Del*` takes the `ForceSet*` code path, unmeasured. |
+| Sentinel | Direct Redis GETs until invalidation or the one-second deadline. | Direct Redis GETs until invalidation or the one-second deadline. |
+| Custom `ClientBuilder` | Direct Redis GETs until invalidation or the one-second deadline. | Direct Redis GETs until invalidation or the one-second deadline. |
+| Explicit `DisableCache` or RESP2 | Ordinary Redis reads with no marks. | Ordinary Redis reads with no marks. |
+| `NOLOOP` or `SendToReplicas` | No read-your-writes guarantee; see below. | No read-your-writes guarantee; see below. |
+
+**Standalone with default tracking** promises read-your-writes on a `Conn`
+while the mark is live. The read that ends the mark is sent on the connection
+that receives invalidations. Redis queues any pending invalidation for the key
+ahead of that read's reply, and the client evicts the local entry before it
+delivers the reply. An invalidation never ends the mark on this connection,
+because it can belong to an earlier write, by this `Conn` or another client, and
+the invalidation for a `Conn`'s own write follows its reply. Concurrent first
+reads can each issue a GET before the first reply ends the mark. Pool routing,
+an error reply, or a reconnect leaves the deadline in effect. If a write's
+invalidation arrives after the one-second deadline, the mark has expired, and
+every local hit returns the older entry until that invalidation evicts it.
+
+**Cluster** is supported. A mark ends when an invalidation push for the key
+arrives or at the one-second deadline, whichever comes first. A read-through
+fill and every `Set*` take a lock by writing the key. That lock write uses up
+this connection's tracking of the key before the mark begins, so the value
+write sends this connection no invalidation. A `ForceSet*` on a key this
+connection is not tracking sends none either. In practice the key is read
+directly from the server for the full second, one network round trip per read,
+and then served from the local cache. A `ForceSet*` on a key this connection is
+tracking, such as after a tracked read just before it, ends the mark in about
+one round trip. `Del*` sets and ends marks by the same code path as
+`ForceSet*`, and was not measured separately. Standalone with default tracking
+ends the window after one read.
+
+Measured on 2026-11-25 on a Redis 7.2 cluster, 500 fills per case, on a loaded
+shared host, on a build whose cluster path matches this release (PR #45). The
+baseline is main at 4cc10985, which has no marks.
+
+| Measurement | Median time to first local hit | How the mark ended |
+| --- | --- | --- |
+| Read-through fill, this version | 1.000 s | Deadline, 500 of 500 (483 at a read, 17 by sweep) |
+| Read-through fill, baseline (no marks) | 123 µs | No mark |
+| `ForceSet` on a key this Conn is not tracking, this version | 1.000 s | Deadline, 500 of 500 (482 at a read, 18 by sweep) |
+| `Set` with a loader, this version | 1.000 s | Deadline 496; invalidation 4, from the lock write's push after the mark began |
+| Tracked read, then `ForceSet`, this version | 119 µs | Invalidation, 500 of 500 (497 in flight, 3 after the reply) |
+
+Arming tracking before the write is being evaluated; its safety is not yet proven.
+
+**`NOLOOP` and `SendToReplicas` give no read-your-writes guarantee**, on
+standalone or cluster. With `NOLOOP`, Redis sends this `Conn` no invalidation
+for its own writes, so its marks end only at the one-second deadline. A key
+this `Conn` had cached locally before a `Set*`, `ForceSet*`, or `Del*` keeps
+the pre-write value in the local cache, and a read more than one second after
+the write returns that value until the local entry's TTL expires or another
+client's write invalidates it. With `SendToReplicas`, the direct GET a mark
+causes can go to a replica that has not yet applied the write, so even a read
+inside the mark can return the pre-write value.
+
+**Other connections without the barrier read** keep a residual: cluster,
+Sentinel, a custom `ClientBuilder`, and standalone settings that change
+tracking or routing (`BCAST`, `OPTOUT`, `DisableAutoPipelining`,
+`ConnLifetime`, redirects). Their marks end when an invalidation arrives or the
+deadline passes. A read that began before a write
+can refill an older value after that write's invalidation. That invalidation
+can then end a later write's mark, and the older value stays visible until the
+later invalidation arrives. This takes a delayed read and two close writes,
+from concurrent writers or from one writer's back-to-back calls. Cluster is
+supported with this residual. A second `Conn`, even in the same process, is
+eventually consistent and sees the write when its own invalidation arrives.
+
 ```go
 conn, err := redcache.Open(
     rueidis.ClientOption{InitAddress: []string{"127.0.0.1:6379"}},

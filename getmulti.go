@@ -243,7 +243,7 @@ func (rca *cacheAside) tryGetMulti(
 	needRefreshP *[]string,
 	owned entryOwner,
 ) ([]rueidis.RedisResult, map[string]string, error) {
-	resps, err := rca.readMultiCache(ctx, ttl, keys)
+	resps, bypassed, err := rca.readMultiCache(ctx, ttl, keys, needRefreshP != nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -254,10 +254,16 @@ func (rca *cacheAside) tryGetMulti(
 	}
 	var needRefreshExpected map[string]string
 	for i, key := range keys {
+		var pttl int64
+		if needRefreshP != nil {
+			pttl = bypassed.at(i).ttl(resps[i])
+		}
 		needRefresh, needRefreshExpected = rca.collectGetMultiResponse(
 			ttl,
 			key,
 			resps[i],
+			bypassed.at(i),
+			pttl,
 			res,
 			needRefresh,
 			needRefreshExpected,
@@ -271,37 +277,103 @@ func (rca *cacheAside) tryGetMulti(
 	return resps, needRefreshExpected, nil
 }
 
-// On success, readMultiCache returns replies decodable as strings and Redis nil replies.
-func (rca *cacheAside) readMultiCache(ctx context.Context, ttl time.Duration, keys []string) ([]rueidis.RedisResult, error) {
-	multiP := cacheableTTLPool.Get(len(keys))
-	defer cacheableTTLPool.Put(multiP)
-	multi := *multiP
-	for i, key := range keys {
-		multi[i] = rueidis.CacheableTTL{
-			Cmd: rca.client.B().Get().Key(key).Cache(),
-			TTL: ttl,
-		}
+// bypassedKeys is nil when all replies come from the ordinary cached path.
+type bypassedKeys []bypassRead
+
+func (b bypassedKeys) has(i int) bool { return b.at(i).bypassed }
+
+func (b bypassedKeys) at(i int) bypassRead {
+	if b == nil {
+		return bypassRead{}
 	}
-	resps := rca.client.DoMultiCache(ctx, multi...)
+	return b[i]
+}
+
+// On success, readMultiCache returns replies decodable as strings and Redis nil replies.
+func (rca *cacheAside) readMultiCache(ctx context.Context, ttl time.Duration, keys []string, refreshTTL bool) ([]rueidis.RedisResult, bypassedKeys, error) {
+	resps, bypassed := rca.readMulti(ctx, ttl, keys, refreshTTL)
 	if len(resps) != len(keys) {
-		return nil, fmt.Errorf("cached read: response/key length mismatch: %d resps vs %d keys", len(resps), len(keys))
+		return nil, nil, fmt.Errorf("cached read: response/key length mismatch: %d resps vs %d keys", len(resps), len(keys))
 	}
 
 	var aborted []int
 	// A terminal error in the cached batch precludes retrying any key.
 	for i, resp := range resps {
 		_, err := resp.ToString()
-		if rca.shouldRetryCachedRead(err) {
+		if !bypassed.has(i) && rca.shouldRetryCachedRead(err) {
 			aborted = append(aborted, i)
 		} else if err != nil && !rueidis.IsRedisNil(err) {
 			rca.emitRedisError("read")
-			return nil, fmt.Errorf("read key %q: %w", keys[i], err)
+			return nil, nil, fmt.Errorf("read key %q: %w", keys[i], err)
 		}
 	}
 	if len(aborted) != 0 {
-		return resps, rca.retryAbortedReads(ctx, keys, aborted, resps)
+		return resps, bypassed, rca.retryAbortedReads(ctx, keys, aborted, resps)
 	}
-	return resps, nil
+	return resps, bypassed, nil
+}
+
+func (rca *cacheAside) readMulti(ctx context.Context, ttl time.Duration, keys []string, refreshTTL bool) ([]rueidis.RedisResult, bypassedKeys) {
+	multiP := cacheableTTLPool.Get(len(keys))
+	defer cacheableTTLPool.Put(multiP)
+	multi := *multiP
+	var bypassed bypassedKeys
+	var plain []string
+	checkMarks := rca.writeMarks.active.Load()
+	cached := 0
+	for i, key := range keys {
+		if checkMarks && rca.writeMarks.bypass(key) {
+			if bypassed == nil {
+				bypassed = make(bypassedKeys, len(keys))
+			}
+			bypassed[i].bypassed = true
+			plain = append(plain, key)
+			continue
+		}
+		multi[cached] = rueidis.CacheableTTL{
+			Cmd: rca.client.B().Get().Key(key).Cache(),
+			TTL: ttl,
+		}
+		cached++
+	}
+	if cached == len(keys) {
+		return rca.client.DoMultiCache(ctx, multi...), nil
+	}
+	plainReplies, reads := rca.bypassReads(ctx, plain, refreshTTL)
+	if cached == 0 {
+		return plainReplies, reads
+	}
+	bypassed.setReads(reads)
+	cacheReplies := rca.client.DoMultiCache(ctx, multi[:cached]...)
+	return mergeMultiReads(cacheReplies, plainReplies, bypassed, cached), bypassed
+}
+
+func (b bypassedKeys) setReads(reads []bypassRead) {
+	if reads == nil {
+		return
+	}
+	plain := 0
+	for i := range b {
+		if b.has(i) {
+			b[i] = reads[plain]
+			plain++
+		}
+	}
+}
+
+func mergeMultiReads(cached, plain []rueidis.RedisResult, bypassed bypassedKeys, wantCached int) []rueidis.RedisResult {
+	if len(cached) != wantCached || len(plain) != len(bypassed)-wantCached {
+		return nil
+	}
+	resps := make([]rueidis.RedisResult, len(bypassed))
+	for i := range bypassed {
+		if bypassed.has(i) {
+			resps[i], plain = plain[0], plain[1:]
+		} else {
+			resps[i], cached = cached[0], cached[1:]
+		}
+	}
+	return resps
 }
 
 func (rca *cacheAside) retryAbortedReads(ctx context.Context, keys []string, aborted []int, resps []rueidis.RedisResult) error {
@@ -328,6 +400,8 @@ func (rca *cacheAside) collectGetMultiResponse(
 	ttl time.Duration,
 	key string,
 	resp rueidis.RedisResult,
+	read bypassRead,
+	pttl int64,
 	res map[string]string,
 	needRefresh []string,
 	needRefreshExpected map[string]string,
@@ -335,7 +409,7 @@ func (rca *cacheAside) collectGetMultiResponse(
 	owned entryOwner,
 ) ([]string, map[string]string) {
 	val, err := resp.ToString()
-	owned.rememberRead(key, resp)
+	owned.rememberRead(key, resp, read)
 	if rueidis.IsRedisNil(err) {
 		return needRefresh, needRefreshExpected
 	}
@@ -346,7 +420,7 @@ func (rca *cacheAside) collectGetMultiResponse(
 	rca.releaseUntracked(owned, key)
 	plain, delta := unwrapEnvelope(val)
 	res[key] = plain
-	if rca.refreshAfter == 0 || !rca.shouldRefresh(resp.CachePTTL(), ttl, delta) {
+	if !rca.shouldRefresh(pttl, ttl, delta) {
 		return needRefresh, needRefreshExpected
 	}
 	if needRefreshExpected == nil {
@@ -523,7 +597,10 @@ func (rca *cacheAside) setMultiWithLock(ctx context.Context, ttl time.Duration, 
 	})
 	var succeeded []string
 	var firstErr error
-	for i, resp := range setKeyLua.ExecMulti(ctx, rca.client, execs...) {
+	mark := rca.writeMarks.begin(keys, time.Now(), writeMarkCap)
+	resps := setKeyLua.ExecMulti(ctx, rca.client, execs...)
+	rca.writeMarks.finish(keys, mark, time.Now(), successfulReplies(resps, casWrote))
+	for i, resp := range resps {
 		ok, err := rca.inspectSetResponse(keys[i], resp)
 		if err != nil && firstErr == nil {
 			firstErr = err
