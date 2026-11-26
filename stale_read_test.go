@@ -444,6 +444,12 @@ func TestReadBarrierIneligibleConnections(t *testing.T) {
 		{name: "cache disabled", opt: rueidis.ClientOption{DisableCache: true}},
 		{name: "pipelining disabled", opt: rueidis.ClientOption{DisableAutoPipelining: true}},
 		{name: "pooled GET", opt: rueidis.ClientOption{BlockingPipeline: 2}},
+		// rueidis retries an expiring pipe's commands on a new one, which can
+		// move the barrier GET off the pipe that delivered the push.
+		{name: "ConnLifetime", opt: rueidis.ClientOption{ConnLifetime: time.Hour}},
+		// Replica routing has no proven tracking. Routing nothing to a replica
+		// still disables the barrier, because the option alone decides it.
+		{name: "SendToReplicas", opt: rueidis.ClientOption{SendToReplicas: func(rueidis.Completed) bool { return false }}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -461,6 +467,31 @@ func TestReadBarrierIneligibleConnections(t *testing.T) {
 			return rueidis.NewClient(opt)
 		})
 		cache, conn := makeClient(t, addr, builder)
+		assertNoReadBarrier(t, cache, conn)
+	})
+	// A redirect can serve the GET from a node other than the tracking one.
+	// Redis 7.2 rejects the CLIENT CAPA redirect that rueidis sends when the
+	// connection opens, so check the option against default tracking.
+	t.Run("EnableRedirect", func(t *testing.T) {
+		require.True(t, redcache.ReadBarrierForOptionsForTest(rueidis.ClientOption{}))
+		require.False(t, redcache.ReadBarrierForOptionsForTest(rueidis.ClientOption{Standalone: rueidis.StandaloneOption{EnableRedirect: true}}))
+	})
+	// A cluster reply hides the serving pipe, and a slot can move between
+	// live pipes without a reset.
+	t.Run("cluster", func(t *testing.T) {
+		cache, conn := makeClusterClient(t)
+		// Dial every primary first. A write that dials its node changes the
+		// wire stamp, which alone would deny that mark a barrier.
+		keys := clusterKeys(t)
+		requireSpansPrimaries(t, conn, keys)
+		raw := conn.Client()
+		gets := make(rueidis.Commands, 0, len(keys))
+		for _, key := range keys {
+			gets = append(gets, raw.B().Get().Key(key).Build())
+		}
+		for _, reply := range raw.DoMulti(t.Context(), gets...) {
+			require.True(t, rueidis.IsRedisNil(reply.Error()), "warm-up GET: %v", reply.Error())
+		}
 		assertNoReadBarrier(t, cache, conn)
 	})
 }

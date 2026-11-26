@@ -118,6 +118,13 @@ func DisableReadBarrierForTest(conn *Conn) {
 	marks.pipeLimit = 0
 }
 
+// ReadBarrierForOptionsForTest reports whether a standalone Conn opened with
+// opt would get the read barrier, for options a test server cannot accept.
+func ReadBarrierForOptionsForTest(opt rueidis.ClientOption) bool {
+	rca := &cacheAside{trackBypasses: canTrackBypasses(opt), poolCutoff: rueidis.DefaultBlockingPipeline}
+	return rca.readBarrierPipeLimit(opt, config{}) != 0
+}
+
 func HasWaitEntryForTest(conn *Conn, key string) bool {
 	_, ok := conn.core.(*cacheAside).locks.Load(key)
 	return ok
