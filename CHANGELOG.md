@@ -18,13 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalidation no longer ends a mark there. Each fill or write now costs one
   direct GET for its next read. If the invalidation arrives after the
   deadline, every local hit returns the older entry until it arrives.
-- Connections without that GET (cluster, Sentinel, a custom `ClientBuilder`,
-  and settings that suppress or redirect invalidations, such as `NOLOOP`,
-  `BCAST`, `OPTOUT`, and replica routing) still end a mark on invalidation or
-  the deadline. `DisableCache` and RESP2 have no marks. A delayed read can
-  refill an older value between two close writes, from concurrent writers or
-  from one writer's back-to-back writes, and an earlier write's invalidation
-  can end the later mark. Cluster is supported with this residual.
+- `NOLOOP` and `SendToReplicas` give no read-your-writes guarantee. With
+  `NOLOOP` this `Conn` receives no invalidation for its own write, so a key it
+  had cached locally returns the pre-write value from one second after the
+  write until the local entry's TTL. With `SendToReplicas` the direct GET can
+  reach a replica that has not applied the write.
+- Other connections without that GET (cluster, Sentinel, a custom
+  `ClientBuilder`, and settings that change tracking or routing, such as
+  `BCAST` and `OPTOUT`) still end a mark on invalidation or the deadline.
+  `DisableCache` and RESP2 have no marks. A delayed read can refill an older
+  value between two close writes, from concurrent writers or from one writer's
+  back-to-back writes, and an earlier write's invalidation can end the later
+  mark. Cluster is supported with this residual.
 - Cluster is supported. A mark ends when an invalidation push for the key
   arrives or at the one-second deadline, whichever comes first. A read-through
   fill and every `Set*` take a lock by writing the key. That lock write uses up

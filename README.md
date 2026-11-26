@@ -383,6 +383,7 @@ write completes.
 | Sentinel | Direct Redis GETs until invalidation or the one-second deadline. | Direct Redis GETs until invalidation or the one-second deadline. |
 | Custom `ClientBuilder` | Direct Redis GETs until invalidation or the one-second deadline. | Direct Redis GETs until invalidation or the one-second deadline. |
 | Explicit `DisableCache` or RESP2 | Ordinary Redis reads with no marks. | Ordinary Redis reads with no marks. |
+| `NOLOOP` or `SendToReplicas` | No read-your-writes guarantee; see below. | No read-your-writes guarantee; see below. |
 
 **Standalone with default tracking** promises read-your-writes on a `Conn`
 while the mark is live. The read that ends the mark is sent on the connection
@@ -423,11 +424,21 @@ baseline is main at 4cc10985, which has no marks.
 
 Arming tracking before the write is being evaluated; its safety is not yet proven.
 
-**Connections without the barrier read** keep a residual: cluster, Sentinel, a
-custom `ClientBuilder`, and standalone settings that suppress or redirect
-invalidations (`NOLOOP`, `BCAST`, `OPTOUT`, replica routing,
-`DisableAutoPipelining`, `ConnLifetime`, redirects). Their marks end when an
-invalidation arrives or the deadline passes. A read that began before a write
+**`NOLOOP` and `SendToReplicas` give no read-your-writes guarantee**, on
+standalone or cluster. With `NOLOOP`, Redis sends this `Conn` no invalidation
+for its own writes, so its marks end only at the one-second deadline. A key
+this `Conn` had cached locally before a `Set*`, `ForceSet*`, or `Del*` keeps
+the pre-write value in the local cache, and a read more than one second after
+the write returns that value until the local entry's TTL expires or another
+client's write invalidates it. With `SendToReplicas`, the direct GET a mark
+causes can go to a replica that has not yet applied the write, so even a read
+inside the mark can return the pre-write value.
+
+**Other connections without the barrier read** keep a residual: cluster,
+Sentinel, a custom `ClientBuilder`, and standalone settings that change
+tracking or routing (`BCAST`, `OPTOUT`, `DisableAutoPipelining`,
+`ConnLifetime`, redirects). Their marks end when an invalidation arrives or the
+deadline passes. A read that began before a write
 can refill an older value after that write's invalidation. That invalidation
 can then end a later write's mark, and the older value stays visible until the
 later invalidation arrives. This takes a delayed read and two close writes,
