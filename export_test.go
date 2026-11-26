@@ -55,6 +55,8 @@ func WrapClientForTest(conn *Conn, wrap func(rueidis.Client) rueidis.Client) {
 	engine.client = wrap(engine.client)
 }
 
+const WriteMarkTTLForTest = writeMarkTTL
+
 type WriteMarkCountsForTest struct {
 	Invalidated int64
 	Barrier     int64

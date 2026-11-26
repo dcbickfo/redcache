@@ -60,7 +60,7 @@ func TestReadBarrierAfterFill(t *testing.T) {
 func checkReadYourWrites(t *testing.T, cache *redcache.Cache, conn *redcache.Conn, paths *readPathCounts) {
 	t.Helper()
 	const workers, iterations, nkeys = 4, 5000, 64
-	var reads, stale atomic.Int64
+	var reads, stale, expirable atomic.Int64
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Go(func() {
@@ -70,11 +70,29 @@ func checkReadYourWrites(t *testing.T, cache *redcache.Cache, conn *redcache.Con
 				keys[i] = "stale-read:" + uuid.New().String()
 			}
 
+			// Each write's mark ends by this iteration's read reply: the
+			// barrier, or the write's push queued ahead of it on the same pipe.
+			// The first write's keys are untracked, so its mark can last until
+			// the second write replaces it. The deadline can end a mark only
+			// inside a span that outlasts it, so count the marks such spans
+			// hold instead of reading the clock in the assertion.
+			spanStart := time.Now()
 			for i := range iterations {
 				if err := runStaleReadIteration(ctx, cache, keys, i, &reads, &stale); err != nil {
 					t.Error(err)
 					return
 				}
+				if i == 0 {
+					continue
+				}
+				if time.Since(spanStart) >= redcache.WriteMarkTTLForTest {
+					marks := int64(nkeys)
+					if i == 1 {
+						marks *= 2
+					}
+					expirable.Add(marks)
+				}
+				spanStart = time.Now()
 			}
 			// Keep the measured workload at one read per key-write. Once it
 			// ends, read again to prove that the local cache is being reused.
@@ -93,8 +111,8 @@ func checkReadYourWrites(t *testing.T, cache *redcache.Cache, conn *redcache.Con
 	// key that stays marked across many writes cannot inflate the share.
 	cleared := stats.Invalidated + stats.Barrier
 	total := max(int64(workers*iterations*nkeys), cleared+stats.Expired+stats.AtCap+stats.Reset+stats.Live)
-	t.Logf("reads=%d stale=%d cache_hits=%d bypass_reads=%d invalidated=%d barrier=%d expired=%d cap=%d reset=%d live=%d",
-		reads.Load(), stale.Load(), paths.CacheHits.Load(), paths.Bypasses.Load(), stats.Invalidated, stats.Barrier, stats.Expired, stats.AtCap, stats.Reset, stats.Live)
+	t.Logf("reads=%d stale=%d cache_hits=%d bypass_reads=%d invalidated=%d barrier=%d expired=%d cap=%d reset=%d live=%d expirable=%d",
+		reads.Load(), stale.Load(), paths.CacheHits.Load(), paths.Bypasses.Load(), stats.Invalidated, stats.Barrier, stats.Expired, stats.AtCap, stats.Reset, stats.Live, expirable.Load())
 	require.EqualValues(t, workers*iterations*nkeys, reads.Load())
 	if stale.Load() != 0 {
 		t.Errorf("read %d stale values after acknowledged writes", stale.Load())
@@ -103,7 +121,10 @@ func checkReadYourWrites(t *testing.T, cache *redcache.Cache, conn *redcache.Con
 		t.Error("expected plain bypass reads")
 	}
 	require.Positive(t, paths.CacheHits.Load(), "reads must return to rueidis's local cache")
-	require.Zero(t, stats.Expired, "the workload must clear marks before the deadline")
+	// A paused or loaded process can stretch a span past the deadline, and
+	// those marks may then expire. Any other expiry means a mark missed its
+	// push or barrier.
+	require.LessOrEqual(t, stats.Expired, expirable.Load(), "marks expired outside spans that outlasted the deadline")
 	if 100*cleared < 99*total {
 		t.Errorf("expected invalidations and barriers to end at least 99%% of marks, got %d/%d", cleared, total)
 	}
