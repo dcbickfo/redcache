@@ -393,8 +393,8 @@ because it can belong to an earlier write, by this `Conn` or another client, and
 the invalidation for a `Conn`'s own write follows its reply. Concurrent first
 reads can each issue a GET before the first reply ends the mark. Pool routing,
 an error reply, or a reconnect leaves the deadline in effect. If a write's
-invalidation arrives after the one-second deadline, the mark has expired and
-the cache can serve the older entry once, until the invalidation evicts it.
+invalidation arrives after the one-second deadline, the mark has expired, and
+every local hit returns the older entry until that invalidation evicts it.
 
 **Cluster** is supported. A mark ends when an invalidation push for the key
 arrives or at the one-second deadline, whichever comes first. A read-through

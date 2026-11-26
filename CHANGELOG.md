@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalidation. A missing-key reply after `Del` or `DelMulti` also ends it. An
   invalidation no longer ends a mark there. Each fill or write now costs one
   direct GET for its next read. If the invalidation arrives after the
-  deadline, the cache can serve the older entry once until it arrives.
+  deadline, every local hit returns the older entry until it arrives.
 - Connections without that GET (cluster, Sentinel, a custom `ClientBuilder`,
   and settings that suppress or redirect invalidations, such as `NOLOOP`,
   `BCAST`, `OPTOUT`, and replica routing) still end a mark on invalidation or
